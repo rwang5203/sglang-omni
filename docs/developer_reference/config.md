@@ -123,6 +123,22 @@ Derived from stages:
 | `endpoints` | `EndpointsConfig` | IPC defaults | Endpoint allocation settings. `base_path` controls where Unix-domain sockets are created. |
 | `terminal_stages_fn` | `str` or `None` | `None` | Dotted function path for request-aware terminal-stage resolution. The function receives the normalized `OmniRequest` and returns terminal stage names for that request, or `None` to use static terminals. |
 | `config_cls` | `str` or `None` | class name | Stored automatically and used when loading a saved config file. |
+| `max_stage_transitions` | `int` or `None` | `None` | Positive upper bound on inter-stage hops for a pipeline with an explicitly declared feedback cycle. Leave unset for an acyclic pipeline. |
+| `stream_queue_maxsize` | `int` | `256` | Maximum stream chunks buffered per client request before that request is failed and aborted. |
+
+## Bounded feedback pipelines
+
+Static cycles are rejected unless `max_stage_transitions` is set. The bound counts edges after the entry stage, so `3` permits four stage visits including the entry visit. Feedback pipelines currently require single-target routing at runtime, reject self-loops and fan-in, and require every cyclic component to have a declared path to a terminal stage. A stage with multiple static `next` targets must use `route_fn` to choose exactly one of them for each result. Any streaming stage in a feedback component must also define `stream_done_to_fn`. The default end-of-stream behavior would otherwise close the receiver on the first hop.
+
+The runtime carries the transition count, a capped route trace, and per-stream edge positions in `StagePayload`. These fields are runtime-owned. Projection functions may replace model data, but must preserve the request id and return a `StagePayload`. Stages validate the state at every visit and fail the request before sending a hop beyond the configured bound.
+
+For interleaved output, route text or media chunks to a dedicated output stage through `stream_to`. Keep that receiver open across feedback hops by returning no target from `stream_done_to_fn` on intermediate results. Return the output stage only on the final result. Declare the same output stage as the terminal normal-route target so it can finalize the response after the last stream-done signal. Repeated visits preserve monotonically increasing chunk ids for each source-to-target stream edge.
+
+## Client stream buffering
+
+Client stream buffering is bounded per request by `stream_queue_maxsize`. Terminal messages have separate bounded capacity and do not count toward the chunk quota. If a client does not consume quickly enough, the coordinator fails and aborts only that request instead of blocking the shared completion loop.
+
+## Derived pipeline values
 
 Derived values are computed from stages, not manually maintained:
 

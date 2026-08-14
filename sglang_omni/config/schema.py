@@ -307,6 +307,10 @@ class PipelineConfig(BaseModel):
     endpoints: EndpointsConfig = Field(default_factory=EndpointsConfig)
     terminal_stages_fn: str | None = None
     config_cls: str | None = None
+    max_stage_transitions: int | None = Field(
+        default=None, ge=1, le=10_000, strict=True
+    )
+    stream_queue_maxsize: int = Field(default=256, ge=1, le=100_000, strict=True)
 
     def model_post_init(self, __context: Any = None) -> None:
         self._validate_general()
@@ -498,6 +502,8 @@ class PipelineConfig(BaseModel):
                     f"runtime_overrides references unknown stage {stage_name!r}"
                 )
 
+        self._validate_feedback_graph()
+
         missing_process = [
             s.name for s in self.stages if s.tp_size == 1 and not s.process
         ]
@@ -506,6 +512,72 @@ class PipelineConfig(BaseModel):
                 "Non-TP stages must declare process; "
                 f"missing process for {missing_process}"
             )
+
+    def _validate_feedback_graph(self) -> None:
+        """Reject accidental cycles and bound explicitly enabled feedback."""
+        stage_by_name = {stage.name: stage for stage in self.stages}
+        graph = {stage.name: _target_list(stage.next) for stage in self.stages}
+        cyclic_components = _cyclic_components(graph)
+        if not cyclic_components:
+            if self.max_stage_transitions is not None:
+                raise ValueError(
+                    "max_stage_transitions is only valid for feedback pipelines"
+                )
+            return
+        formatted = ", ".join(
+            "[" + ", ".join(sorted(component)) + "]" for component in cyclic_components
+        )
+        if self.max_stage_transitions is None:
+            raise ValueError(
+                "Pipeline contains feedback cycle(s) "
+                f"{formatted}. Set max_stage_transitions to an explicit bound"
+            )
+        feedback_stages = set().union(*cyclic_components)
+        fan_in = sorted(stage.name for stage in self.stages if stage.wait_for)
+        if fan_in:
+            raise ValueError(
+                "Feedback pipelines cannot contain fan-in stages. Got " f"{fan_in}"
+            )
+        static_fan_out = sorted(
+            stage.name
+            for stage in self.stages
+            if len(graph[stage.name]) > 1 and stage.route_fn is None
+        )
+        if static_fan_out:
+            raise ValueError(
+                "Feedback pipeline fan-out must use route_fn to select one "
+                f"target. Got {static_fan_out}"
+            )
+        implicit_stream_end = sorted(
+            stage.name
+            for stage in self.stages
+            if stage.name in feedback_stages
+            and stage.stream_to
+            and stage.stream_done_to_fn is None
+        )
+        if implicit_stream_end:
+            raise ValueError(
+                "Feedback stages that stream must use stream_done_to_fn to "
+                "select the logical final hop. Got "
+                f"{implicit_stream_end}"
+            )
+        stream_edge_count = sum(len(stage.stream_to) for stage in self.stages)
+        if stream_edge_count > 128:
+            raise ValueError(
+                "Feedback pipelines support at most 128 configured stream "
+                f"edges. Got {stream_edge_count}"
+            )
+        for component in cyclic_components:
+            if len(component) == 1:
+                stage_name = next(iter(component))
+                raise ValueError(
+                    f"Self-loop feedback at stage {stage_name!r} is not supported"
+                )
+            if not _component_reaches_terminal(component, graph, stage_by_name):
+                raise ValueError(
+                    "Feedback component has no route to a terminal stage: "
+                    f"{sorted(component)}"
+                )
 
     def _validate_fusion(self) -> None:
         names = [s.name for s in self.stages]
@@ -584,6 +656,72 @@ def _target_list(targets: str | list[str] | None) -> list[str]:
     if isinstance(targets, str):
         return [targets]
     return list(targets)
+
+
+def _cyclic_components(graph: dict[str, list[str]]) -> list[set[str]]:
+    """Return cyclic SCCs without recursion-depth dependence."""
+    visited: set[str] = set()
+    finish_order: list[str] = []
+    for root in graph:
+        if root in visited:
+            continue
+        stack = [(root, False)]
+        while stack:
+            node, expanded = stack.pop()
+            if expanded:
+                finish_order.append(node)
+                continue
+            if node in visited:
+                continue
+            visited.add(node)
+            stack.append((node, True))
+            stack.extend(
+                (target, False)
+                for target in reversed(graph[node])
+                if target not in visited
+            )
+
+    reverse_graph = {node: [] for node in graph}
+    for source, targets in graph.items():
+        for target in targets:
+            reverse_graph[target].append(source)
+
+    assigned: set[str] = set()
+    components: list[set[str]] = []
+    for root in reversed(finish_order):
+        if root in assigned:
+            continue
+        component: set[str] = set()
+        stack = [root]
+        assigned.add(root)
+        while stack:
+            node = stack.pop()
+            component.add(node)
+            for source in reverse_graph[node]:
+                if source not in assigned:
+                    assigned.add(source)
+                    stack.append(source)
+        if len(component) > 1 or root in graph[root]:
+            components.append(component)
+    return components
+
+
+def _component_reaches_terminal(
+    component: set[str],
+    graph: dict[str, list[str]],
+    stage_by_name: dict[str, StageConfig],
+) -> bool:
+    pending = list(component)
+    seen = set(component)
+    while pending:
+        node = pending.pop()
+        if stage_by_name[node].terminal:
+            return True
+        for target in graph[node]:
+            if target not in seen:
+                seen.add(target)
+                pending.append(target)
+    return False
 
 
 def _stage_gpu_ids_for_fusion(stage: StageConfig) -> tuple[int, ...]:

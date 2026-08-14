@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Stage worker process specifications, entrypoints, and lifecycle groups."""
+
 from __future__ import annotations
 
 import asyncio
@@ -10,10 +11,10 @@ import os
 import queue
 import sys
 import time
-from collections.abc import Iterable
+from collections.abc import Iterable, Sequence
 from contextlib import contextmanager, suppress
 from dataclasses import dataclass, field
-from typing import Any, Literal, Sequence
+from typing import Any, Literal
 
 from sglang_omni.config.runtime import resolve_factory_signature_args
 from sglang_omni.pipeline.control_plane import StageControlPlane
@@ -64,6 +65,7 @@ class StageLaunchConfig:
     next_stages: str | list[str] | None = None
     route_fn: str | None = None
     is_terminal: bool = False
+    max_stage_transitions: int | None = None
 
     # Fan-in
     wait_for: list[str] | None = None
@@ -126,6 +128,22 @@ class StageWorkerProcessSpec:
 
     process_name: str
     stage_specs: list[StageLaunchConfig]
+
+
+def _read_startup_error(channel: Any, timeout_s: float | None = None) -> str | None:
+    try:
+        if timeout_s is None:
+            return channel.get_nowait()
+        return channel.get(timeout=timeout_s)
+    except queue.Empty:
+        return None
+
+
+def _startup_error(process_label: str, traceback_text: str) -> RuntimeError:
+    return RuntimeError(
+        f"Process {process_label} failed during startup"
+        f"\nStartup failure detail:\n{traceback_text}"
+    )
 
 
 def _get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
@@ -284,30 +302,27 @@ class StageGroup:
             startup_error_channel = self._startup_error_channels[i]
 
             while not event.is_set():
+                traceback_text = _read_startup_error(startup_error_channel)
+                if traceback_text is not None:
+                    raise _startup_error(process_label, traceback_text)
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
-                    details = ""
-                    try:
-                        traceback_text = startup_error_channel.get_nowait()
-                    except queue.Empty:
-                        pass
-                    else:
-                        details = f"\nStartup failure detail:\n{traceback_text}"
+                    traceback_text = _read_startup_error(startup_error_channel)
+                    if traceback_text is not None:
+                        raise _startup_error(process_label, traceback_text)
                     raise TimeoutError(
                         f"Process {process_label} did not become ready "
-                        f"within {timeout:.0f}s{details}"
+                        f"within {timeout:.0f}s"
                     )
                 if not proc.is_alive():
-                    details = ""
-                    try:
-                        traceback_text = startup_error_channel.get(timeout=0.2)
-                    except queue.Empty:
-                        pass
-                    else:
-                        details = f"\nStartup failure detail:\n{traceback_text}"
+                    traceback_text = _read_startup_error(
+                        startup_error_channel, timeout_s=0.2
+                    )
+                    if traceback_text is not None:
+                        raise _startup_error(process_label, traceback_text)
                     raise RuntimeError(
                         f"Process {process_label} died during startup "
-                        f"(exit code {proc.exitcode}){details}"
+                        f"(exit code {proc.exitcode})"
                     )
                 await loop.run_in_executor(None, event.wait, min(remaining, 1.0))
 
@@ -340,25 +355,68 @@ class StageGroup:
                 _close_queue(q)
 
     async def shutdown(self, join_timeout: float = 30.0) -> None:
-        try:
-            for p in self._processes:
-                p.join(timeout=join_timeout)
+        async def _shutdown_process(p: multiprocessing.Process) -> None:
+            try:
+                await asyncio.to_thread(p.join, timeout=join_timeout)
+            except Exception:
+                logger.warning(
+                    "Initial join failed for process %s (pid=%s)",
+                    p.name,
+                    p.pid,
+                    exc_info=True,
+                )
+            if not p.is_alive():
+                return
+            logger.warning(
+                "Terminating stuck process %s (pid=%s)",
+                p.name,
+                p.pid,
+            )
+            try:
+                p.terminate()
+                await asyncio.to_thread(p.join, timeout=5)
+            finally:
                 if p.is_alive():
+                    p.kill()
+                    await asyncio.to_thread(p.join, timeout=2)
+
+        async def _shutdown_all() -> None:
+            results = await asyncio.gather(
+                *(_shutdown_process(p) for p in self._processes),
+                return_exceptions=True,
+            )
+            for process, result in zip(self._processes, results):
+                if isinstance(result, BaseException):
                     logger.warning(
-                        "Terminating stuck process %s (pid=%s)",
-                        p.name,
-                        p.pid,
+                        "Failed to stop process %s (pid=%s): %s",
+                        process.name,
+                        process.pid,
+                        result,
                     )
-                    p.terminate()
-                    p.join(timeout=5)
-                    if p.is_alive():
-                        p.kill()
-                        p.join(timeout=2)
+
+        shutdown_task = asyncio.create_task(_shutdown_all())
+        cancellation: asyncio.CancelledError | None = None
+        try:
+            while not shutdown_task.done():
+                try:
+                    await asyncio.shield(shutdown_task)
+                except asyncio.CancelledError as exc:
+                    cancellation = exc
         finally:
-            self.close_control_channels()
-            self._processes.clear()
-            self._ready_events.clear()
-            self._startup_error_channels.clear()
+            try:
+                self.close_control_channels()
+            except Exception:
+                logger.warning(
+                    "Failed to close StageGroup %s control channels",
+                    self.group_name,
+                    exc_info=True,
+                )
+            finally:
+                self._processes.clear()
+                self._ready_events.clear()
+                self._startup_error_channels.clear()
+        if cancellation is not None:
+            raise cancellation
 
 
 def stage_process_main(
@@ -761,6 +819,7 @@ def _construct_stage(
         disable_direct_cuda_ipc_payload=spec.disable_direct_cuda_ipc_payload,
         tp_fanout=tp_fanout,
         is_terminal=spec.is_terminal,
+        max_stage_transitions=spec.max_stage_transitions,
     )
 
     if spec.is_stream_receiver:

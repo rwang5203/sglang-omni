@@ -57,6 +57,10 @@ The important invariant is that `Stage` does not branch on scheduler type.
 `SimpleScheduler`, `OmniScheduler`, and streaming schedulers all present the
 same surface.
 
+An explicitly bounded feedback pipeline may revisit a stage for one logical request. `Stage` validates and advances runtime-owned transition state before each downstream send, while schedulers release per-visit state normally. This mechanism supplies a safe routing primitive. Model-specific boundary state, generation context, and modality capabilities remain typed data owned by the model package. See the bounded-feedback section in the configuration reference for topology and streaming constraints.
+
+The Coordinator assigns a fresh opaque execution id to every admission and uses it for transport, scheduler ownership, and profiling, while API callers continue to use their supplied request id. `StagePayload.request_id` carries the execution id and `StagePayload.public_request_id` carries the caller id. Request-aware configuration callbacks continue to receive the caller id. Completion and stream messages are remapped at the Coordinator boundary. This prevents a delayed event from an aborted or ambiguously submitted execution from resolving a later request that reuses the same public id. Coordinator profiling metadata also includes `public_request_id`.
+
 ### Scheduler
 
 All schedulers implement the same interface:

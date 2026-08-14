@@ -86,6 +86,166 @@ def test_pipeline_schema_keeps_topology_and_validation_contracts() -> None:
         )
 
 
+def test_feedback_graph_requires_explicit_bound_and_terminal_escape() -> None:
+    stages = [
+        stage(
+            "ar",
+            next=["media", "done"],
+            route_fn=fake_factory_path("identity_route"),
+        ),
+        stage("media", next="ar"),
+        stage("done", terminal=True),
+    ]
+
+    with pytest.raises(ValueError, match="feedback cycle.*max_stage_transitions"):
+        PipelineConfig(model_path="model", stages=stages)
+
+    config = PipelineConfig(
+        model_path="model",
+        stages=stages,
+        max_stage_transitions=8,
+    )
+    assert config.max_stage_transitions == 8
+
+    for value in (True, 0, 10_001, 1.5, "8"):
+        with pytest.raises(ValueError):
+            PipelineConfig(
+                model_path="model",
+                stages=stages,
+                max_stage_transitions=value,
+            )
+
+
+def test_stream_queue_limit_is_strictly_bounded() -> None:
+    config = PipelineConfig(
+        model_path="model",
+        stages=[stage("done", terminal=True)],
+        stream_queue_maxsize=7,
+    )
+    assert config.stream_queue_maxsize == 7
+
+    for value in (True, 0, -1, 100_001, 1.5, "7"):
+        with pytest.raises(ValueError):
+            PipelineConfig(
+                model_path="model",
+                stages=[stage("done", terminal=True)],
+                stream_queue_maxsize=value,
+            )
+
+
+def test_feedback_graph_rejects_unsafe_shapes() -> None:
+    with pytest.raises(ValueError, match="only valid for feedback"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[stage("ar", next="done"), stage("done", terminal=True)],
+        )
+
+    with pytest.raises(ValueError, match="Self-loop feedback"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[
+                stage(
+                    "ar",
+                    next=["ar", "done"],
+                    route_fn=fake_factory_path("identity_route"),
+                ),
+                stage("done", terminal=True),
+            ],
+        )
+
+    with pytest.raises(ValueError, match="no route to a terminal"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[
+                stage("ar", next="media"),
+                stage("media", next="ar"),
+                stage("done", terminal=True),
+            ],
+        )
+
+    with pytest.raises(ValueError, match="cannot contain fan-in"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[
+                stage(
+                    "ar",
+                    next=["media", "done"],
+                    route_fn=fake_factory_path("identity_route"),
+                ),
+                stage(
+                    "media",
+                    next="ar",
+                    wait_for=["ar"],
+                    merge_fn=fake_factory_path("merge_payloads"),
+                ),
+                stage("done", terminal=True),
+            ],
+        )
+
+    with pytest.raises(ValueError, match="fan-out must use route_fn"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[
+                stage("ar", next=["media", "done"]),
+                stage("media", next="ar"),
+                stage("done", terminal=True),
+            ],
+        )
+
+    with pytest.raises(ValueError, match="stream_done_to_fn"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=4,
+            stages=[
+                stage(
+                    "ar",
+                    next=["media", "done"],
+                    route_fn=fake_factory_path("identity_route"),
+                    stream_to=["done"],
+                ),
+                stage("media", next="ar"),
+                stage("done", terminal=True),
+            ],
+        )
+
+    streaming_cycle = [
+        stage(
+            f"cycle_{index}",
+            next=(f"cycle_{index + 1}" if index < 128 else "cycle_0"),
+            stream_to=["done"],
+            stream_done_to_fn=fake_factory_path("identity_stream_targets"),
+        )
+        for index in range(129)
+    ]
+    streaming_cycle.append(stage("done", terminal=True))
+    streaming_cycle[0].next = ["cycle_1", "done"]
+    streaming_cycle[0].route_fn = fake_factory_path("identity_route")
+    with pytest.raises(ValueError, match="at most 128 configured stream edges"):
+        PipelineConfig(
+            model_path="model",
+            max_stage_transitions=256,
+            stages=streaming_cycle,
+        )
+
+
+def test_feedback_graph_validation_does_not_depend_on_python_recursion() -> None:
+    stages = [
+        stage(
+            f"stage_{index}",
+            next=(f"stage_{index + 1}" if index < 1_099 else None),
+            terminal=index == 1_099,
+        )
+        for index in range(1_100)
+    ]
+    config = PipelineConfig(model_path="model", stages=stages)
+    assert len(config.stages) == 1_100
+
+
 def test_runner_specs_wire_routes_overrides_aggregation_and_streams(tmp_path) -> None:
     """Preserves config-to-runtime wiring for routes, overrides, fan-in, and streams."""
     config = PipelineConfig(
@@ -150,6 +310,40 @@ def test_runner_specs_wire_routes_overrides_aggregation_and_streams(tmp_path) ->
     assert specs["thinker"].factory_arg_defaults["model_path"] == "global-model"
     assert specs["thinker"].factory_args["model_path"] == "runtime-model"
     assert specs["thinker"].factory_args["extra"] == "rt"
+
+
+def test_runner_propagates_feedback_bound_to_every_stage(tmp_path) -> None:
+    config = PipelineConfig(
+        model_path="model",
+        endpoints=EndpointsConfig(base_path=str(tmp_path)),
+        max_stage_transitions=7,
+        stages=[
+            stage(
+                "ar",
+                next=["media", "done"],
+                route_fn=fake_factory_path("identity_route"),
+            ),
+            stage("media", next="ar"),
+            stage("done", terminal=True),
+        ],
+    )
+    prep = prepare_pipeline_runtime(config)
+    try:
+        groups = _build_stage_groups(
+            config,
+            ctx=FakeMpContext(),
+            stages_cfg=prep.stages_cfg,
+            name_map=prep.name_map,
+            endpoints=prep.endpoints,
+            placement_plan=prep.placement_plan,
+            process_plan=prep.process_plan,
+        )
+    finally:
+        assert prep.runtime_dir is not None
+        prep.runtime_dir.close()
+
+    specs = [spec for group in groups for spec in group.specs]
+    assert {spec.max_stage_transitions for spec in specs} == {7}
 
 
 def test_runner_specs_defer_factory_signature_import_to_child(

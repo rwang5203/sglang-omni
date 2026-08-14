@@ -1,5 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 """Adapters between stage objects and data-plane refs."""
+
 from __future__ import annotations
 
 import base64
@@ -150,6 +151,10 @@ def serialize_direct_cuda_ipc_payload(payload: StagePayload) -> dict[str, Any]:
         request_id=payload.request_id,
         request=payload.request,
         data=data_without_tensors,
+        route_transitions=payload.route_transitions,
+        route_trace=payload.route_trace,
+        stream_positions=payload.stream_positions,
+        public_request_id=payload.public_request_id,
     )
     header_bytes = pickle.dumps(header)
     return {
@@ -228,6 +233,10 @@ def deserialize_direct_cuda_ipc_payload(data_ref: dict[str, Any]) -> StagePayloa
         request_id=header.request_id,
         request=header.request,
         data=restore_tensors(header.data, tensors),
+        route_transitions=getattr(header, "route_transitions", 0),
+        route_trace=getattr(header, "route_trace", ()),
+        stream_positions=getattr(header, "stream_positions", {}),
+        public_request_id=getattr(header, "public_request_id", None),
     )
 
 
@@ -302,6 +311,10 @@ async def write_payload(
         request_id=payload.request_id,
         request=payload.request,
         data=data_without_tensors,
+        route_transitions=payload.route_transitions,
+        route_trace=payload.route_trace,
+        stream_positions=payload.stream_positions,
+        public_request_id=payload.public_request_id,
     )
     op = await relay.put_async(
         packed,
@@ -349,6 +362,10 @@ async def read_payload(
         request_id=header.request_id,
         request=header.request,
         data=restore_tensors(header.data, tensors),
+        route_transitions=getattr(header, "route_transitions", 0),
+        route_trace=getattr(header, "route_trace", ()),
+        stream_positions=getattr(header, "stream_positions", {}),
+        public_request_id=getattr(header, "public_request_id", None),
     )
 
 

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -65,24 +66,28 @@ class FaultInjectingCoordinator(Coordinator):
         request: OmniRequest | Any,
         *,
         stream_queue: asyncio.Queue[CompleteMessage | StreamMessage] | None = None,
-    ) -> None:
-        await super()._submit_request(
+    ) -> set[str]:
+        terminal_stages = await super()._submit_request(
             request_id,
             request,
             stream_queue=stream_queue,
         )
+        execution_id = self._execution_ids[request_id]
         if not isinstance(request, OmniRequest):
             request = OmniRequest(inputs=request)
         if bool(request.params.get("stream", False)):
-            await self._handle_stream(self._partial_stream_message(request_id, request))
+            await self._handle_stream(
+                self._partial_stream_message(execution_id, request)
+            )
         await self._handle_completion(
             CompleteMessage(
-                request_id=request_id,
+                request_id=execution_id,
                 from_stage=self.terminal_stage,
                 success=False,
                 error=self.error,
             )
         )
+        return terminal_stages
 
     def _partial_stream_message(
         self, request_id: str, request: OmniRequest
@@ -419,6 +424,12 @@ def _streaming_client(
     coordinator.control_plane = control_plane
     coordinator.register_stage("preprocess", "inproc://preprocess")
     return Client(coordinator), coordinator, control_plane
+
+
+async def _inject_stream(coordinator: Coordinator, message: StreamMessage) -> str:
+    execution_id = coordinator._execution_ids[message.request_id]
+    await coordinator._handle_stream(replace(message, request_id=execution_id))
+    return execution_id
 
 
 def _http_scope(*, path: str, spec_version: str) -> dict[str, Any]:
@@ -858,19 +869,20 @@ def test_chat_asgi_send_failure_aborts_backend_and_cleans_state() -> None:
             if request_id in coordinator._stream_queues:
                 break
             await asyncio.sleep(0)
-        await coordinator._handle_stream(
+        execution_id = await _inject_stream(
+            coordinator,
             StreamMessage(
                 request_id=request_id,
                 from_stage="decode",
                 chunk={"text": "hello", "modality": "text"},
                 modality="text",
-            )
+            ),
         )
 
         await body_ready.wait()
         with pytest.raises(RuntimeError, match="client vanished during body send"):
             await response_task
-        assert [msg.request_id for msg in control_plane.aborts] == [request_id]
+        assert [msg.request_id for msg in control_plane.aborts] == [execution_id]
         assert request_id not in coordinator._requests
         assert request_id not in coordinator._stream_queues
         assert request_id not in coordinator._completion_futures
@@ -929,13 +941,14 @@ def test_chat_asgi_receive_disconnect_aborts_backend_and_cleans_state() -> None:
             if request_id in coordinator._stream_queues:
                 break
             await asyncio.sleep(0)
-        await coordinator._handle_stream(
+        execution_id = await _inject_stream(
+            coordinator,
             StreamMessage(
                 request_id=request_id,
                 from_stage="decode",
                 chunk={"text": "hello", "modality": "text"},
                 modality="text",
-            )
+            ),
         )
 
         await first_body_sent.wait()
@@ -943,10 +956,10 @@ def test_chat_asgi_receive_disconnect_aborts_backend_and_cleans_state() -> None:
         await blocking_control_plane.abort_started.wait()
         await asyncio.wait_for(response_task, timeout=1)
 
-        assert [msg.request_id for msg in control_plane.aborts] == [request_id]
+        assert [msg.request_id for msg in control_plane.aborts] == [execution_id]
         assert blocking_control_plane.abort_cancelled is False
         abort_task = coordinator._abort_tasks[request_id]
-        assert request_id in coordinator._requests
+        assert request_id not in coordinator._requests
         assert request_id not in coordinator._stream_queues
         assert request_id not in coordinator._completion_futures
 
@@ -1008,12 +1021,13 @@ def test_chat_asgi_task_cancellation_aborts_backend_and_stays_cancelled() -> Non
             if request_id in coordinator._stream_queues:
                 break
             await asyncio.sleep(0)
+        execution_id = coordinator._execution_ids[request_id]
 
         response_task.cancel()
         with pytest.raises(asyncio.CancelledError):
             await response_task
 
-        assert [msg.request_id for msg in control_plane.aborts] == [request_id]
+        assert [msg.request_id for msg in control_plane.aborts] == [execution_id]
         assert request_id not in coordinator._requests
         assert request_id not in coordinator._stream_queues
         assert request_id not in coordinator._completion_futures
@@ -1034,18 +1048,19 @@ def test_client_completion_stream_close_reaches_coordinator_owner() -> None:
             if request_id in coordinator._stream_queues:
                 break
             await asyncio.sleep(0)
-        await coordinator._handle_stream(
+        execution_id = await _inject_stream(
+            coordinator,
             StreamMessage(
                 request_id=request_id,
                 from_stage="decode",
                 chunk={"text": "hello", "modality": "text"},
                 modality="text",
-            )
+            ),
         )
         await first_chunk
         await stream.aclose()
 
-        assert [msg.request_id for msg in control_plane.aborts] == [request_id]
+        assert [msg.request_id for msg in control_plane.aborts] == [execution_id]
         assert request_id not in coordinator._requests
         assert request_id not in coordinator._stream_queues
         assert request_id not in coordinator._completion_futures
@@ -1072,18 +1087,19 @@ def test_transcription_stream_close_reaches_coordinator_owner() -> None:
             if request_id in coordinator._stream_queues:
                 break
             await asyncio.sleep(0)
-        await coordinator._handle_stream(
+        execution_id = await _inject_stream(
+            coordinator,
             StreamMessage(
                 request_id=request_id,
                 from_stage="decode",
                 chunk={"text": "hello", "modality": "text"},
                 modality="text",
-            )
+            ),
         )
         await first_event
         await stream.aclose()
 
-        assert [msg.request_id for msg in control_plane.aborts] == [request_id]
+        assert [msg.request_id for msg in control_plane.aborts] == [execution_id]
         assert request_id not in coordinator._requests
         assert request_id not in coordinator._stream_queues
         assert request_id not in coordinator._completion_futures

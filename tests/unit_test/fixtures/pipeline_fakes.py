@@ -346,6 +346,7 @@ def make_stage_payload(
     data: Any | None = None,
     *,
     request_id: str = "req-1",
+    public_request_id: str | None = None,
     inputs: Any | None = None,
     params: dict[str, Any] | None = None,
 ) -> StagePayload:
@@ -356,6 +357,7 @@ def make_stage_payload(
             params=params or {},
         ),
         data={} if data is None else data,
+        public_request_id=public_request_id,
     )
 
 

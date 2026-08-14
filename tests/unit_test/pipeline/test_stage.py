@@ -18,7 +18,8 @@ from sglang_omni.pipeline.stage.input import AggregatedInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, _construct_stage
-from sglang_omni.proto import DataReadyMessage
+from sglang_omni.pipeline.tp_control import TPWorkMessage
+from sglang_omni.proto import DataReadyMessage, StagePayload, SubmitMessage
 from sglang_omni.scheduling import omni_scheduler as omni_scheduler_module
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from tests.unit_test.fixtures.pipeline_fakes import (
@@ -43,6 +44,86 @@ class _CloseAwareControlPlane(RecordingStageControlPlane):
         while not self.closed:
             await asyncio.sleep(0)
         raise RuntimeError("control plane closed")
+
+
+def test_stage_start_rolls_back_partial_communication_start() -> None:
+    async def _run() -> None:
+        class FailingComm:
+            def __init__(self) -> None:
+                self.started = False
+                self.closed = False
+
+            async def start(self) -> None:
+                self.started = True
+                raise RuntimeError("comm start failed")
+
+            async def close(self) -> None:
+                self.closed = True
+
+        control_plane = RecordingStageControlPlane()
+        scheduler = FakeScheduler()
+        stage_obj = make_stage(
+            control_plane=control_plane,
+            scheduler=scheduler,
+        )
+        comm = FailingComm()
+        stage_obj._comm = comm
+
+        with pytest.raises(RuntimeError, match="comm start failed"):
+            await stage_obj.start()
+
+        assert control_plane.started is True
+        assert control_plane.closed is True
+        assert comm.started is True
+        assert comm.closed is True
+        assert scheduler.stopped is True
+        assert stage_obj._running is False
+
+    asyncio.run(_run())
+
+
+def test_stage_payload_route_state_round_trip_and_validation() -> None:
+    payload = make_stage_payload(public_request_id="client-1")
+    payload.route_transitions = 2
+    payload.route_trace = ("ar", "media", "ar")
+
+    restored = StagePayload.from_dict(payload.to_dict())
+    assert restored.route_transitions == 2
+    assert restored.route_trace == ("ar", "media", "ar")
+    assert restored.public_request_id == "client-1"
+
+    payload.stream_positions = {"ar": {"output": 2}}
+    restored = StagePayload.from_dict(payload.to_dict())
+    assert restored.stream_positions == {"ar": {"output": 2}}
+
+    for invalid in ({"ar": {"output": True}}, {"": {"output": 1}}):
+        raw = payload.to_dict()
+        raw["stream_positions"] = invalid
+        with pytest.raises(TypeError):
+            StagePayload.from_dict(raw)
+
+    for invalid in (True, -1, 1.5, "2"):
+        raw = payload.to_dict()
+        raw["route_transitions"] = invalid
+        with pytest.raises((TypeError, ValueError)):
+            StagePayload.from_dict(raw)
+
+    for invalid in ("ar", ["ar", ""], ["ar", 1]):
+        raw = payload.to_dict()
+        raw["route_trace"] = invalid
+        with pytest.raises(TypeError):
+            StagePayload.from_dict(raw)
+
+    raw = payload.to_dict()
+    raw["route_trace"] = ["ar"]
+    with pytest.raises(ValueError, match="inconsistent"):
+        StagePayload.from_dict(raw)
+
+    for invalid in ("", True, 1):
+        raw = payload.to_dict()
+        raw["public_request_id"] = invalid
+        with pytest.raises(TypeError, match="public_request_id"):
+            StagePayload.from_dict(raw)
 
 
 def test_aggregated_input_waits_per_request_without_cross_talk() -> None:
@@ -90,6 +171,77 @@ def test_aggregated_input_supports_request_dynamic_source_sets() -> None:
         make_stage_payload(data={"expected": ["preprocess"]}),
     )
     assert text.data == {"sources": ["preprocess"]}
+
+
+def test_request_aware_fan_in_receives_public_request_id() -> None:
+    callback_ids = []
+
+    def _expected_sources(request_id, from_stage, payload):
+        del from_stage, payload
+        callback_ids.append(request_id)
+        return ["preprocess"]
+
+    handler = AggregatedInput(
+        {"preprocess"},
+        lambda payloads: payloads["preprocess"],
+        expected_sources_fn=_expected_sources,
+    )
+    payload = make_stage_payload(
+        request_id="execution-1",
+        public_request_id="client-1",
+    )
+
+    assert handler.receive("execution-1", "preprocess", payload) is payload
+    assert callback_ids == ["client-1"]
+
+
+def test_route_hooks_receive_public_id_and_payload_preserves_it() -> None:
+    async def _run() -> None:
+        dispatcher = LocalStageDispatcher()
+        receiver_scheduler = FakeScheduler()
+        receiver = make_stage(name="done", scheduler=receiver_scheduler)
+        callback_ids = []
+
+        def _route(request_id, output):
+            del output
+            callback_ids.append(("route", request_id))
+            return "done"
+
+        def _stream_done(request_id, output):
+            del output
+            callback_ids.append(("stream_done", request_id))
+            return None
+
+        sender = make_stage(
+            name="ar",
+            get_next=_route,
+            get_stream_done_targets=_stream_done,
+            endpoints={"done": "inproc://done"},
+            same_process_targets={"done"},
+            local_dispatcher=dispatcher,
+        )
+        dispatcher.register_many([sender, receiver])
+        execution_id = "execution-1"
+        initial = make_stage_payload(
+            request_id=execution_id,
+            public_request_id="client-1",
+        )
+        sender._active_requests.add(execution_id)
+        sender._record_public_request_id(execution_id, initial)
+
+        await sender._route_result(
+            execution_id,
+            make_stage_payload(request_id=execution_id),
+        )
+
+        queued = receiver_scheduler.inbox.get_nowait()
+        assert queued.data.public_request_id == "client-1"
+        assert callback_ids == [
+            ("route", "client-1"),
+            ("stream_done", "client-1"),
+        ]
+
+    asyncio.run(_run())
 
 
 def test_aggregated_input_rejects_dynamic_sources_outside_static_fanin() -> None:
@@ -152,6 +304,340 @@ def test_stage_routes_results_streams_and_clears_abort_state() -> None:
         assert relay.cleaned[-1] == "req-1"
         assert scheduler.aborted == ["req-1"]
         assert not stage_obj._stream_queue.has("req-1")
+
+    asyncio.run(_run())
+
+
+def test_tp_follower_drops_work_that_arrives_after_abort() -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        follower = make_stage(
+            name="thinker",
+            role="follower",
+            scheduler=scheduler,
+            max_stage_transitions=4,
+        )
+        payload = make_stage_payload()
+        payload.route_trace = ("thinker",)
+        follower._on_abort(payload.request_id)
+
+        await follower._on_tp_work(
+            TPWorkMessage(request_id=payload.request_id, data=payload)
+        )
+
+        assert scheduler.inbox.empty()
+        assert not follower._route_states
+        assert payload.request_id in follower._aborted
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_cycle_reenters_stage_and_reaches_terminal() -> None:
+    async def _run() -> None:
+        dispatcher = LocalStageDispatcher()
+        ar_scheduler = FakeScheduler()
+        media_scheduler = FakeScheduler()
+        done_scheduler = FakeScheduler()
+        done_control = RecordingStageControlPlane()
+        ar = make_stage(
+            name="ar",
+            get_next=lambda request_id, output: (
+                "done" if output.data["finish"] else "media"
+            ),
+            endpoints={"media": "inproc://media", "done": "inproc://done"},
+            scheduler=ar_scheduler,
+            same_process_targets={"media", "done"},
+            local_dispatcher=dispatcher,
+            stream_targets=["done"],
+            get_stream_done_targets=lambda request_id, output: (
+                ["done"] if output.data["finish"] else []
+            ),
+            max_stage_transitions=3,
+        )
+        media = make_stage(
+            name="media",
+            get_next=lambda request_id, output: "ar",
+            endpoints={"ar": "inproc://ar"},
+            scheduler=media_scheduler,
+            same_process_targets={"ar"},
+            local_dispatcher=dispatcher,
+            max_stage_transitions=3,
+        )
+        done = make_stage(
+            name="done",
+            scheduler=done_scheduler,
+            control_plane=done_control,
+            is_terminal=True,
+            can_accept_stream_before_payload=True,
+            max_stage_transitions=3,
+        )
+        done._stream_queue = StreamQueue()
+        dispatcher.register_many([ar, media, done])
+
+        initial = make_stage_payload(data={"turn": 0})
+        initial.route_trace = ("ar",)
+        ar._active_requests.add(initial.request_id)
+        await ar._execute(initial)
+        first_ar = ar_scheduler.inbox.get_nowait().data
+        assert (first_ar.route_transitions, first_ar.route_trace) == (0, ("ar",))
+
+        await ar._send_stream_to_target(
+            initial.request_id,
+            {"text": "before"},
+            "done",
+            {"modality": "text"},
+        )
+        await ar._route_result(
+            initial.request_id,
+            make_stage_payload(data={"finish": False, "text": "before"}),
+        )
+        media_input = media_scheduler.inbox.get_nowait().data
+        assert (media_input.route_transitions, media_input.route_trace) == (
+            1,
+            ("ar", "media"),
+        )
+
+        await media._route_result(
+            initial.request_id,
+            make_stage_payload(data={"image": "generated"}),
+        )
+        second_ar = ar_scheduler.inbox.get_nowait().data
+        assert (second_ar.route_transitions, second_ar.route_trace) == (
+            2,
+            ("ar", "media", "ar"),
+        )
+
+        await ar._send_stream_to_target(
+            initial.request_id,
+            {"text": "after"},
+            "done",
+            {"modality": "text"},
+        )
+        await ar._route_result(
+            initial.request_id,
+            make_stage_payload(data={"finish": True, "text": "after"}),
+        )
+        output_messages = [done_scheduler.inbox.get_nowait() for _ in range(4)]
+        assert [message.type for message in output_messages] == [
+            "stream_chunk",
+            "stream_chunk",
+            "stream_done",
+            "new_request",
+        ]
+        assert [message.data.chunk_id for message in output_messages[:2]] == [0, 1]
+        assert [message.data.data["text"] for message in output_messages[:2]] == [
+            "before",
+            "after",
+        ]
+        done_input = output_messages[-1].data
+        assert (done_input.route_transitions, done_input.route_trace) == (
+            3,
+            ("ar", "media", "ar", "done"),
+        )
+
+        await done._route_result(initial.request_id, done_input)
+        assert len(done_control.completions) == 1
+        assert done_control.completions[0].success is True
+        assert done_control.completions[0].result == {
+            "finish": True,
+            "text": "after",
+        }
+        assert not ar._route_states
+        assert not media._route_states
+        assert not done._route_states
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_cycle_fails_before_excess_hop() -> None:
+    async def _run() -> None:
+        dispatcher = LocalStageDispatcher()
+        ar_scheduler = FakeScheduler()
+        media_scheduler = FakeScheduler()
+        done_scheduler = FakeScheduler()
+        ar_control = RecordingStageControlPlane()
+        ar = make_stage(
+            name="ar",
+            get_next=lambda request_id, output: (
+                "done" if output.data["finish"] else "media"
+            ),
+            endpoints={"media": "inproc://media", "done": "inproc://done"},
+            scheduler=ar_scheduler,
+            control_plane=ar_control,
+            same_process_targets={"media", "done"},
+            local_dispatcher=dispatcher,
+            max_stage_transitions=2,
+        )
+        media = make_stage(
+            name="media",
+            get_next=lambda request_id, output: "ar",
+            endpoints={"ar": "inproc://ar"},
+            scheduler=media_scheduler,
+            same_process_targets={"ar"},
+            local_dispatcher=dispatcher,
+            max_stage_transitions=2,
+        )
+        done = make_stage(
+            name="done",
+            scheduler=done_scheduler,
+            max_stage_transitions=2,
+        )
+        dispatcher.register_many([ar, media, done])
+
+        initial = make_stage_payload()
+        initial.route_trace = ("ar",)
+        ar._active_requests.add(initial.request_id)
+        await ar._execute(initial)
+        ar_scheduler.inbox.get_nowait()
+        await ar._route_result(
+            initial.request_id,
+            make_stage_payload(data={"finish": False}),
+        )
+        media_scheduler.inbox.get_nowait()
+        await media._route_result(initial.request_id, make_stage_payload())
+        ar_scheduler.inbox.get_nowait()
+        await ar._route_result(
+            initial.request_id,
+            make_stage_payload(data={"finish": True}),
+        )
+
+        assert done_scheduler.inbox.empty()
+        assert len(ar_control.completions) == 1
+        failure = ar_control.completions[0]
+        assert failure.success is False
+        assert "3 > 2" in failure.error
+        assert "req-1" in ar._aborted
+        assert not ar._route_states
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_rejects_tampered_route_trace() -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        control_plane = RecordingStageControlPlane()
+        receiver = make_stage(
+            name="ar",
+            scheduler=scheduler,
+            control_plane=control_plane,
+            max_stage_transitions=4,
+        )
+        payload = make_stage_payload()
+        payload.route_trace = ("media",)
+        receiver._active_requests.add(payload.request_id)
+
+        await receiver._execute(payload)
+
+        assert scheduler.inbox.empty()
+        assert control_plane.completions[0].success is False
+        assert "route trace ends at 'media'" in control_plane.completions[0].error
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_binds_route_trace_to_actual_sender() -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        control_plane = RecordingStageControlPlane()
+        receiver = make_stage(
+            name="ar",
+            scheduler=scheduler,
+            control_plane=control_plane,
+            max_stage_transitions=4,
+        )
+        payload = make_stage_payload()
+        payload.route_transitions = 2
+        payload.route_trace = ("ar", "spoofed", "ar")
+
+        await receiver.receive_local_payload(payload.request_id, "media", payload)
+
+        assert scheduler.inbox.empty()
+        assert control_plane.completions[0].success is False
+        assert "does not match sender 'media'" in control_plane.completions[0].error
+
+    asyncio.run(_run())
+
+
+@pytest.mark.parametrize("ingress", ["submit", "local"])
+def test_stage_rejects_payload_request_id_mismatched_with_envelope(ingress) -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        control_plane = RecordingStageControlPlane()
+        receiver = make_stage(
+            name="media",
+            scheduler=scheduler,
+            control_plane=control_plane,
+        )
+        payload = make_stage_payload()
+        if ingress == "submit":
+            await receiver._on_submit(
+                SubmitMessage(request_id="envelope-id", data=payload)
+            )
+        else:
+            await receiver.receive_local_payload("envelope-id", "ar", payload)
+
+        assert scheduler.inbox.empty()
+        assert control_plane.completions[0].request_id == "envelope-id"
+        assert control_plane.completions[0].success is False
+        assert "does not match envelope" in control_plane.completions[0].error
+        assert "envelope-id" in receiver._aborted
+        assert not receiver._active_requests
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_route_type_failure_is_request_scoped() -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        control_plane = RecordingStageControlPlane()
+        sender = make_stage(
+            name="ar",
+            get_next=lambda request_id, output: "media",
+            endpoints={"media": "inproc://media"},
+            scheduler=scheduler,
+            control_plane=control_plane,
+            max_stage_transitions=4,
+        )
+        payload = make_stage_payload()
+        payload.route_trace = ("ar",)
+        sender._active_requests.add(payload.request_id)
+        await sender._execute(payload)
+        scheduler.inbox.get_nowait()
+
+        await sender._route_result(payload.request_id, {"not": "a payload"})
+
+        assert control_plane.sent_to_stage == []
+        assert control_plane.completions[0].success is False
+        assert "requires StagePayload" in control_plane.completions[0].error
+        assert not sender._active_requests
+        assert not sender._route_states
+
+    asyncio.run(_run())
+
+
+def test_bounded_feedback_rejects_dynamic_fan_out() -> None:
+    async def _run() -> None:
+        scheduler = FakeScheduler()
+        control_plane = RecordingStageControlPlane()
+        sender = make_stage(
+            name="ar",
+            get_next=lambda request_id, output: ["media", "done"],
+            endpoints={"media": "inproc://media", "done": "inproc://done"},
+            scheduler=scheduler,
+            control_plane=control_plane,
+            max_stage_transitions=4,
+        )
+        payload = make_stage_payload()
+        payload.route_trace = ("ar",)
+        sender._active_requests.add(payload.request_id)
+        await sender._execute(payload)
+        scheduler.inbox.get_nowait()
+
+        await sender._route_result(payload.request_id, make_stage_payload())
+
+        assert control_plane.sent_to_stage == []
+        assert control_plane.completions[0].success is False
+        assert "exactly one target" in control_plane.completions[0].error
 
     asyncio.run(_run())
 
@@ -354,6 +840,10 @@ def test_relay_payload_and_cross_gpu_stream_contracts() -> None:
     async def _run() -> None:
         relay = FakeRelay()
         payload = make_tensor_payload()
+        payload.public_request_id = "client-1"
+        payload.route_transitions = 3
+        payload.route_trace = ("ar", "media", "ar", "done")
+        payload.stream_positions = {"ar": {"done": 2}}
         data_ref, op = await stage_io.write_payload(
             relay,
             payload.request_id,
@@ -363,6 +853,40 @@ def test_relay_payload_and_cross_gpu_stream_contracts() -> None:
         await op.wait_for_completion()
         restored = await stage_io.read_payload(relay, payload.request_id, data_ref)
         assert tensor_equal(restored.data, payload.data)
+        assert restored.route_transitions == 3
+        assert restored.route_trace == ("ar", "media", "ar", "done")
+        assert restored.stream_positions == {"ar": {"done": 2}}
+        assert restored.public_request_id == "client-1"
+
+        legacy_relay = FakeRelay()
+        legacy_ref, legacy_op = await stage_io.write_payload(
+            legacy_relay,
+            payload.request_id,
+            payload,
+            transport=TransportKind.SHM,
+        )
+        await legacy_op.wait_for_completion()
+        legacy_header = pickle.loads(stage_io.base64.b64decode(legacy_ref.header))
+        for field_name in (
+            "route_transitions",
+            "route_trace",
+            "stream_positions",
+            "public_request_id",
+        ):
+            legacy_header.__dict__.pop(field_name, None)
+        legacy_dict = legacy_ref.to_dict()
+        legacy_dict["header"] = stage_io.base64.b64encode(
+            pickle.dumps(legacy_header)
+        ).decode("ascii")
+        legacy_restored = await stage_io.read_payload(
+            legacy_relay,
+            payload.request_id,
+            DataRef.from_dict(legacy_dict),
+        )
+        assert legacy_restored.route_transitions == 0
+        assert legacy_restored.route_trace == ()
+        assert legacy_restored.stream_positions == {}
+        assert legacy_restored.public_request_id is None
 
         log = EventLog()
         stream_relay = FakeRelay(log=log)
@@ -1230,7 +1754,11 @@ def test_direct_cuda_ipc_payload_allows_large_ordinary_header(monkeypatch) -> No
     payload = make_stage_payload(
         data={"gpu": "placeholder"},
         inputs={"header": "x" * (128 * 1024)},
+        public_request_id="client-1",
     )
+    payload.route_transitions = 2
+    payload.route_trace = ("ar", "media", "ar")
+    payload.stream_positions = {"ar": {"done": 2}}
     tensor = object()
     monkeypatch.setattr(
         stage_io,
@@ -1244,6 +1772,10 @@ def test_direct_cuda_ipc_payload_allows_large_ordinary_header(monkeypatch) -> No
 
     assert len(ref["header"]) > 128 * 1024
     assert header.request.inputs == payload.request.inputs
+    assert header.route_transitions == 2
+    assert header.route_trace == ("ar", "media", "ar")
+    assert header.stream_positions == {"ar": {"done": 2}}
+    assert header.public_request_id == "client-1"
     assert ref["tensors"] == [{"path": "gpu", "tensor_bytes": b"cuda-handle"}]
 
 

@@ -5,6 +5,7 @@ The runner owns the single serving path. It can start one OS process containing
 multiple non-TP stages, multiple OS processes on the same GPU, and the existing
 one-process-per-rank TP topology.
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -116,6 +117,7 @@ def _build_stage_groups(
             next_stages=stage_cfg.next,
             route_fn=stage_cfg.route_fn,
             is_terminal=stage_cfg.terminal,
+            max_stage_transitions=config.max_stage_transitions,
             env_defaults={**dict(config.env_defaults), **stage_cfg.env},
             wait_for=stage_cfg.wait_for,
             wait_for_fn=stage_cfg.wait_for_fn,
@@ -394,11 +396,15 @@ class MultiProcessPipelineRunner:
         self._ipc_runtime_dir: IpcRuntimeDir | None = None
         self._groups: list[StageGroup] = []
         self._completion_task: asyncio.Task | None = None
+        self._completion_failure_task: asyncio.Task | None = None
+        self._start_task: asyncio.Task[Any] | None = None
+        self._stop_task: asyncio.Task | None = None
         self._monitor_task: asyncio.Task | None = None
         self._fatal_event: asyncio.Event | None = None
         self._fatal_error: BaseException | None = None
         self._prep: PipelineRuntimePrep | None = None
         self._started = False
+        self._stop_requested = False
 
     @property
     def coordinator(self) -> Coordinator:
@@ -426,6 +432,16 @@ class MultiProcessPipelineRunner:
     async def start(self, timeout: float = 120.0) -> None:
         if self._started:
             raise RuntimeError("Already started")
+        if self._start_task is not None and not self._start_task.done():
+            raise RuntimeError("Runner is starting")
+        if self._stop_task is not None and not self._stop_task.done():
+            raise RuntimeError("Runner is stopping")
+        start_task = asyncio.current_task()
+        if start_task is None:
+            raise RuntimeError("Runner start requires an asyncio task")
+        self._start_task = start_task
+        self._stop_task = None
+        self._stop_requested = False
 
         try:
             ctx = multiprocessing.get_context("spawn")
@@ -458,11 +474,14 @@ class MultiProcessPipelineRunner:
                 entry_stage=prep.entry_stage,
                 terminal_stages=self._config.terminal_stages or None,
                 terminal_stages_resolver=terminal_stages_resolver,
+                max_stage_transitions=self._config.max_stage_transitions,
+                stream_queue_maxsize=self._config.stream_queue_maxsize,
             )
             await self._coordinator.start()
             self._completion_task = asyncio.create_task(
                 self._coordinator.run_completion_loop()
             )
+            self._completion_task.add_done_callback(self._on_completion_task_done)
 
             self._groups = groups
             if self._config.env_defaults:
@@ -473,12 +492,24 @@ class MultiProcessPipelineRunner:
 
             await asyncio.gather(*(g.wait_ready(timeout) for g in self._groups))
 
+            if self._stop_requested:
+                raise RuntimeError("Runner stopped during startup")
+
             for group in self._groups:
                 if group.any_dead():
                     raise RuntimeError(
                         f"Stage process(es) died during startup: "
                         f"{group.dead_summary()}"
                     )
+
+            if self._completion_task.done():
+                try:
+                    self._completion_task.result()
+                except asyncio.CancelledError as exc:
+                    raise RuntimeError(
+                        "Coordinator completion loop stopped during startup"
+                    ) from exc
+                raise RuntimeError("Coordinator completion loop exited during startup")
 
             for group in self._groups:
                 for stage_name, endpoint in group.stage_control_endpoints.items():
@@ -497,9 +528,12 @@ class MultiProcessPipelineRunner:
                 total_procs,
             )
 
-        except Exception:
+        except BaseException:
             await self._cleanup_on_failure()
             raise
+        finally:
+            if self._start_task is start_task:
+                self._start_task = None
 
     async def _monitor_children(self) -> None:
         while self._started:
@@ -514,12 +548,50 @@ class MultiProcessPipelineRunner:
             await asyncio.sleep(5.0)
 
     async def _fail_runtime(self, error: BaseException) -> None:
+        if self._fatal_error is not None:
+            return
         self._fatal_error = error
-        if self._coordinator is not None:
-            await self._coordinator.fail_pending_requests(error)
         if self._fatal_event is not None:
             self._fatal_event.set()
-        await self.stop()
+        if self._coordinator is not None:
+            try:
+                await self._coordinator.fail_pending_requests(error)
+            except BaseException:
+                logger.exception("Failed to settle requests after runtime failure")
+        try:
+            await asyncio.shield(self.stop())
+        except BaseException:
+            logger.exception("Failed to stop pipeline after runtime failure")
+
+    def _on_completion_task_done(self, task: asyncio.Task) -> None:
+        if task.cancelled() or not self._started:
+            return
+        error = task.exception()
+        if error is None:
+            error = RuntimeError("Coordinator completion loop exited unexpectedly")
+        if (
+            self._completion_failure_task is not None
+            and not self._completion_failure_task.done()
+        ):
+            return
+        failure_task = asyncio.create_task(
+            self._fail_runtime(error),
+            name="pipeline-completion-failure",
+        )
+        self._completion_failure_task = failure_task
+        failure_task.add_done_callback(self._on_completion_failure_done)
+
+    def _on_completion_failure_done(self, task: asyncio.Task) -> None:
+        if self._completion_failure_task is task:
+            self._completion_failure_task = None
+        if task.cancelled():
+            return
+        error = task.exception()
+        if error is not None:
+            logger.error(
+                "Pipeline completion failure cleanup failed",
+                exc_info=(type(error), error, error.__traceback__),
+            )
 
     async def wait_failed(self) -> None:
         if self._fatal_event is None:
@@ -532,11 +604,9 @@ class MultiProcessPipelineRunner:
     async def _cancel_completion_task(self) -> None:
         if self._completion_task is None:
             return
-        self._completion_task.cancel()
-        try:
-            await self._completion_task
-        except asyncio.CancelledError:
-            pass
+        if not self._completion_task.done():
+            self._completion_task.cancel()
+        await asyncio.gather(self._completion_task, return_exceptions=True)
         self._completion_task = None
 
     def _close_runtime_dir(self) -> None:
@@ -546,9 +616,36 @@ class MultiProcessPipelineRunner:
         self._ipc_runtime_dir = None
 
     async def stop(self) -> None:
-        if not self._started:
+        stop_task = self._stop_task
+        if stop_task is None:
+            start_task = self._start_task
+            if not self._started and start_task is None:
+                return
+            self._stop_requested = True
+            self._started = False
+            if self._coordinator is not None:
+                self._coordinator.begin_stop()
+            stop_task = asyncio.create_task(
+                self._run_stop(start_task), name="pipeline-runner-stop"
+            )
+            self._stop_task = stop_task
+        await asyncio.shield(stop_task)
+
+    async def _run_stop(self, start_task: asyncio.Task[Any] | None) -> None:
+        current_task = asyncio.current_task()
+        if (
+            start_task is not None
+            and start_task is not current_task
+            and not start_task.done()
+        ):
+            start_task.cancel()
+            await asyncio.gather(start_task, return_exceptions=True)
+
+        if self._coordinator is None:
+            self._close_runtime_dir()
             return
-        self._started = False
+
+        await self._coordinator.quiesce()
 
         if self._monitor_task is not None:
             current = asyncio.current_task()
@@ -578,25 +675,76 @@ class MultiProcessPipelineRunner:
 
     async def _cleanup_on_failure(self) -> None:
         """Best-effort cleanup after a failed start()."""
-        for group in self._groups:
-            for p in group.processes:
-                if p.is_alive():
-                    p.terminate()
-            for p in group.processes:
-                p.join(timeout=5)
-                if p.is_alive():
-                    p.kill()
-                    p.join(timeout=2)
-            group.close_control_channels()
-        self._groups.clear()
 
-        await self._cancel_completion_task()
-
-        if self._coordinator is not None:
+        async def _cleanup() -> None:
+            self._started = False
+            groups = tuple(self._groups)
             try:
-                await self._coordinator.stop()
-            except Exception:
-                pass
-            self._coordinator = None
+                results = await asyncio.gather(
+                    *(group.shutdown(join_timeout=0) for group in groups),
+                    return_exceptions=True,
+                )
+                for group, result in zip(groups, results):
+                    if isinstance(result, BaseException):
+                        logger.warning(
+                            "Failed to clean stage group %s after startup error: %s",
+                            group.group_name,
+                            result,
+                        )
+                        try:
+                            group.close_control_channels()
+                        except Exception:
+                            logger.warning(
+                                "Failed to close stage group %s control channels",
+                                group.group_name,
+                                exc_info=True,
+                            )
+            finally:
+                self._groups.clear()
 
-        self._close_runtime_dir()
+            try:
+                await self._cancel_completion_task()
+            except BaseException:
+                logger.warning(
+                    "Failed to stop completion task after startup error",
+                    exc_info=True,
+                )
+
+            coordinator = self._coordinator
+            self._coordinator = None
+            if coordinator is not None:
+                try:
+                    await coordinator.stop()
+                except BaseException:
+                    logger.warning(
+                        "Failed to stop coordinator after startup error",
+                        exc_info=True,
+                    )
+
+            try:
+                self._close_runtime_dir()
+            except BaseException:
+                logger.warning(
+                    "Failed to close runtime directory after startup error",
+                    exc_info=True,
+                )
+
+        cleanup_task = asyncio.create_task(
+            _cleanup(), name="pipeline-start-failure-cleanup"
+        )
+        while not cleanup_task.done():
+            try:
+                await asyncio.shield(cleanup_task)
+            except asyncio.CancelledError:
+                continue
+        if not cleanup_task.cancelled():
+            cleanup_error = cleanup_task.exception()
+            if cleanup_error is not None:
+                logger.warning(
+                    "Pipeline startup cleanup failed",
+                    exc_info=(
+                        type(cleanup_error),
+                        cleanup_error,
+                        cleanup_error.__traceback__,
+                    ),
+                )

@@ -6,6 +6,7 @@ stream chunk routing, abort tracking, profiling.
 
 Dispatches all compute to scheduler (OmniScheduler or SimpleScheduler).
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,6 +16,7 @@ import os
 import queue as _queue_mod
 import threading
 from contextlib import suppress
+from dataclasses import replace
 from typing import Any, Awaitable, Callable, Literal
 
 import torch
@@ -105,6 +107,7 @@ class Stage:
         disable_direct_cuda_ipc_payload: bool = False,
         tp_fanout: TPLeaderFanout | None = None,
         is_terminal: bool = False,
+        max_stage_transitions: int | None = None,
     ):
         self.name = name
         self.role = role
@@ -123,6 +126,7 @@ class Stage:
         self._disable_direct_cuda_ipc_payload = disable_direct_cuda_ipc_payload
         self._tp_fanout = tp_fanout
         self._is_terminal = is_terminal
+        self._max_stage_transitions = max_stage_transitions
         self._owns_external_io = role in {"single", "leader"}
 
         self._comm = CommEngine(
@@ -146,6 +150,11 @@ class Stage:
         self._running = False
         self._aborted: set[str] = set()
         self._active_requests: set[str] = set()
+        self._public_request_ids: dict[str, str] = {}
+        self._route_states: dict[
+            str,
+            tuple[int, tuple[str, ...], dict[str, dict[str, int]]],
+        ] = {}
         self._stream_queue: StreamQueue | None = None
         self._stream_chunk_counters: dict[tuple[str, str], int] = {}
         self._first_stream_chunk_seen: set[str] = set()
@@ -161,8 +170,31 @@ class Stage:
     async def start(self) -> None:
         if self._running:
             return
-        await self.control_plane.start()
-        await self._comm.start()
+        try:
+            await self.control_plane.start()
+            await self._comm.start()
+        except BaseException:
+            cleanup_task = asyncio.create_task(
+                self.stop(), name=f"stage-start-cleanup-{self.name}"
+            )
+            while not cleanup_task.done():
+                try:
+                    await asyncio.shield(cleanup_task)
+                except asyncio.CancelledError:
+                    continue
+            if not cleanup_task.cancelled():
+                cleanup_error = cleanup_task.exception()
+                if cleanup_error is not None:
+                    logger.warning(
+                        "Stage %s startup rollback failed",
+                        self.name,
+                        exc_info=(
+                            type(cleanup_error),
+                            cleanup_error,
+                            cleanup_error.__traceback__,
+                        ),
+                    )
+            raise
         self._loop = asyncio.get_running_loop()
         self._running = True
 
@@ -303,7 +335,7 @@ class Stage:
                 if isinstance(msg, ShutdownMessage):
                     break
                 if isinstance(msg, TPWorkMessage):
-                    await self._execute(msg.data)
+                    await self._on_tp_work(msg)
                     continue
                 await self._handle_message(msg)
         except asyncio.CancelledError:
@@ -398,6 +430,20 @@ class Stage:
         request_id = msg.request_id
         if request_id in self._aborted:
             return
+        payload = msg.data
+        payload_request_id = getattr(payload, "request_id", None)
+        if payload_request_id != request_id:
+            await self._send_failure(
+                request_id,
+                f"Stage {self.name}: payload request_id {payload_request_id!r} "
+                f"does not match envelope {request_id!r}",
+            )
+            return
+        try:
+            self._record_public_request_id(request_id, payload)
+        except (TypeError, ValueError) as exc:
+            await self._send_failure(request_id, _error_text(exc))
+            return
         self._active_requests.add(request_id)
         if self._stream_queue is not None and not self._stream_queue.has(request_id):
             self._stream_queue.open(request_id)
@@ -408,8 +454,20 @@ class Stage:
             metadata={"from_stage": "coordinator", "kind": "submit"},
         )
 
-        payload = msg.data  # StagePayload from coordinator
         await self._execute(payload)
+
+    async def _on_tp_work(self, msg: TPWorkMessage) -> None:
+        if msg.request_id in self._aborted:
+            return
+        payload_request_id = getattr(msg.data, "request_id", None)
+        if payload_request_id != msg.request_id:
+            raise RuntimeError(
+                f"Stage {self.name}: TP work payload request_id "
+                f"{payload_request_id!r} does not match envelope "
+                f"{msg.request_id!r}"
+            )
+        self._record_public_request_id(msg.request_id, msg.data)
+        await self._execute(msg.data)
 
     async def _on_data_ready(
         self,
@@ -519,6 +577,19 @@ class Stage:
     ) -> None:
         if request_id in self._aborted:
             return
+        payload_request_id = getattr(payload, "request_id", None)
+        if payload_request_id != request_id:
+            await self._send_failure(
+                request_id,
+                f"Stage {self.name}: payload request_id {payload_request_id!r} "
+                f"does not match envelope {request_id!r}",
+            )
+            return
+        try:
+            self._record_public_request_id(request_id, payload)
+        except (TypeError, ValueError) as exc:
+            await self._send_failure(request_id, _error_text(exc))
+            return
         self._active_requests.add(request_id)
         if self._stream_queue is not None and not self._stream_queue.has(request_id):
             self._stream_queue.open(request_id)
@@ -531,13 +602,36 @@ class Stage:
         )
         merged = self.input_handler.receive(request_id, from_stage, payload)
         if merged is not None:
+            merged_request_id = getattr(merged, "request_id", None)
+            if merged_request_id != request_id:
+                await self._send_failure(
+                    request_id,
+                    "fan-in merge changed request_id from "
+                    f"{request_id!r} to {merged_request_id!r}",
+                )
+                return
+            public_request_id = self._public_request_ids.get(request_id)
+            if public_request_id is not None and isinstance(merged, StagePayload):
+                if merged.public_request_id not in (None, public_request_id):
+                    await self._send_failure(
+                        request_id,
+                        "fan-in merge changed public_request_id from "
+                        f"{public_request_id!r} to "
+                        f"{merged.public_request_id!r}",
+                    )
+                    return
+                if merged.public_request_id is None:
+                    merged = replace(
+                        merged,
+                        public_request_id=public_request_id,
+                    )
             _emit_event(
                 request_id=request_id,
                 stage=self.name,
                 event_name="stage_aggregate_ready",
                 metadata={"from_stage": from_stage},
             )
-            await self._execute(merged)
+            await self._execute(merged, from_stage=from_stage)
 
     async def _on_stream_chunk(
         self,
@@ -834,8 +928,59 @@ class Stage:
             IncomingMessage(request_id=request_id, type="stream_chunk", data=item)
         )
 
-    async def _execute(self, payload: Any) -> None:
+    async def _execute(self, payload: Any, *, from_stage: str | None = None) -> None:
         request_id = payload.request_id
+        if self._max_stage_transitions is not None:
+            if not isinstance(payload, StagePayload):
+                await self._send_failure(
+                    request_id,
+                    "bounded feedback routing requires StagePayload input",
+                )
+                return
+            try:
+                transitions, trace, stream_positions = payload.validated_route_state()
+            except (TypeError, ValueError):
+                await self._send_failure(
+                    request_id,
+                    "invalid bounded feedback route state",
+                )
+                return
+            if not trace:
+                await self._send_failure(
+                    request_id,
+                    "bounded feedback route trace is empty",
+                )
+                return
+            if trace[-1] != self.name:
+                await self._send_failure(
+                    request_id,
+                    f"Stage {self.name}: route trace ends at {trace[-1]!r}",
+                )
+                return
+            if from_stage is not None and (
+                transitions == 0 or len(trace) < 2 or trace[-2] != from_stage
+            ):
+                await self._send_failure(
+                    request_id,
+                    f"Stage {self.name}: route trace does not match sender "
+                    f"{from_stage!r}",
+                )
+                return
+            if transitions > self._max_stage_transitions:
+                await self._send_failure(
+                    request_id,
+                    "stage transition limit exceeded before dispatch: "
+                    f"{transitions} > "
+                    f"{self._max_stage_transitions}",
+                )
+                return
+            self._route_states[request_id] = (
+                transitions,
+                trace,
+                stream_positions,
+            )
+            for target, position in stream_positions.get(self.name, {}).items():
+                self._stream_chunk_counters[(request_id, target)] = position
         _emit_event(
             request_id=request_id,
             stage=self.name,
@@ -1043,14 +1188,73 @@ class Stage:
                 )
 
     async def _route_result(self, request_id: str, result: Any) -> None:
+        if self._max_stage_transitions is None:
+            await self._route_result_impl(request_id, result)
+            return
+        try:
+            await self._route_result_impl(request_id, result)
+        except Exception as exc:
+            logger.exception(
+                "Stage %s: bounded feedback routing failed for %s",
+                self.name,
+                request_id,
+            )
+            if request_id in self._active_requests:
+                await self._send_failure(
+                    request_id,
+                    f"bounded feedback routing failed: {_error_text(exc)}",
+                )
+
+    async def _route_result_impl(self, request_id: str, result: Any) -> None:
         """Route a completed result to next stage(s) or complete at coordinator."""
         if not self._owns_external_io:
             self._clear_request_state(request_id)
             return
-        # Send stream done to the active stream targets for this request.
+        callback_request_id = self._public_request_ids.get(request_id, request_id)
+        next_stages = self.get_next(callback_request_id, result)
+        route_state = None
+        if next_stages is not None:
+            if isinstance(next_stages, str):
+                next_stages = [next_stages]
+            if self._max_stage_transitions is not None:
+                if len(next_stages) != 1:
+                    await self._send_failure(
+                        request_id,
+                        "feedback route must select exactly one target",
+                    )
+                    return
+                route_state = self._route_states.get(request_id)
+                if route_state is None:
+                    await self._send_failure(
+                        request_id,
+                        "missing bounded feedback route state",
+                    )
+                    return
+                next_transition = route_state[0] + 1
+                if next_transition > self._max_stage_transitions:
+                    await self._send_failure(
+                        request_id,
+                        "stage transition limit exceeded: "
+                        f"{next_transition} > {self._max_stage_transitions}. "
+                        f"trace={list(route_state[1])}",
+                    )
+                    return
+                stream_positions = {
+                    source: dict(targets) for source, targets in route_state[2].items()
+                }
+                local_positions = {
+                    target: position
+                    for (rid, target), position in self._stream_chunk_counters.items()
+                    if rid == request_id
+                }
+                if local_positions:
+                    stream_positions[self.name] = local_positions
+                route_state = (route_state[0], route_state[1], stream_positions)
+
+        # Signal stream completion only after route validation succeeds.
         stream_targets = self._stream_targets
         if self.get_stream_done_targets is not None:
-            resolved = self.get_stream_done_targets(request_id, result)
+            resolved = self.get_stream_done_targets(callback_request_id, result)
             if isinstance(resolved, str):
                 stream_targets = [resolved]
             elif isinstance(resolved, list):
@@ -1065,7 +1269,6 @@ class Stage:
                 is_done=True,
             )
 
-        next_stages = self.get_next(request_id, result)
         if next_stages is None:
             # Terminal: notify coordinator
             _emit_event(
@@ -1083,8 +1286,6 @@ class Stage:
                 )
             )
         else:
-            if isinstance(next_stages, str):
-                next_stages = [next_stages]
             is_single_target = len(next_stages) == 1
             _emit_event(
                 request_id=request_id,
@@ -1100,6 +1301,7 @@ class Stage:
                     allow_local_object=is_single_target,
                     allow_projected_local_object=not is_single_target,
                     stream_targets_for_request=stream_targets_for_request,
+                    route_state=route_state,
                 )
 
         self._clear_request_state(request_id)
@@ -1113,6 +1315,9 @@ class Stage:
         allow_local_object: bool = False,
         allow_projected_local_object: bool = False,
         stream_targets_for_request: set[str] | None = None,
+        route_state: (
+            tuple[int, tuple[str, ...], dict[str, dict[str, int]]] | None
+        ) = None,
     ) -> None:
         if not self._owns_external_io:
             raise RuntimeError(
@@ -1125,6 +1330,37 @@ class Stage:
             )
         projector = self._project_payload.get(target)
         projected_payload = projector(payload) if projector is not None else payload
+        public_request_id = self._public_request_ids.get(request_id)
+        if isinstance(projected_payload, StagePayload):
+            if projected_payload.request_id != request_id:
+                raise ValueError(
+                    "projector changed request_id from "
+                    f"{request_id!r} to {projected_payload.request_id!r}"
+                )
+            if public_request_id is not None:
+                if projected_payload.public_request_id not in (None, public_request_id):
+                    raise ValueError(
+                        "projector changed public_request_id from "
+                        f"{public_request_id!r} to "
+                        f"{projected_payload.public_request_id!r}"
+                    )
+                if projected_payload.public_request_id is None:
+                    projected_payload = replace(
+                        projected_payload,
+                        public_request_id=public_request_id,
+                    )
+        if route_state is not None:
+            if not isinstance(projected_payload, StagePayload):
+                raise TypeError(
+                    "bounded feedback routing requires StagePayload results, got "
+                    f"{type(projected_payload).__name__}"
+                )
+            projected_payload = replace(
+                projected_payload,
+                route_transitions=route_state[0] + 1,
+                route_trace=(*route_state[1], target)[-16:],
+                stream_positions=route_state[2],
+            )
         use_local_object = allow_local_object or (
             allow_projected_local_object
             and self._is_isolated_projected_payload(
@@ -1538,6 +1774,8 @@ class Stage:
 
     def _clear_request_state(self, request_id: str) -> None:
         self._active_requests.discard(request_id)
+        self._route_states.pop(request_id, None)
+        self._public_request_ids.pop(request_id, None)
         self.input_handler.cancel(request_id)
         if self._stream_queue is not None:
             self._stream_queue.close(request_id)
@@ -1549,6 +1787,22 @@ class Stage:
         self._first_stream_chunk_seen.discard(request_id)
         self._local_stream_targets.pop(request_id, None)
         self._nonlocal_stream_targets.pop(request_id, None)
+
+    def _record_public_request_id(self, request_id: str, payload: Any) -> None:
+        if not isinstance(payload, StagePayload):
+            return
+        public_request_id = payload.public_request_id
+        if public_request_id is None:
+            return
+        if not isinstance(public_request_id, str) or not public_request_id:
+            raise TypeError("public_request_id must be a non-empty string")
+        existing = self._public_request_ids.get(request_id)
+        if existing is not None and existing != public_request_id:
+            raise ValueError(
+                f"Stage {self.name}: public_request_id changed from "
+                f"{existing!r} to {public_request_id!r}"
+            )
+        self._public_request_ids[request_id] = public_request_id
 
     async def _handle_scheduler_crash(self, exc: BaseException) -> None:
         if self._scheduler_crash_error is not None:

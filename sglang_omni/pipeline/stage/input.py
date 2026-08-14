@@ -71,7 +71,16 @@ class AggregatedInput(InputHandler):
 
         expected_sources = self._expected_sources.get(request_id)
         if expected_sources is None and self._expected_sources_fn is not None:
-            resolved = self._expected_sources_fn(request_id, from_stage, data)
+            callback_request_id = (
+                data.public_request_id
+                if isinstance(data, StagePayload) and data.public_request_id is not None
+                else request_id
+            )
+            resolved = self._expected_sources_fn(
+                callback_request_id,
+                from_stage,
+                data,
+            )
             if resolved is not None:
                 expected_sources = self._normalize_expected_sources(
                     request_id,

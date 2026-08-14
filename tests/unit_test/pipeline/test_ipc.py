@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import asyncio
+import queue
 import signal
+import threading
 from pathlib import Path
 from types import FrameType, SimpleNamespace
 from unittest.mock import AsyncMock
@@ -58,7 +60,7 @@ class _FakeCoordinator:
         self.stopped = True
 
 
-def _make_config(base_path: Path) -> PipelineConfig:
+def _make_config(base_path: Path, *, stream_queue_maxsize: int = 256) -> PipelineConfig:
     return PipelineConfig(
         model_path="Qwen/Qwen3-Omni-30B-A3B-Instruct",
         entry_stage="preprocessing",
@@ -71,6 +73,7 @@ def _make_config(base_path: Path) -> PipelineConfig:
             )
         ],
         endpoints=EndpointsConfig(base_path=str(base_path)),
+        stream_queue_maxsize=stream_queue_maxsize,
     )
 
 
@@ -240,6 +243,7 @@ async def test_mp_runner_cleans_spawned_groups_when_later_spawn_fails(
     class FakeGroup:
         def __init__(self, stage_name: str, *, fail_spawn: bool = False) -> None:
             self.stage_name = stage_name
+            self.group_name = stage_name
             self.fail_spawn = fail_spawn
             self.process = FakeProcess() if not fail_spawn else None
             self.channels_closed = False
@@ -258,6 +262,14 @@ async def test_mp_runner_cleans_spawned_groups_when_later_spawn_fails(
 
         def close_control_channels(self) -> None:
             self.channels_closed = True
+
+        async def shutdown(self, join_timeout: float = 30.0) -> None:
+            del join_timeout
+            if self.process is not None:
+                if self.process.is_alive():
+                    self.process.terminate()
+                self.process.join(timeout=0)
+            self.close_control_channels()
 
     first_group = FakeGroup("preprocessing")
     second_group = FakeGroup("thinker", fail_spawn=True)
@@ -312,6 +324,9 @@ async def test_mp_runner_stop_cleans_runtime_dir(
 ) -> None:
     """Preserves IPC runtime directory cleanup when the runner stops."""
 
+    coordinator_settings = []
+    begin_stop_calls = []
+
     class FakeCoordinator:
         def __init__(
             self,
@@ -320,8 +335,23 @@ async def test_mp_runner_stop_cleans_runtime_dir(
             entry_stage: str,
             terminal_stages: list[str] | None = None,
             terminal_stages_resolver=None,
+            max_stage_transitions: int | None = None,
+            stream_queue_maxsize: int = 256,
         ) -> None:
-            del abort_endpoint, entry_stage, terminal_stages, terminal_stages_resolver
+            coordinator_settings.append(
+                {
+                    "max_stage_transitions": max_stage_transitions,
+                    "stream_queue_maxsize": stream_queue_maxsize,
+                }
+            )
+            del (
+                abort_endpoint,
+                entry_stage,
+                terminal_stages,
+                terminal_stages_resolver,
+                max_stage_transitions,
+                stream_queue_maxsize,
+            )
             self.control_plane = SimpleNamespace(
                 completion_endpoint=completion_endpoint
             )
@@ -336,6 +366,12 @@ async def test_mp_runner_stop_cleans_runtime_dir(
             del name, endpoint
 
         async def shutdown_stages(self) -> None:
+            return None
+
+        def begin_stop(self) -> None:
+            begin_stop_calls.append(True)
+
+        async def quiesce(self) -> None:
             return None
 
         async def stop(self) -> None:
@@ -371,14 +407,468 @@ async def test_mp_runner_stop_cleans_runtime_dir(
     monkeypatch.setattr(mp_runner, "Coordinator", FakeCoordinator)
     monkeypatch.setattr(mp_runner, "_build_stage_groups", lambda *a, **k: [group])
 
-    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+    runner = mp_runner.MultiProcessPipelineRunner(
+        _make_config(tmp_path, stream_queue_maxsize=17)
+    )
     await runner.start()
     assert len([path for path in tmp_path.iterdir() if path.is_dir()]) == 1
 
     await runner.stop()
 
     assert group.shutdown_called
+    assert coordinator_settings == [
+        {"max_stage_transitions": None, "stream_queue_maxsize": 17}
+    ]
+    assert begin_stop_calls == [True]
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_completion_loop_failure_fails_runtime(
+    tmp_path: Path,
+) -> None:
+    class FailingRuntimeCoordinator:
+        def __init__(self) -> None:
+            self.failed_with = None
+            self.begin_stop_called = False
+            self.shutdown_called = False
+            self.stop_called = False
+
+        async def fail_pending_requests(self, error) -> None:
+            self.failed_with = error
+
+        def begin_stop(self) -> None:
+            self.begin_stop_called = True
+
+        async def quiesce(self) -> None:
+            return None
+
+        async def shutdown_stages(self) -> None:
+            self.shutdown_called = True
+
+        async def stop(self) -> None:
+            self.stop_called = True
+
+    async def fail_completion_loop() -> None:
+        await asyncio.sleep(0)
+        raise RuntimeError("completion transport failed")
+
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+    coordinator = FailingRuntimeCoordinator()
+    runner._coordinator = coordinator
+    runner._fatal_event = asyncio.Event()
+    runner._started = True
+    completion_task = asyncio.create_task(fail_completion_loop())
+    runner._completion_task = completion_task
+    completion_task.add_done_callback(runner._on_completion_task_done)
+
+    with pytest.raises(RuntimeError, match="completion transport failed"):
+        await asyncio.wait_for(runner.wait_failed(), timeout=1)
+    for _ in range(100):
+        if coordinator.stop_called:
+            break
+        await asyncio.sleep(0)
+
+    assert coordinator.failed_with is not None
+    assert str(coordinator.failed_with) == "completion transport failed"
+    assert coordinator.begin_stop_called is True
+    assert coordinator.shutdown_called is True
+    assert coordinator.stop_called is True
+    assert runner._completion_task is None
+    assert runner._started is False
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_rejects_completion_loop_exit_during_startup(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class ExitedCoordinator(_FakeCoordinator):
+        async def run_completion_loop(self) -> None:
+            return None
+
+        def register_stage(self, name: str, endpoint: str) -> None:
+            del name, endpoint
+
+    class YieldingGroup:
+        group_name = "preprocessing"
+        process_count = 1
+        processes: list[object] = []
+        stage_control_endpoints = {"preprocessing": "ipc://stage.sock"}
+
+        def __init__(self) -> None:
+            self.channels_closed = False
+
+        def spawn(self, ctx) -> None:
+            del ctx
+
+        async def wait_ready(self, timeout: float) -> None:
+            del timeout
+            await asyncio.sleep(0)
+
+        def any_dead(self) -> bool:
+            return False
+
+        def dead_summary(self) -> str:
+            return "(none)"
+
+        def close_control_channels(self) -> None:
+            self.channels_closed = True
+
+        async def shutdown(self, join_timeout: float = 30.0) -> None:
+            del join_timeout
+            self.close_control_channels()
+
+    group = YieldingGroup()
+    monkeypatch.setattr(mp_runner, "Coordinator", ExitedCoordinator)
+    monkeypatch.setattr(mp_runner, "_build_stage_groups", lambda *a, **k: [group])
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+
+    with pytest.raises(RuntimeError, match="exited during startup"):
+        await runner.start()
+
+    assert group.channels_closed is True
+    assert runner._completion_task is None
+    assert runner._coordinator is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_cancelled_start_cleans_owned_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StartCoordinator(_FakeCoordinator):
+        def register_stage(self, name: str, endpoint: str) -> None:
+            del name, endpoint
+
+    class BlockingGroup:
+        group_name = "preprocessing"
+        process_count = 1
+        processes: list[object] = []
+        stage_control_endpoints = {"preprocessing": "ipc://stage.sock"}
+
+        def __init__(self) -> None:
+            self.wait_entered = asyncio.Event()
+            self.channels_closed = False
+
+        def spawn(self, ctx) -> None:
+            del ctx
+
+        async def wait_ready(self, timeout: float) -> None:
+            del timeout
+            self.wait_entered.set()
+            await asyncio.Event().wait()
+
+        def close_control_channels(self) -> None:
+            self.channels_closed = True
+
+        async def shutdown(self, join_timeout: float = 30.0) -> None:
+            del join_timeout
+            self.close_control_channels()
+
+    group = BlockingGroup()
+    monkeypatch.setattr(mp_runner, "Coordinator", StartCoordinator)
+    monkeypatch.setattr(mp_runner, "_build_stage_groups", lambda *a, **k: [group])
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+
+    start_task = asyncio.create_task(runner.start())
+    await group.wait_entered.wait()
+    start_task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+
+    assert group.channels_closed is True
+    assert runner._start_task is None
+    assert runner._completion_task is None
+    assert runner._coordinator is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_stop_during_startup_joins_cancelled_start(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class StartCoordinator(_FakeCoordinator):
+        def __init__(self, *args, **kwargs) -> None:
+            super().__init__(*args, **kwargs)
+            self.begin_stop_called = False
+
+        def begin_stop(self) -> None:
+            self.begin_stop_called = True
+
+        def register_stage(self, name: str, endpoint: str) -> None:
+            del name, endpoint
+
+    class BlockingGroup:
+        group_name = "preprocessing"
+        process_count = 1
+        processes: list[object] = []
+        stage_control_endpoints = {"preprocessing": "ipc://stage.sock"}
+
+        def __init__(self) -> None:
+            self.wait_entered = asyncio.Event()
+            self.channels_closed = False
+
+        def spawn(self, ctx) -> None:
+            del ctx
+
+        async def wait_ready(self, timeout: float) -> None:
+            del timeout
+            self.wait_entered.set()
+            await asyncio.Event().wait()
+
+        def close_control_channels(self) -> None:
+            self.channels_closed = True
+
+        async def shutdown(self, join_timeout: float = 30.0) -> None:
+            del join_timeout
+            self.close_control_channels()
+
+    group = BlockingGroup()
+    monkeypatch.setattr(mp_runner, "Coordinator", StartCoordinator)
+    monkeypatch.setattr(mp_runner, "_build_stage_groups", lambda *a, **k: [group])
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+
+    start_task = asyncio.create_task(runner.start())
+    await group.wait_entered.wait()
+    coordinator = runner._coordinator
+    await asyncio.wait_for(runner.stop(), timeout=1)
+
+    with pytest.raises(asyncio.CancelledError):
+        await start_task
+    assert coordinator.begin_stop_called is True
+    assert coordinator.stopped is True
+    assert group.channels_closed is True
+    assert runner._start_task is None
+    assert runner._coordinator is None
+    assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_failure_cleanup_error_cannot_wedge_failure_state(
+    tmp_path: Path,
+) -> None:
+    class RaisingCoordinator:
+        async def fail_pending_requests(self, error) -> None:
+            del error
+            raise RuntimeError("cleanup failed")
+
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+    runner._coordinator = RaisingCoordinator()
+    runner._fatal_event = asyncio.Event()
+    runner._started = True
+    stop_calls = []
+
+    async def _stop() -> None:
+        stop_calls.append(True)
+
+    runner.stop = _stop
+    primary = RuntimeError("completion transport failed")
+    await runner._fail_runtime(primary)
+
+    assert runner._fatal_event.is_set()
+    assert runner._fatal_error is primary
+    assert stop_calls == [True]
+    with pytest.raises(RuntimeError, match="completion transport failed"):
+        await runner.wait_failed()
+
+    await runner._fail_runtime(RuntimeError("later failure"))
+    assert stop_calls == [True]
+
+
+@pytest.mark.asyncio
+async def test_mp_runner_failed_start_cleanup_preserves_primary_error(
+    tmp_path: Path,
+) -> None:
+    class FailingCleanupGroup:
+        group_name = "broken"
+
+        def __init__(self) -> None:
+            self.channels_closed = False
+
+        async def shutdown(self, join_timeout: float = 30.0) -> None:
+            del join_timeout
+            raise RuntimeError("join cleanup failed")
+
+        def close_control_channels(self) -> None:
+            self.channels_closed = True
+
+    group = FailingCleanupGroup()
+    runner = mp_runner.MultiProcessPipelineRunner(_make_config(tmp_path))
+    runner._groups = [group]
+    runner._ipc_runtime_dir = SimpleNamespace(closed=False)
+    runner._ipc_runtime_dir.close = lambda: setattr(
+        runner._ipc_runtime_dir, "closed", True
+    )
+
+    with pytest.raises(RuntimeError, match="primary startup failure"):
+        try:
+            raise RuntimeError("primary startup failure")
+        except BaseException:
+            await runner._cleanup_on_failure()
+            raise
+
+    assert group.channels_closed is True
+    assert runner._groups == []
+    assert runner._ipc_runtime_dir is None
+
+
+@pytest.mark.asyncio
+async def test_stage_group_wait_ready_prefers_queued_startup_error() -> None:
+    class AliveProcess:
+        exitcode = None
+
+        @staticmethod
+        def is_alive() -> bool:
+            return True
+
+    group = mp_runner.StageGroup(
+        "test",
+        [SimpleNamespace(stage_specs=[], process_name="pipeline")],
+    )
+    startup_errors: queue.Queue[str] = queue.Queue()
+    startup_errors.put("RuntimeError: factory boom")
+    group._processes = [AliveProcess()]
+    group._ready_events = [threading.Event()]
+    group._startup_error_channels = [startup_errors]
+
+    with pytest.raises(RuntimeError, match="factory boom"):
+        await group.wait_ready(timeout=0)
+
+
+@pytest.mark.asyncio
+async def test_stage_group_shutdown_joins_processes_concurrently() -> None:
+    barrier = threading.Barrier(2)
+
+    class FakeProcess:
+        def __init__(self, name: str) -> None:
+            self.name = name
+            self.pid = 1
+            self.met_peer = False
+            self._alive = True
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            try:
+                barrier.wait(timeout=0.5)
+                self.met_peer = True
+            except threading.BrokenBarrierError:
+                pass
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+    group = mp_runner.StageGroup(
+        "test",
+        [SimpleNamespace(stage_specs=[])],
+    )
+    processes = [FakeProcess("a"), FakeProcess("b")]
+    group._processes = processes
+
+    await group.shutdown(join_timeout=1)
+
+    assert all(process.met_peer for process in processes)
+    assert group.processes == []
+
+
+@pytest.mark.asyncio
+async def test_stage_group_shutdown_terminates_after_join_failure() -> None:
+    class FailingJoinProcess:
+        name = "failed-join"
+        pid = 1
+
+        def __init__(self) -> None:
+            self._alive = True
+            self.join_count = 0
+            self.terminated = False
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            self.join_count += 1
+            if self.join_count == 1:
+                raise RuntimeError("join failed")
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self._alive = False
+
+    group = mp_runner.StageGroup(
+        "test",
+        [SimpleNamespace(stage_specs=[])],
+    )
+    process = FailingJoinProcess()
+    group._processes = [process]
+
+    await group.shutdown(join_timeout=1)
+
+    assert process.terminated is True
+    assert process.is_alive() is False
+    assert group.processes == []
+
+
+@pytest.mark.asyncio
+async def test_stage_group_shutdown_cancellation_waits_for_cleanup() -> None:
+    join_entered = threading.Event()
+    release_join = threading.Event()
+
+    class BlockingJoinProcess:
+        name = "blocking-join"
+        pid = 1
+
+        def __init__(self) -> None:
+            self._alive = True
+            self.join_count = 0
+            self.terminated = False
+
+        def join(self, timeout=None) -> None:
+            del timeout
+            self.join_count += 1
+            if self.join_count == 1:
+                join_entered.set()
+                release_join.wait(timeout=1)
+                return
+            self._alive = False
+
+        def is_alive(self) -> bool:
+            return self._alive
+
+        def terminate(self) -> None:
+            self.terminated = True
+
+        def kill(self) -> None:
+            self._alive = False
+
+    group = mp_runner.StageGroup(
+        "test",
+        [SimpleNamespace(stage_specs=[])],
+    )
+    process = BlockingJoinProcess()
+    group._processes = [process]
+
+    shutdown_task = asyncio.create_task(group.shutdown(join_timeout=1))
+    assert await asyncio.to_thread(join_entered.wait, 1)
+    shutdown_task.cancel()
+    await asyncio.sleep(0)
+    assert shutdown_task.done() is False
+    shutdown_task.cancel()
+    await asyncio.sleep(0)
+    assert shutdown_task.done() is False
+    release_join.set()
+
+    with pytest.raises(asyncio.CancelledError):
+        await shutdown_task
+    assert process.terminated is True
+    assert process.is_alive() is False
+    assert group.processes == []
 
 
 async def _run_launcher_with_fake_runner(
