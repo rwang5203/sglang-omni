@@ -8,7 +8,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" /><meta name="viewport" content="width=device-width, initial-scale=1" />
 
-    <title>Release Notes &#8212; SGLang</title>
+    <title>NemotronLabs VoiceChat &#8212; SGLang</title>
   
   
   
@@ -42,26 +42,26 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
     <script src="../_static/copybutton.js?v=ccdb6887"></script>
     <script src="../_static/scripts/sphinx-book-theme.js?v=fab101a9"></script>
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
-    <script>DOCUMENTATION_OPTIONS.pagename = 'get_started/release_notes';</script>
+    <script>DOCUMENTATION_OPTIONS.pagename = 'cookbook/nemotron_voicechat';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
-    <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=d7738e8a"></script>
+    <script src="../_static/js/ming_omni_server_generator.js?v=7979a72f"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="Higgs TTS" href="../cookbook/higgs_tts.html" />
-    <link rel="prev" title="🚀 Installation" href="installation.html" />
+    <link rel="next" title="LLaDA2.0-Uni" href="llada2_uni.html" />
+    <link rel="prev" title="Ming-Omni" href="ming_omni.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 13, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 14, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -205,37 +205,45 @@
         <div class="sidebar-primary-item"><nav class="bd-links bd-docs-nav" aria-label="Main">
     <div class="bd-toc-item navbar-nav active">
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
-<ul class="current nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="installation.html">🚀 Installation</a></li>
-<li class="toctree-l1 current active"><a class="current reference internal" href="#">Release Notes</a></li>
+<ul class="nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
-<ul class="nav bd-sidenav">
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/higgs_tts.html">Higgs TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/voxtral_tts.html">Voxtral TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/fishaudio_s2_pro.html">Fish Audio S2-Pro</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_tts.html">Qwen3 TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_tts.html">Ming-Omni-TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts.html">MOSS-TTS</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_tts_local.html">MOSS-TTS-Local</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/dots_tts.html">dots.tts</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/minimax_music3.html">MiniMax Music 3</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/zonos2.html">ZONOS2</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_asr.html">Qwen3-ASR</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_asr.html">Fun-ASR-Nano</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/arkasr.html">ARK-ASR-3B</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
+<ul class="current nav bd-sidenav">
+<li class="toctree-l1"><a class="reference internal" href="higgs_tts.html">Higgs TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="voxtral_tts.html">Voxtral TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="fishaudio_s2_pro.html">Fish Audio S2-Pro</a></li>
+<li class="toctree-l1"><a class="reference internal" href="qwen3_tts.html">Qwen3 TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="ming_tts.html">Ming-Omni-TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="moss_tts.html">MOSS-TTS</a></li>
+<li class="toctree-l1"><a class="reference internal" href="moss_tts_local.html">MOSS-TTS-Local</a></li>
+<li class="toctree-l1"><a class="reference internal" href="dots_tts.html">dots.tts</a></li>
+<li class="toctree-l1"><a class="reference internal" href="minimax_music3.html">MiniMax Music 3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="zonos2.html">ZONOS2</a></li>
+<li class="toctree-l1"><a class="reference internal" href="qwen3_asr.html">Qwen3-ASR</a></li>
+<li class="toctree-l1"><a class="reference internal" href="fun_asr.html">Fun-ASR-Nano</a></li>
+<li class="toctree-l1"><a class="reference internal" href="arkasr.html">ARK-ASR-3B</a></li>
+<li class="toctree-l1"><a class="reference internal" href="moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
+<li class="toctree-l1"><a class="reference internal" href="whisper_asr.html">Whisper ASR</a></li>
+<li class="toctree-l1"><a class="reference internal" href="qwen3_omni.html">Qwen3-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1 current active"><a class="current reference internal" href="#">NemotronLabs VoiceChat</a></li>
+<li class="toctree-l1"><a class="reference internal" href="llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/qwen3_omni.html">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts.html">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/tts_process_topology.html">TTS Process Topology</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">Omni Router Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/process_topology_migration.html">Process Topology Migration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../basic_usage/omni_router.html">SGLang-Omni Rust Router</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../basic_usage/mps_dp.html">Same-GPU Data Parallelism with CUDA MPS</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
@@ -248,11 +256,13 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/apiserver_design.html">API Server Design</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/pipeline.html">Pipeline Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/config.html">Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/adding_parameters.html">Adding a Parameter</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/communication.html">Communication</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
 
     </div>
@@ -329,7 +339,7 @@
       
       
       
-      <li><a href="https://github.com/sgl-project/sglang-omni/blob/main/docs/get_started/release_notes.md?plain=1" target="_blank"
+      <li><a href="https://github.com/sgl-project/sglang-omni/blob/main/docs/cookbook/nemotron_voicechat.md?plain=1" target="_blank"
    class="btn btn-sm btn-source-file-button dropdown-item"
    title="Show source"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -346,7 +356,7 @@
       
       
       
-      <li><a href="https://github.com/sgl-project/sglang-omni/edit/main/docs/get_started/release_notes.md" target="_blank"
+      <li><a href="https://github.com/sgl-project/sglang-omni/edit/main/docs/cookbook/nemotron_voicechat.md" target="_blank"
    class="btn btn-sm btn-source-edit-button dropdown-item"
    title="Suggest edit"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -363,7 +373,7 @@
       
       
       
-      <li><a href="https://github.com/sgl-project/sglang-omni/issues/new?title=Issue%20on%20page%20%2Fget_started/release_notes.html&body=Your%20issue%20content%20here." target="_blank"
+      <li><a href="https://github.com/sgl-project/sglang-omni/issues/new?title=Issue%20on%20page%20%2Fcookbook/nemotron_voicechat.html&body=Your%20issue%20content%20here." target="_blank"
    class="btn btn-sm btn-source-issues-button dropdown-item"
    title="Open an issue"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -393,7 +403,7 @@
       
       
       
-      <li><a href="../_sources/get_started/release_notes.md" target="_blank"
+      <li><a href="../_sources/cookbook/nemotron_voicechat.md" target="_blank"
    class="btn btn-sm btn-download-source-button dropdown-item"
    title="Download source file"
    data-bs-placement="left" data-bs-toggle="tooltip"
@@ -476,7 +486,7 @@
               
 
 <div id="jb-print-docs-body" class="onlyprint">
-    <h1>Release Notes</h1>
+    <h1>NemotronLabs VoiceChat</h1>
     <!-- Table of contents -->
     <div id="print-main-content">
         <div id="jb-print-toc">
@@ -486,7 +496,11 @@
             </div>
             <nav aria-label="Page">
                 <ul class="pst-show_toc_level nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v0-1-1">v0.1.1</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-offline-example">Running the offline example</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#request-parameters">Request parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
 </ul>
             </nav>
         </div>
@@ -498,20 +512,73 @@
 <div id="searchbox"></div>
                 <article class="bd-article">
                   
-  <section class="tex2jax_ignore mathjax_ignore" id="release-notes">
-<h1>Release Notes<a class="headerlink" href="#release-notes" title="Link to this heading">#</a></h1>
-<section id="v0-1-1">
-<h2>v0.1.1<a class="headerlink" href="#v0-1-1" title="Link to this heading">#</a></h2>
-<p>First PyPI release. Install: <code class="docutils literal notranslate"><span class="pre">uv</span> <span class="pre">pip</span> <span class="pre">install</span> <span class="pre">&quot;sglang-omni==0.1.1&quot;</span></code>.</p>
-<p>Highlights since the early 0.1 line:</p>
+  <section class="tex2jax_ignore mathjax_ignore" id="nemotronlabs-voicechat">
+<h1>NemotronLabs VoiceChat<a class="headerlink" href="#nemotronlabs-voicechat" title="Link to this heading">#</a></h1>
+<p><a class="reference external" href="https://huggingface.co/nvidia/NVIDIA-NemotronLabs-VoiceChat-11B">NVIDIA-NemotronLabs-VoiceChat-11B</a> is an 11B end-to-end full-duplex speech-to-speech model. It is frame-locked at 12.5 Hz: every 80 ms of caller audio advances a Fast Conformer perception encoder, a Nemotron-H thinker that emits one text token and one function token per frame, an EAR-TTS talker that turns each text token into 31 RVQ codes, and an RVQ-VAE codec that renders the codes to 22.05 kHz audio. The model decides when to speak; there is no external VAD.</p>
+<p>SGLang-Omni currently serves it as an <strong>offline</strong> pipeline: one recording in, the agent’s reply text and audio out. Live duplex sessions over <code class="docutils literal notranslate"><span class="pre">/v1/realtime</span></code> are tracked in <a class="reference external" href="https://github.com/sgl-project/sglang-omni/issues/1909">#1909</a> and are not part of this page.</p>
+<section id="prerequisites">
+<h2>Prerequisites<a class="headerlink" href="#prerequisites" title="Link to this heading">#</a></h2>
+<p>The checkpoint is a single 44 GB fp32 <code class="docutils literal notranslate"><span class="pre">model.safetensors</span></code> with a NeMo-style <code class="docutils literal notranslate"><span class="pre">config.json</span></code>. Download it with:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>hf<span class="w"> </span>download<span class="w"> </span>nvidia/NVIDIA-NemotronLabs-VoiceChat-11B
+</pre></div>
+</div>
+<p>The checkpoint ships neither an HF tokenizer nor the backbone <code class="docutils literal notranslate"><span class="pre">config.json</span></code>; both come from the sibling repo named in its config (<code class="docutils literal notranslate"><span class="pre">model.stt.model.pretrained_llm</span></code>, currently <code class="docutils literal notranslate"><span class="pre">nvidia/NVIDIA-Nemotron-Nano-9B-v2</span></code>), about 17 MB of files and no weights. In offline environments, download those files too:</p>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>hf<span class="w"> </span>download<span class="w"> </span>nvidia/NVIDIA-Nemotron-Nano-9B-v2<span class="w"> </span>config.json<span class="w"> </span>tokenizer.json<span class="w"> </span>tokenizer_config.json<span class="w"> </span>special_tokens_map.json
+</pre></div>
+</div>
+<p>If they are missing and the Hub is unreachable, start-up fails with an error naming the repo and this command.</p>
+<p>The four stages share one GPU. Measured on one H200 (143.8 GB) with the offline example, the run peaks at about 129 GB: the talker engine reserves <code class="docutils literal notranslate"><span class="pre">mem_fraction_static=0.35</span></code> (about 47 GB, most of it KV pool) and the thinker takes what remains (about 73 GB, 17.7 GB of it bf16 weights). Lower <code class="docutils literal notranslate"><span class="pre">--talker.engine.mem_fraction_static</span></code> if the GPU is smaller or shared; the perception encoder and codec need only a few GB each.</p>
+</section>
+<section id="running-the-offline-example">
+<h2>Running the offline example<a class="headerlink" href="#running-the-offline-example" title="Link to this heading">#</a></h2>
+<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>examples/run_nemotron_voicechat.py<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--model-path<span class="w"> </span>/path/to/NVIDIA-NemotronLabs-VoiceChat-11B<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--audio<span class="w"> </span>/path/to/NVIDIA-NemotronLabs-VoiceChat-11B/turn_taking.wav<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--out<span class="w"> </span>reply.wav
+</pre></div>
+</div>
+<p>The example builds <code class="docutils literal notranslate"><span class="pre">NemotronVoiceChatPipelineConfig</span></code>, starts the four stages with <code class="docutils literal notranslate"><span class="pre">MultiProcessPipelineRunner</span></code>, sends one request and writes the reply as 16-bit PCM at 22.05 kHz. Pick the GPU with <code class="docutils literal notranslate"><span class="pre">CUDA_VISIBLE_DEVICES</span></code>. Start-up takes about a minute once the checkpoint is in the page cache; the 41 s <code class="docutils literal notranslate"><span class="pre">turn_taking.wav</span></code> sample renders in roughly real time.</p>
+<p>Two input conventions matter:</p>
 <ul class="simple">
-<li><p><strong>TTS</strong>: dots.tts, ZONOS2; TTS architecture refactor (shared engine/ref-encode/vocoder paths); OpenAI speech + uploaded voices</p></li>
-<li><p><strong>ASR</strong>: Fun-ASR, ARK-ASR; shared transcription serving; Qwen3-ASR pre-LM encoder and multilingual support</p></li>
-<li><p><strong>Router</strong>: multiprocess CP/DP router; full TTS route set (<code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, batch, stream, voices)</p></li>
-<li><p><strong>Runtime</strong>: CUDA-IPC weight sync / MPS-DP; speech API surface cleanup</p></li>
-<li><p><strong>Omni</strong>: Qwen3-Omni talker/streaming fixes and perf work</p></li>
+<li><p>The recording is resampled to 16 kHz and <strong>channel 0 is used</strong> (a two-party recording carries the agent on channel 1); it is zero-padded to a multiple of 1280 samples (80 ms).</p></li>
+<li><p>Leave trailing silence after the caller’s last words. The model answers only while it hears silence, so a clip that ends immediately after the question yields a short or empty reply.</p></li>
 </ul>
-<p>See <a class="reference internal" href="installation.html"><span class="std std-doc">Installation</span></a>. New model cookbooks are listed on the docs home page.</p>
+<p>The reply text is the thinker’s spoken tokens only; frames where the model is listening carry a marker token and are dropped from the text.</p>
+</section>
+<section id="request-parameters">
+<h2>Request parameters<a class="headerlink" href="#request-parameters" title="Link to this heading">#</a></h2>
+<div class="pst-scrollable-table-container"><table class="table">
+<thead>
+<tr class="row-odd"><th class="head"><p>Parameter</p></th>
+<th class="head"><p>Effect</p></th>
+</tr>
+</thead>
+<tbody>
+<tr class="row-even"><td><p><code class="docutils literal notranslate"><span class="pre">temperature</span></code>, <code class="docutils literal notranslate"><span class="pre">top_p</span></code>, <code class="docutils literal notranslate"><span class="pre">top_k</span></code></p></td>
+<td><p><strong>Ignored.</strong> The thinker always decodes greedily so that the tokens it streams to the talker are the tokens it committed to; a non-zero <code class="docutils literal notranslate"><span class="pre">temperature</span></code> logs a warning.</p></td>
+</tr>
+<tr class="row-odd"><td><p><code class="docutils literal notranslate"><span class="pre">max_new_tokens</span></code></p></td>
+<td><p>Ignored; the frame count is fixed by the input length (one token per 80 ms).</p></td>
+</tr>
+</tbody>
+</table>
+</div>
+<p>Audio randomness is governed by the checkpoint’s own settings, read from <code class="docutils literal notranslate"><span class="pre">config.json</span></code> (<code class="docutils literal notranslate"><span class="pre">inference_noise_scale</span></code>, <code class="docutils literal notranslate"><span class="pre">inference_top_p_or_k</span></code>): the talker samples its codes with Gumbel-max component selection and Gaussian noise inside the MoG head, so two runs on the same input produce different code sequences and slightly different audio even though the text is identical. There is no <code class="docutils literal notranslate"><span class="pre">seed</span></code> control yet.</p>
+</section>
+<section id="known-limitations">
+<h2>Known limitations<a class="headerlink" href="#known-limitations" title="Link to this heading">#</a></h2>
+<ul class="simple">
+<li><p>Offline, single request at a time (<code class="docutils literal notranslate"><span class="pre">max_running_requests=1</span></code> for both engines). No barge-in or interrupt API.</p></li>
+<li><p>Single speaker (<code class="docutils literal notranslate"><span class="pre">Aria</span></code>, the checkpoint’s baked-in prompt latents).</p></li>
+<li><p>The <code class="docutils literal notranslate"><span class="pre">function_head</span></code> tool-call channel is decoded and carried through but nothing acts on it.</p></li>
+<li><p>Classifier-free guidance is off (<code class="docutils literal notranslate"><span class="pre">guidance_scale=0</span></code>) although the checkpoint config enables it at 0.2.</p></li>
+<li><p>Talker output is not bit-identical to NeMo’s offline script even with deterministic sampling on both sides (about 82 % of quantizer cells and 63 of 150 frames agree on a 12 s fixture; transcripts and amplitude envelopes match). Known causes: the backbone and KV cache run in bfloat16 because SGLang’s attention backends and <code class="docutils literal notranslate"><span class="pre">sgl_kernel</span></code>’s Gemma RMSNorm have no fp32 path, while NeMo runs the whole talker in fp32; NeMo’s offline script enables classifier-free guidance by default; and NeMo’s offline recipe walks the system-prompt region before frame 0 (realtime convention here; see <code class="docutils literal notranslate"><span class="pre">prompt_region_steps</span></code>). The thinker is frame-exact with NeMo.</p></li>
+<li><p>NeMo decodes the perception encoder’s flush row as a 151st frame; this pipeline computes it but does not decode it, so replies are one frame (80 ms) shorter.</p></li>
+</ul>
+</section>
+<section id="tests">
+<h2>Tests<a class="headerlink" href="#tests" title="Link to this heading">#</a></h2>
+<p><code class="docutils literal notranslate"><span class="pre">tests/unit_test/nemotron_voicechat/</span></code> runs on CPU without weights: request frame counts, streaming codec equivalence with whole-utterance decoding, and checkpoint-shim isolation.</p>
 </section>
 </section>
 
@@ -527,20 +594,20 @@
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="installation.html"
+       href="ming_omni.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">🚀 Installation</p>
+        <p class="prev-next-title">Ming-Omni</p>
       </div>
     </a>
     <a class="right-next"
-       href="../cookbook/higgs_tts.html"
+       href="llada2_uni.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">Higgs TTS</p>
+        <p class="prev-next-title">LLaDA2.0-Uni</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -562,7 +629,11 @@
   </div>
   <nav id="pst-page-toc-nav" class="page-toc" aria-labelledby="pst-page-navigation-heading-2">
     <ul class="pst-show_toc_level nav section-nav flex-column">
-<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#v0-1-1">v0.1.1</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#prerequisites">Prerequisites</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#running-the-offline-example">Running the offline example</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#request-parameters">Request parameters</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#known-limitations">Known limitations</a></li>
+<li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#tests">Tests</a></li>
 </ul>
   </nav></div>
 
@@ -596,7 +667,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 13, 2026.
+  Last updated on Sep 14, 2026.
   <br/>
 </p>
   </div>

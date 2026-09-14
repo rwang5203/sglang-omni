@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=1a9ffd16"></script>
+    <script src="../_static/documentation_options.js?v=98feffa1"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -51,17 +51,17 @@
     <script crossorigin="anonymous" integrity="sha256-Ae2Vz/4ePdIu6ZyI/5ZGsYnb+m0JlOmKPjt6XZ9JJkA=" src="https://cdnjs.cloudflare.com/ajax/libs/require.js/2.3.4/require.min.js"></script>
     <script>DOCUMENTATION_OPTIONS.pagename = 'basic_usage/qwen3_omni';</script>
     <script>DOCUMENTATION_OPTIONS.search_as_you_type = false;</script>
-    <script src="../_static/js/qwen3_omni_server_generator.js?v=66f6ff63"></script>
-    <script src="../_static/js/ming_omni_server_generator.js?v=694b1473"></script>
+    <script src="../_static/js/qwen3_omni_server_generator.js?v=d7738e8a"></script>
+    <script src="../_static/js/ming_omni_server_generator.js?v=7979a72f"></script>
     <link rel="icon" href="../_static/logo.ico"/>
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
-    <link rel="next" title="TTS Model Usage" href="tts.html" />
-    <link rel="prev" title="LLaDA2.0-Uni" href="../cookbook/llada2_uni.html" />
+    <link rel="next" title="Audio Translations" href="audio_translations.html" />
+    <link rel="prev" title="AuK" href="../cookbook/auk.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.1" />
-    <meta name="docbuild:last-update" content="Aug 13, 2026"/>
+  <meta name="docsearch:version" content="0.1.5" />
+    <meta name="docbuild:last-update" content="Sep 14, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -207,7 +207,9 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="../get_started/installation.html">🚀 Installation</a></li>
-<li class="toctree-l1"><a class="reference internal" href="../get_started/release_notes.html">Release Notes</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_npu.html">Installation — Ascend NPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -228,14 +230,20 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/fun_cosyvoice3.html">Fun-CosyVoice3</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/auk.html">AuK</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">General Usage</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">Omni Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="audio_translations.html">Audio Translations</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts.html">TTS Model Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="process_topology.html">Process Topology, Replicas, and GPU Sharing</a></li>
 <li class="toctree-l1"><a class="reference internal" href="tts_process_topology.html">TTS Process Topology</a></li>
-<li class="toctree-l1"><a class="reference internal" href="omni_router.html">Omni Router Usage</a></li>
+<li class="toctree-l1"><a class="reference internal" href="process_topology_migration.html">Process Topology Migration</a></li>
+<li class="toctree-l1"><a class="reference internal" href="omni_router.html">SGLang-Omni Rust Router</a></li>
 <li class="toctree-l1"><a class="reference internal" href="mps_dp.html">Same-GPU Data Parallelism with CUDA MPS</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Benchmarks</span></p>
@@ -248,11 +256,13 @@
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/apiserver_design.html">API Server Design</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/pipeline.html">Pipeline Overview</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/config.html">Config</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/adding_parameters.html">Adding a Parameter</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/communication.html">Communication</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/reference_encode_service.html">Reference Encode Service</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/profiler.html">Request-level profiler</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/qwen3_asr_concurrency_profile.html">Qwen3-ASR High-Concurrency Benchmark and Bottleneck Profile</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../developer_reference/rl_admin_control.html">RL Admin Control</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../developer_reference/bump_version.html">Bumping the SGLang Pin</a></li>
 </ul>
 
     </div>
@@ -495,9 +505,10 @@
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speech-mode">Speech Mode</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#codec-coalescing-and-first-audio-latency">Codec Coalescing and First-Audio Latency</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Launch the Server</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#speech-stage-placement">Speech Stage Placement</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-speech-with-server-vad">Realtime Speech with Server VAD</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-speech-with-server-side-turn-detection">Realtime Speech with Server-Side Turn Detection</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-gpu-fp8-on-h100-h20">Single-GPU FP8 on H100/H20</a></li>
@@ -537,6 +548,12 @@
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8008</span>
 </pre></div>
 </div>
+<p>Multimodal preprocessing (tokenization, image/video/audio feature extraction)
+runs serially by default. Add <code class="docutils literal notranslate"><span class="pre">--preprocessing.factory.max_concurrency</span> <span class="pre">4</span></code> to
+run it on a thread pool when CPU preprocessing is the bottleneck under
+concurrent load. Threaded preprocessing changes how requests arrive at the
+thinker, so greedy outputs of the bf16 MoE can differ from the serial default;
+keep the default when comparing accuracy across runs.</p>
 <p>For MMSU-style audio-input / text-output benchmarks with short requests, use
 the fused text-path config so the full text path stays inside one worker
 process:</p>
@@ -553,32 +570,32 @@ process:</p>
 <p>Send an image with a text question to get a text response.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;How many cars are there in the picture?&quot;}],</span>
-<span class="s1">    &quot;images&quot;: [&quot;tests/data/cars.jpg&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": "How many cars are there in the picture?"}],</span>
+<span class="s1">    "images": ["tests/data/cars.jpg"],</span>
+<span class="s1">    "modalities": ["text"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;How many cars are there in the picture?&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;images&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/cars.jpg&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">"How many cars are there in the picture?"</span><span class="p">}],</span>
+        <span class="s2">"images"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/cars.jpg"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">][</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">][</span><span class="s2">"content"</span><span class="p">])</span>
 </pre></div>
 </div>
 </section>
@@ -590,34 +607,34 @@ process:</p>
 </div></blockquote>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;&quot;}],</span>
-<span class="s1">    &quot;images&quot;: [&quot;tests/data/cars.jpg&quot;],</span>
-<span class="s1">    &quot;audios&quot;: [&quot;tests/data/query_to_cars.wav&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": ""}],</span>
+<span class="s1">    "images": ["tests/data/cars.jpg"],</span>
+<span class="s1">    "audios": ["tests/data/query_to_cars.wav"],</span>
+<span class="s1">    "modalities": ["text"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;images&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/cars.jpg&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;audios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/query_to_cars.wav&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}],</span>
+        <span class="s2">"images"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/cars.jpg"</span><span class="p">],</span>
+        <span class="s2">"audios"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/query_to_cars.wav"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">][</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">][</span><span class="s2">"content"</span><span class="p">])</span>
 </pre></div>
 </div>
 </section>
@@ -629,34 +646,34 @@ plus a spoken question/options WAV, with only routing and answer-format
 instructions in the text message.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;&quot;}],</span>
-<span class="s1">    &quot;videos&quot;: [&quot;tests/data/draw.mp4&quot;],</span>
-<span class="s1">    &quot;audios&quot;: [&quot;tests/data/query_to_draw.wav&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": ""}],</span>
+<span class="s1">    "videos": ["tests/data/draw.mp4"],</span>
+<span class="s1">    "audios": ["tests/data/query_to_draw.wav"],</span>
+<span class="s1">    "modalities": ["text"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
 <div class="highlight-python notranslate"><div class="highlight"><pre><span></span><span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;videos&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/draw.mp4&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;audios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/query_to_draw.wav&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}],</span>
+        <span class="s2">"videos"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/draw.mp4"</span><span class="p">],</span>
+        <span class="s2">"audios"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/query_to_draw.wav"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">][</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">][</span><span class="s2">"content"</span><span class="p">])</span>
 </pre></div>
 </div>
 </section>
@@ -665,6 +682,38 @@ instructions in the text message.</p>
 <h2>Speech Mode<a class="headerlink" href="#speech-mode" title="Link to this heading">#</a></h2>
 <p>Speech mode runs the full eight-stage pipeline on one or more GPUs. It produces
 both text (from the thinker) and audio (from the talker) output.</p>
+<section id="codec-coalescing-and-first-audio-latency">
+<h3>Codec Coalescing and First-Audio Latency<a class="headerlink" href="#codec-coalescing-and-first-audio-latency" title="Link to this heading">#</a></h3>
+<p>The speech pipeline sets <code class="docutils literal notranslate"><span class="pre">codec_coalesce_frames=10</span></code>,
+<code class="docutils literal notranslate"><span class="pre">codec_coalesce_early_frames=10</span></code>, and <code class="docutils literal notranslate"><span class="pre">codec_coalesce_first_frames=0</span></code> under
+<code class="docutils literal notranslate"><span class="pre">stages.talker_ar.factory</span></code>. The first 10 codec frames are sent individually;
+later frames are coalesced into groups of 10. Omitting a YAML override keeps
+these pipeline defaults; set <code class="docutils literal notranslate"><span class="pre">codec_coalesce_early_frames=0</span></code> explicitly to
+disable the early prefix. This aligns with the default serial Code2Wav
+10-frame threshold: the first three windows contain 10, 20, and 30 frames,
+and subsequent full windows contain 35 frames including left context.
+These shapes can use the captured serial windows when CUDA Graph is enabled.
+An early prefix of 12 with this serial configuration instead produces
+22- and 32-frame windows that fall back to eager execution.</p>
+<p>With Code2Wav batching enabled, <code class="docutils literal notranslate"><span class="pre">initial_codec_chunk_frames=2</span></code>, and
+<code class="docutils literal notranslate"><span class="pre">stream_chunk_size=10</span></code>, explicitly set <code class="docutils literal notranslate"><span class="pre">codec_coalesce_early_frames=12</span></code> to
+make the first two windows eligible
+at generated frames 2 and 12.
+Uniform groups of 10 (<code class="docutils literal notranslate"><span class="pre">early_frames=0</span></code>, <code class="docutils literal notranslate"><span class="pre">first_frames=0</span></code>) instead publish the
+first group at step 11: the sender retains the newest row until the next step
+can exclude EOS, or the request finishes. For a request that continues past
+step 10, first-window input readiness therefore moves from step 2 to step 11,
+adding nine Talker decode intervals. If the interval is approximately <code class="docutils literal notranslate"><span class="pre">d</span></code> ms,
+the added input wait is approximately <code class="docutils literal notranslate"><span class="pre">9d</span></code> ms. With the serial 10-frame first
+window, readiness instead moves from step 10 to step 11. The default 10-frame
+early prefix preserves readiness at step 10; the next two windows become
+ready at steps 21 and 31. The extra step after the prefix retains the newest
+row for EOS detection, compared with steps 20 and 30 without coalescing.</p>
+<p>This is an input-readiness estimate, not a measured end-to-end TTFA delta or
+nine frames of audio playback time. Actual TTFA also depends on transport,
+queueing, and vocoder execution; the overall coalescing benchmark does not
+isolate the early-prefix setting.</p>
+</section>
 <section id="id1">
 <h3>Launch the Server<a class="headerlink" href="#id1" title="Link to this heading">#</a></h3>
 <p>Speech mode can run as a colocated one-GPU worker using the colocated config:</p>
@@ -679,19 +728,35 @@ both text (from the thinker) and audio (from the talker) output.</p>
 <p>Exact-shape CUDA Graph replay is enabled by default for Qwen3-Omni Code2Wav.
 The default stage config supplies a 2% typed GPU memory budget; colocated
 example configs override it with their hardware-specific budget.</p>
-<p>To disable replay, add this runtime override to the YAML config:</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">runtime_overrides</span><span class="p">:</span>
+<p>To disable replay, set it on the stage in the YAML config:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">stages</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">code2wav</span><span class="p">:</span>
-<span class="w">    </span><span class="nt">enable_cuda_graph</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<span class="w">    </span><span class="nt">factory</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enable_cuda_graph</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
 </pre></div>
 </div>
 <p>When replay is enabled, a custom Code2Wav stage must define
-<code class="docutils literal notranslate"><span class="pre">runtime.resources.total_gpu_memory_fraction</span></code>; startup rejects a missing typed
-budget before loading the model.</p>
+<code class="docutils literal notranslate"><span class="pre">gpu_memory_fraction</span></code>; startup rejects a missing typed budget before loading
+the model.</p>
 <p>The feature derives the exact <code class="docutils literal notranslate"><span class="pre">B=1</span></code> threshold windows from
 <code class="docutils literal notranslate"><span class="pre">stream_chunk_size</span></code> and <code class="docutils literal notranslate"><span class="pre">left_context_size</span></code>; the defaults capture
 <code class="docutils literal notranslate"><span class="pre">T{10,20,30,35}</span></code>. Unsupported shapes and final stream tails run eagerly.
 Capture-time incompatibilities also fall back to eager execution.</p>
+<p>Output overlap is also enabled by default on CUDA devices: each threshold
+window’s waveform readback runs as an asynchronous device-to-host copy into a
+pinned staging buffer and is materialized while the GPU computes the next
+window, and the codec EOS check runs once per window instead of once per
+frame. The first window of every request stays synchronous, so
+time-to-first-audio is unchanged. For successfully completed requests, audio
+bytes and message boundaries are identical to the synchronous path. A request
+that fails or is aborted can drop an un-emitted pending window while its
+in-flight staging buffer is retired. To disable it:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">stages</span><span class="p">:</span>
+<span class="w">  </span><span class="nt">code2wav</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">factory</span><span class="p">:</span>
+<span class="w">      </span><span class="nt">enable_output_overlap</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+</pre></div>
+</div>
 <p>For manual multi-GPU placement, use the example script:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>python<span class="w"> </span>examples/run_omni.py<span class="w"> </span>qwen3-speech-server<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-Omni-30B-A3B-Instruct<span class="w"> </span><span class="se">\</span>
@@ -721,8 +786,8 @@ the value globally or per AR stage:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-Omni-30B-A3B-Instruct<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--port<span class="w"> </span><span class="m">8008</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--thinker-mem-fraction-static<span class="w"> </span><span class="m">0</span>.88<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--talker-mem-fraction-static<span class="w"> </span><span class="m">0</span>.88
+<span class="w">  </span>--thinker.engine.mem_fraction_static<span class="w"> </span><span class="m">0</span>.88<span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>--talker_ar.engine.mem_fraction_static<span class="w"> </span><span class="m">0</span>.88
 </pre></div>
 </div>
 <p>The speech server launcher exposes the same per-stage controls:</p>
@@ -737,23 +802,22 @@ the value globally or per AR stage:</p>
 <span class="w">  </span>--talker-mem-fraction-static<span class="w"> </span><span class="m">0</span>.88
 </pre></div>
 </div>
-<p><code class="docutils literal notranslate"><span class="pre">--mem-fraction-static</span></code> applies to both Qwen AR stages. Per-stage flags override
-the global value for that stage. Values must be greater than <code class="docutils literal notranslate"><span class="pre">0</span></code> and less than
-<code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">--mem-fraction-static</span></code> applies to every SGLang engine stage. A dotted
+per-stage path overrides the global value for that stage. Values must be
+greater than <code class="docutils literal notranslate"><span class="pre">0</span></code> and less than <code class="docutils literal notranslate"><span class="pre">1</span></code>.</p>
 <p>The thinker admits up to 64 running requests by default. Use the
 thinker-specific flag to lower or raise that limit in either text-only or
 speech mode:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
 <span class="w">  </span>--model-path<span class="w"> </span>Qwen/Qwen3-Omni-30B-A3B-Instruct<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--thinker-max-running-requests<span class="w"> </span><span class="m">16</span>
+<span class="w">  </span>--thinker.engine.max_running_requests<span class="w"> </span><span class="m">16</span>
 </pre></div>
 </div>
-<p><code class="docutils literal notranslate"><span class="pre">--max-running-requests</span></code> continues to target the generation stage, which is the
-talker in the Qwen3-Omni speech pipeline. To configure the thinker through a
-pipeline YAML file instead, use the stage runtime override:</p>
-<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">runtime_overrides</span><span class="p">:</span>
+<p>To configure the thinker through a pipeline YAML file instead, set the same
+path under the stage entry:</p>
+<div class="highlight-yaml notranslate"><div class="highlight"><pre><span></span><span class="nt">stages</span><span class="p">:</span>
 <span class="w">  </span><span class="nt">thinker</span><span class="p">:</span>
-<span class="w">    </span><span class="nt">server_args_overrides</span><span class="p">:</span>
+<span class="w">    </span><span class="nt">engine</span><span class="p">:</span>
 <span class="w">      </span><span class="nt">max_running_requests</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">16</span>
 </pre></div>
 </div>
@@ -764,15 +828,15 @@ pipeline YAML file instead, use the stage runtime override:</p>
 at about 86% median utilization. Give it a GPU of its own. The code2wav
 vocoder is light by comparison (9–13% median utilization) and shares the
 thinker’s GPU by default. That default holds only when the thinker stays on
-its own default GPU — a <code class="docutils literal notranslate"><span class="pre">--thinker-gpus</span></code> override moves the thinker alone,
-not code2wav, so pass <code class="docutils literal notranslate"><span class="pre">--code2wav-gpu</span></code> explicitly too if you relocate the
+its own default GPU — a <code class="docutils literal notranslate"><span class="pre">--thinker.gpu</span></code> override moves the thinker alone,
+not code2wav, so pass <code class="docutils literal notranslate"><span class="pre">--code2wav.gpu</span></code> explicitly too if you relocate the
 thinker.</p>
 <p>This is the default topology for <code class="docutils literal notranslate"><span class="pre">sgl-omni</span> <span class="pre">serve</span></code> without GPU overrides:
 thinker alone, talker alone, code2wav on the thinker’s GPU. When code2wav
 shares the thinker’s GPU, the thinker’s auto-sized KV pool shrinks to make
 room for it — about 4.3 GiB smaller, measured on H200, since the vocoder
 itself needs roughly 1.4–1.6 GiB. That adjustment only happens for the
-auto-sized budget: an explicitly pinned <code class="docutils literal notranslate"><span class="pre">--thinker-mem-fraction-static</span></code>
+auto-sized budget: an explicitly pinned <code class="docutils literal notranslate"><span class="pre">--thinker.engine.mem_fraction_static</span></code>
 gets no automatic carve-out, so a tightly pinned fraction should leave
 headroom for code2wav.</p>
 <p>A concurrency-8 experiment held code2wav fixed on the thinker’s GPU and
@@ -828,8 +892,8 @@ GPUs, so these numbers describe that experiment’s topology change, not the
 default code2wav placement. Streaming TTS workloads should prefer this
 layout regardless, since TTFA is the latency users notice first.</p>
 </section>
-<section id="realtime-speech-with-server-vad">
-<h3>Realtime Speech with Server VAD<a class="headerlink" href="#realtime-speech-with-server-vad" title="Link to this heading">#</a></h3>
+<section id="realtime-speech-with-server-side-turn-detection">
+<h3>Realtime Speech with Server-Side Turn Detection<a class="headerlink" href="#realtime-speech-with-server-side-turn-detection" title="Link to this heading">#</a></h3>
 <p>The speech pipeline can stream spoken responses over <code class="docutils literal notranslate"><span class="pre">/v1/realtime</span></code>. Enable the
 WebSocket endpoint on the standard speech pipeline:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>sgl-omni<span class="w"> </span>serve<span class="w"> </span><span class="se">\</span>
@@ -841,28 +905,45 @@ WebSocket endpoint on the standard speech pipeline:</p>
 <p>After connecting to <code class="docutils literal notranslate"><span class="pre">ws://localhost:8008/v1/realtime</span></code>, request text and audio
 output:</p>
 <div class="highlight-json notranslate"><div class="highlight"><pre><span></span><span class="p">{</span>
-<span class="w">  </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;session.update&quot;</span><span class="p">,</span>
-<span class="w">  </span><span class="nt">&quot;session&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<span class="w">    </span><span class="nt">&quot;modalities&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span><span class="w"> </span><span class="s2">&quot;audio&quot;</span><span class="p">],</span>
-<span class="w">    </span><span class="nt">&quot;input_audio_format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pcm16&quot;</span><span class="p">,</span>
-<span class="w">    </span><span class="nt">&quot;output_audio_format&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;pcm16&quot;</span>
+<span class="w">  </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"session.update"</span><span class="p">,</span>
+<span class="w">  </span><span class="nt">"session"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">    </span><span class="nt">"modalities"</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="s2">"text"</span><span class="p">,</span><span class="w"> </span><span class="s2">"audio"</span><span class="p">],</span>
+<span class="w">    </span><span class="nt">"input_audio_format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pcm16"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"output_audio_format"</span><span class="p">:</span><span class="w"> </span><span class="s2">"pcm16"</span><span class="p">,</span>
+<span class="w">    </span><span class="nt">"turn_detection"</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<span class="w">      </span><span class="nt">"type"</span><span class="p">:</span><span class="w"> </span><span class="s2">"semantic_vad"</span><span class="p">,</span>
+<span class="w">      </span><span class="nt">"eagerness"</span><span class="p">:</span><span class="w"> </span><span class="s2">"medium"</span>
+<span class="w">    </span><span class="p">}</span>
 <span class="w">  </span><span class="p">}</span>
 <span class="p">}</span>
 </pre></div>
 </div>
-<p>Stream mono 16 kHz PCM16 input with <code class="docutils literal notranslate"><span class="pre">input_audio_buffer.append</span></code>. Server VAD
-automatically commits each utterance and starts generation. Text arrives in
-<code class="docutils literal notranslate"><span class="pre">response.text.delta</span></code> events; spoken output arrives as base64-encoded mono
-24 kHz PCM16 in <code class="docutils literal notranslate"><span class="pre">response.audio.delta</span></code> events, followed by
+<p>Stream mono 16 kHz PCM16 input with <code class="docutils literal notranslate"><span class="pre">input_audio_buffer.append</span></code>. Turn
+detection auto-commits each utterance and starts generation. Check
+<code class="docutils literal notranslate"><span class="pre">session.created.capabilities.turn_detection</span></code> before requesting
+<code class="docutils literal notranslate"><span class="pre">semantic_vad</span></code> — older servers only support <code class="docutils literal notranslate"><span class="pre">server_vad</span></code>.</p>
+<p><code class="docutils literal notranslate"><span class="pre">server_vad</span></code> (default) ends a turn after a fixed silence duration.
+<code class="docutils literal notranslate"><span class="pre">semantic_vad</span></code> adds a GPU Smart Turn v3.2 model on top of Silero speech
+detection, so a natural mid-thought pause doesn’t end the turn early.
+<code class="docutils literal notranslate"><span class="pre">eagerness</span></code> (<code class="docutils literal notranslate"><span class="pre">low</span></code>/<code class="docutils literal notranslate"><span class="pre">medium</span></code>/<code class="docutils literal notranslate"><span class="pre">high</span></code>, default <code class="docutils literal notranslate"><span class="pre">medium</span></code>) trades latency for
+patience; <code class="docutils literal notranslate"><span class="pre">silence_duration_ms</span></code> only applies to <code class="docutils literal notranslate"><span class="pre">server_vad</span></code>.</p>
+<p>To enable <code class="docutils literal notranslate"><span class="pre">semantic_vad</span></code>, provision the BSD-2 licensed
+<a class="reference external" href="https://huggingface.co/pipecat-ai/smart-turn-v3">Smart Turn v3.2</a>
+<code class="docutils literal notranslate"><span class="pre">smart-turn-v3.2-gpu.onnx</span></code> model and set <code class="docutils literal notranslate"><span class="pre">SGLANG_OMNI_SMART_TURN_MODEL_PATH</span></code>
+to its path (file or containing directory). The server never downloads it and
+verifies its SHA-256 on load. If the model is missing or invalid, the
+endpoint still works — semantic requests just fall back to <code class="docutils literal notranslate"><span class="pre">server_vad</span></code>.</p>
+<p>Text arrives in <code class="docutils literal notranslate"><span class="pre">response.text.delta</span></code> events; spoken output arrives as
+base64-encoded mono 24 kHz PCM16 in <code class="docutils literal notranslate"><span class="pre">response.audio.delta</span></code> events, followed by
 <code class="docutils literal notranslate"><span class="pre">response.audio.done</span></code> and <code class="docutils literal notranslate"><span class="pre">response.done</span></code>.</p>
 <p>Audio output is opt-in: sessions remain text-only unless both modalities are
 requested. A thinker-only server rejects audio negotiation because it has no
 <code class="docutils literal notranslate"><span class="pre">code2wav</span></code> stage.</p>
 <p>For text-and-audio sessions, server-owned barge-in is enabled by default. When
-server VAD emits <code class="docutils literal notranslate"><span class="pre">input_audio_buffer.speech_started</span></code>, the active response is
-cancelled with reason <code class="docutils literal notranslate"><span class="pre">turn_detected</span></code>; its user transcription still completes
-and enters conversation history before the next queued turn runs. Cancelled
-assistant output is not added to conversation history.</p>
+the active turn detector emits <code class="docutils literal notranslate"><span class="pre">input_audio_buffer.speech_started</span></code>, the active
+response is cancelled with reason <code class="docutils literal notranslate"><span class="pre">turn_detected</span></code>; its user transcription still
+completes and enters conversation history before the next queued turn runs.
+Cancelled assistant output is not added to conversation history.</p>
 <p>Clients must stop buffered playback on <code class="docutils literal notranslate"><span class="pre">speech_started</span></code> and reject every later
 <code class="docutils literal notranslate"><span class="pre">response.audio.delta</span></code> for that response until its <code class="docutils literal notranslate"><span class="pre">response.done</span></code>. If speech
 starts before <code class="docutils literal notranslate"><span class="pre">response.created</span></code>, retain a pending-interruption flag and reject
@@ -876,13 +957,14 @@ also send <code class="docutils literal notranslate"><span class="pre">conversat
 removes that assistant item from conversation history. The whole assistant
 transcript is removed because the endpoint cannot align text with played audio.</p>
 <p>Set <code class="docutils literal notranslate"><span class="pre">turn_detection.interrupt_response</span></code> to <code class="docutils literal notranslate"><span class="pre">false</span></code> in <code class="docutils literal notranslate"><span class="pre">session.update</span></code> to opt
-out. This is the only <code class="docutils literal notranslate"><span class="pre">turn_detection</span></code> field applied dynamically by the current
-endpoint. Server VAD remains fixed at its startup defaults; <code class="docutils literal notranslate"><span class="pre">threshold</span></code>,
-<code class="docutils literal notranslate"><span class="pre">prefix_padding_ms</span></code>, and <code class="docutils literal notranslate"><span class="pre">silence_duration_ms</span></code> do not reconfigure it. Text-only
-responses are not interrupted automatically.</p>
+out. Partial updates preserve the active detector type and settings, so clients
+can change interruption behavior without dropping semantic VAD or its
+eagerness. Changing detector behavior rebuilds the detector and clears pending
+input audio; <code class="docutils literal notranslate"><span class="pre">interrupt_response</span></code> changes independently. Text-only responses
+are not interrupted automatically.</p>
 <p>The browser example in <code class="docutils literal notranslate"><span class="pre">playground/qwen-omni/realtime</span></code> captures microphone
-input and lets the user select text-only output or text plus streamed PCM16
-audio playback.</p>
+input, negotiates turn-detection support per connection, and lets the user
+select text-only output or text plus streamed PCM16 audio playback.</p>
 </section>
 </section>
 <section id="single-gpu-fp8-on-h100-h20">
@@ -943,14 +1025,14 @@ with the AutoRound checkpoint:</p>
 <p>Send an image with a text question to get both text and audio responses. Set <code class="docutils literal notranslate"><span class="pre">&quot;modalities&quot;:</span> <span class="pre">[&quot;text&quot;,</span> <span class="pre">&quot;audio&quot;]</span></code> to enable audio output.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;How many cars are there in the picture?&quot;}],</span>
-<span class="s1">    &quot;images&quot;: [&quot;tests/data/cars.jpg&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;, &quot;audio&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": "How many cars are there in the picture?"}],</span>
+<span class="s1">    "images": ["tests/data/cars.jpg"],</span>
+<span class="s1">    "modalities": ["text", "audio"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
@@ -958,23 +1040,23 @@ with the AutoRound checkpoint:</p>
 <span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;How many cars are there in the picture?&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;images&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/cars.jpg&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;audio&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">"How many cars are there in the picture?"</span><span class="p">}],</span>
+        <span class="s2">"images"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/cars.jpg"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">,</span> <span class="s2">"audio"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">]</span>
+<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">]</span>
 
-<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"content"</span><span class="p">])</span>
 
-<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;audio&quot;</span><span class="p">][</span><span class="s2">&quot;data&quot;</span><span class="p">])</span>
-<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;output.wav&quot;</span><span class="p">,</span> <span class="s2">&quot;wb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"audio"</span><span class="p">][</span><span class="s2">"data"</span><span class="p">])</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
     <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">audio_data</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -984,15 +1066,15 @@ with the AutoRound checkpoint:</p>
 <p>Send an audio file with an image. The model hears the spoken question and sees the image, then responds with both text and audio.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;&quot;}],</span>
-<span class="s1">    &quot;images&quot;: [&quot;tests/data/cars.jpg&quot;],</span>
-<span class="s1">    &quot;audios&quot;: [&quot;tests/data/query_to_cars.wav&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;, &quot;audio&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": ""}],</span>
+<span class="s1">    "images": ["tests/data/cars.jpg"],</span>
+<span class="s1">    "audios": ["tests/data/query_to_cars.wav"],</span>
+<span class="s1">    "modalities": ["text", "audio"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
@@ -1000,24 +1082,24 @@ with the AutoRound checkpoint:</p>
 <span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;images&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/cars.jpg&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;audios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/query_to_cars.wav&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;audio&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}],</span>
+        <span class="s2">"images"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/cars.jpg"</span><span class="p">],</span>
+        <span class="s2">"audios"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/query_to_cars.wav"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">,</span> <span class="s2">"audio"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">]</span>
+<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">]</span>
 
-<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"content"</span><span class="p">])</span>
 
-<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;audio&quot;</span><span class="p">][</span><span class="s2">&quot;data&quot;</span><span class="p">])</span>
-<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;output.wav&quot;</span><span class="p">,</span> <span class="s2">&quot;wb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"audio"</span><span class="p">][</span><span class="s2">"data"</span><span class="p">])</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
     <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">audio_data</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -1027,15 +1109,15 @@ with the AutoRound checkpoint:</p>
 <p>Send a video with a spoken audio question. The model watches the video, hears the question, and responds with both text and audio.</p>
 <p><strong>cURL</strong></p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>curl<span class="w"> </span>-X<span class="w"> </span>POST<span class="w"> </span>http://localhost:8008/v1/chat/completions<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-H<span class="w"> </span><span class="s2">&quot;Content-Type: application/json&quot;</span><span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-d<span class="w"> </span><span class="s1">&#39;{</span>
-<span class="s1">    &quot;model&quot;: &quot;qwen3-omni&quot;,</span>
-<span class="s1">    &quot;messages&quot;: [{&quot;role&quot;: &quot;user&quot;, &quot;content&quot;: &quot;&quot;}],</span>
-<span class="s1">    &quot;videos&quot;: [&quot;tests/data/draw.mp4&quot;],</span>
-<span class="s1">    &quot;audios&quot;: [&quot;tests/data/query_to_draw.wav&quot;],</span>
-<span class="s1">    &quot;modalities&quot;: [&quot;text&quot;, &quot;audio&quot;],</span>
-<span class="s1">    &quot;max_tokens&quot;: 16</span>
-<span class="s1">  }&#39;</span>
+<span class="w">  </span>-H<span class="w"> </span><span class="s2">"Content-Type: application/json"</span><span class="w"> </span><span class="se">\</span>
+<span class="w">  </span>-d<span class="w"> </span><span class="s1">'{</span>
+<span class="s1">    "model": "qwen3-omni",</span>
+<span class="s1">    "messages": [{"role": "user", "content": ""}],</span>
+<span class="s1">    "videos": ["tests/data/draw.mp4"],</span>
+<span class="s1">    "audios": ["tests/data/query_to_draw.wav"],</span>
+<span class="s1">    "modalities": ["text", "audio"],</span>
+<span class="s1">    "max_tokens": 16</span>
+<span class="s1">  }'</span>
 </pre></div>
 </div>
 <p><strong>Python</strong></p>
@@ -1043,24 +1125,24 @@ with the AutoRound checkpoint:</p>
 <span class="kn">import</span><span class="w"> </span><span class="nn">requests</span>
 
 <span class="n">resp</span> <span class="o">=</span> <span class="n">requests</span><span class="o">.</span><span class="n">post</span><span class="p">(</span>
-    <span class="s2">&quot;http://localhost:8008/v1/chat/completions&quot;</span><span class="p">,</span>
+    <span class="s2">"http://localhost:8008/v1/chat/completions"</span><span class="p">,</span>
     <span class="n">json</span><span class="o">=</span><span class="p">{</span>
-        <span class="s2">&quot;model&quot;</span><span class="p">:</span> <span class="s2">&quot;qwen3-omni&quot;</span><span class="p">,</span>
-        <span class="s2">&quot;messages&quot;</span><span class="p">:</span> <span class="p">[{</span><span class="s2">&quot;role&quot;</span><span class="p">:</span> <span class="s2">&quot;user&quot;</span><span class="p">,</span> <span class="s2">&quot;content&quot;</span><span class="p">:</span> <span class="s2">&quot;&quot;</span><span class="p">}],</span>
-        <span class="s2">&quot;videos&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/draw.mp4&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;audios&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;tests/data/query_to_draw.wav&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;modalities&quot;</span><span class="p">:</span> <span class="p">[</span><span class="s2">&quot;text&quot;</span><span class="p">,</span> <span class="s2">&quot;audio&quot;</span><span class="p">],</span>
-        <span class="s2">&quot;max_tokens&quot;</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
+        <span class="s2">"model"</span><span class="p">:</span> <span class="s2">"qwen3-omni"</span><span class="p">,</span>
+        <span class="s2">"messages"</span><span class="p">:</span> <span class="p">[{</span><span class="s2">"role"</span><span class="p">:</span> <span class="s2">"user"</span><span class="p">,</span> <span class="s2">"content"</span><span class="p">:</span> <span class="s2">""</span><span class="p">}],</span>
+        <span class="s2">"videos"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/draw.mp4"</span><span class="p">],</span>
+        <span class="s2">"audios"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"tests/data/query_to_draw.wav"</span><span class="p">],</span>
+        <span class="s2">"modalities"</span><span class="p">:</span> <span class="p">[</span><span class="s2">"text"</span><span class="p">,</span> <span class="s2">"audio"</span><span class="p">],</span>
+        <span class="s2">"max_tokens"</span><span class="p">:</span> <span class="mi">16</span><span class="p">,</span>
     <span class="p">},</span>
 <span class="p">)</span>
 <span class="n">resp</span><span class="o">.</span><span class="n">raise_for_status</span><span class="p">()</span>
 <span class="n">result</span> <span class="o">=</span> <span class="n">resp</span><span class="o">.</span><span class="n">json</span><span class="p">()</span>
-<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">&quot;choices&quot;</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">&quot;message&quot;</span><span class="p">]</span>
+<span class="n">choice</span> <span class="o">=</span> <span class="n">result</span><span class="p">[</span><span class="s2">"choices"</span><span class="p">][</span><span class="mi">0</span><span class="p">][</span><span class="s2">"message"</span><span class="p">]</span>
 
-<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;content&quot;</span><span class="p">])</span>
+<span class="nb">print</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"content"</span><span class="p">])</span>
 
-<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">&quot;audio&quot;</span><span class="p">][</span><span class="s2">&quot;data&quot;</span><span class="p">])</span>
-<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">&quot;output.wav&quot;</span><span class="p">,</span> <span class="s2">&quot;wb&quot;</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
+<span class="n">audio_data</span> <span class="o">=</span> <span class="n">base64</span><span class="o">.</span><span class="n">b64decode</span><span class="p">(</span><span class="n">choice</span><span class="p">[</span><span class="s2">"audio"</span><span class="p">][</span><span class="s2">"data"</span><span class="p">])</span>
+<span class="k">with</span> <span class="nb">open</span><span class="p">(</span><span class="s2">"output.wav"</span><span class="p">,</span> <span class="s2">"wb"</span><span class="p">)</span> <span class="k">as</span> <span class="n">f</span><span class="p">:</span>
     <span class="n">f</span><span class="o">.</span><span class="n">write</span><span class="p">(</span><span class="n">audio_data</span><span class="p">)</span>
 </pre></div>
 </div>
@@ -1176,20 +1258,20 @@ with the AutoRound checkpoint:</p>
                   
 <div class="prev-next-area">
     <a class="left-prev"
-       href="../cookbook/llada2_uni.html"
+       href="../cookbook/auk.html"
        title="previous page">
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">LLaDA2.0-Uni</p>
+        <p class="prev-next-title">AuK</p>
       </div>
     </a>
     <a class="right-next"
-       href="tts.html"
+       href="audio_translations.html"
        title="next page">
       <div class="prev-next-info">
         <p class="prev-next-subtitle">next</p>
-        <p class="prev-next-title">TTS Model Usage</p>
+        <p class="prev-next-title">Audio Translations</p>
       </div>
       <i class="fa-solid fa-angle-right"></i>
     </a>
@@ -1220,9 +1302,10 @@ with the AutoRound checkpoint:</p>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#speech-mode">Speech Mode</a><ul class="pst-show_toc_level nav section-nav flex-column">
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#codec-coalescing-and-first-audio-latency">Codec Coalescing and First-Audio Latency</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#id1">Launch the Server</a></li>
 <li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#speech-stage-placement">Speech Stage Placement</a></li>
-<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-speech-with-server-vad">Realtime Speech with Server VAD</a></li>
+<li class="toc-h3 nav-item toc-entry"><a class="reference internal nav-link" href="#realtime-speech-with-server-side-turn-detection">Realtime Speech with Server-Side Turn Detection</a></li>
 </ul>
 </li>
 <li class="toc-h2 nav-item toc-entry"><a class="reference internal nav-link" href="#single-gpu-fp8-on-h100-h20">Single-GPU FP8 on H100/H20</a></li>
@@ -1266,7 +1349,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Aug 13, 2026.
+  Last updated on Sep 14, 2026.
   <br/>
 </p>
   </div>
