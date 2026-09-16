@@ -7,6 +7,8 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
+from sglang_omni.proto.continuation import UMMSegment
+
 
 @dataclass
 class Message:
@@ -144,9 +146,11 @@ class GenerateChunk:
     audio_data: Any = None
     media: list[dict[str, Any]] | None = None
     sample_rate: int | None = None
+    segment: UMMSegment | None = None
+    segments: list[UMMSegment] | None = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {
+        result = {
             "request_id": self.request_id,
             "index": self.index,
             "token_ids": list(self.token_ids),
@@ -165,6 +169,12 @@ class GenerateChunk:
             "media": self.media,
             "sample_rate": self.sample_rate,
         }
+
+        if self.segment is not None:
+            result["segment"] = self.segment.to_dict()
+        if self.segments is not None:
+            result["segments"] = [segment.to_dict() for segment in self.segments]
+        return result
 
 
 class AbortLevel(Enum):
@@ -211,6 +221,7 @@ class CompletionResult:
     omni_rollout: dict[str, Any] | None = None
     weight_version: str | None = None
     language: str | None = None
+    segments: list[UMMSegment] | None = None
 
 
 @dataclass
@@ -224,6 +235,7 @@ class CompletionStreamChunk:
     finish_reason: str | None = None
     usage: UsageInfo | None = None
     stage_name: str | None = None
+    segment: UMMSegment | None = None
 
 
 @dataclass

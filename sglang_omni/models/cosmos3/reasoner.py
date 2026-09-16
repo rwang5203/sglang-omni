@@ -17,12 +17,12 @@ from sglang_omni.scheduling.messages import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 
 
-def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> dict:
-    inputs = payload.request.inputs
+def build_chat_messages(inputs: Any) -> list[dict]:
+    """Keep the native chat representation for text and multimodal content."""
     if isinstance(inputs, str):
         messages = [{"role": "user", "content": inputs}]
     elif isinstance(inputs, list) and all(isinstance(m, dict) for m in inputs):
-        messages = inputs
+        messages = deepcopy(inputs)
     elif isinstance(inputs, dict) and isinstance(inputs.get("messages"), list):
         messages = deepcopy(inputs["messages"])
         if not all(isinstance(message, dict) for message in messages):
@@ -57,6 +57,11 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         raise ValueError("Reasoner inputs must be text or chat messages")
     if not messages:
         raise ValueError("Reasoner requests require at least one message")
+    return messages
+
+
+def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> dict:
+    messages = build_chat_messages(payload.request.inputs)
     params = dict(payload.request.params)
     for name in ("stage_sampling", "stage_params"):
         stage_params = params.pop(name, None)
@@ -303,11 +308,18 @@ def native_reasoner_kwargs(
 def create_reasoner_scheduler(
     model_path: str,
     *,
-    gpu_id: int = 0,
+    device: str | None = None,
+    gpu_id: int | None = None,
     max_concurrency: int = 8,
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, Any] | None = None,
 ) -> NativeReasonerScheduler:
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    concrete_device = resolve_concrete_device(device, gpu_id)
+    if concrete_device.index is None:
+        raise ValueError("Native Cosmos3 execution requires an indexed accelerator")
+    gpu_id = concrete_device.index
     if multiprocessing.current_process().daemon:
         raise RuntimeError("Native SRT requires allow_child_processes=true")
     from sglang import Engine

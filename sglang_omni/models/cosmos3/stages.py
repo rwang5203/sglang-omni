@@ -3,8 +3,12 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import multiprocessing
+import os
 import shutil
+import stat
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -14,6 +18,41 @@ from uuid import uuid4
 
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+
+INLINE_MEDIA_LIMIT_BYTES = 8 * 1024 * 1024
+
+
+def _inline_media(path: str, directory: Path, limit: int) -> dict[str, Any]:
+    """Read a bounded native output while its request directory is still owned."""
+    target = Path(path)
+    resolved = target.resolve(strict=True)
+    if not resolved.is_relative_to(directory.resolve(strict=True)):
+        raise ValueError("Native inline output is outside its owned request directory")
+    mime_types = {
+        ".png": ("image", "image/png"),
+        ".jpg": ("image", "image/jpeg"),
+        ".jpeg": ("image", "image/jpeg"),
+        ".webp": ("image", "image/webp"),
+        ".mp4": ("video", "video/mp4"),
+    }
+    if target.suffix.lower() not in mime_types:
+        raise ValueError("Unsupported native inline media type")
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        metadata = os.fstat(stream.fileno())
+        if not stat.S_ISREG(metadata.st_mode) or not 0 < metadata.st_size <= limit:
+            raise ValueError("Native inline media exceeds its regular file byte limit")
+        content = stream.read(limit + 1)
+        if not 0 < len(content) <= limit:
+            raise ValueError("Native inline media exceeds its byte limit")
+    kind, mime = mime_types[target.suffix.lower()]
+    return {
+        "kind": kind,
+        "mime_type": mime,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "url": f"data:{mime};base64," + base64.b64encode(content).decode("ascii"),
+    }
 
 
 def resolve_generation_options(
@@ -73,7 +112,18 @@ def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, A
 class NativeGenerationScheduler(SimpleScheduler):
     """Keep scheduler and pipeline execution in the native SGLang runtime."""
 
-    def __init__(self, generator: Any, output_dir: str):
+    def __init__(
+        self,
+        generator: Any,
+        output_dir: str,
+        inline_media_limit_bytes: int = INLINE_MEDIA_LIMIT_BYTES,
+    ):
+        if (
+            type(inline_media_limit_bytes) is not int
+            or not 0 < inline_media_limit_bytes <= INLINE_MEDIA_LIMIT_BYTES
+        ):
+            raise ValueError("Inline media limit must be positive and at most 8 MiB")
+        self.inline_media_limit_bytes = inline_media_limit_bytes
         self.generator = generator
         self.output_dir = output_dir
         self._native_requests: dict[str, _GenerationRequest] = {}
@@ -127,7 +177,10 @@ class NativeGenerationScheduler(SimpleScheduler):
             self._remove_request_directory(directory)
 
     def claim_result(self, result: StagePayload, *, terminal: bool) -> bool:
-        if not terminal:
+        # Inline UMM output has already released its temporary directory.
+        if result.continuation is not None:
+            return True
+        if not terminal and any("path" in item for item in result.data["media"]):
             raise ValueError(
                 "Saved native media requires terminal delivery; "
                 "use inline media for inter-stage routing"
@@ -145,7 +198,9 @@ class NativeGenerationScheduler(SimpleScheduler):
             request = self._native_requests.get(result.request_id)
             if request is not None and request.result is result:
                 self._native_requests.pop(result.request_id)
-                if not delivered:
+                if not delivered or not any(
+                    "path" in item for item in result.data["media"]
+                ):
                     directory = request.directory
         if directory is not None:
             self._remove_request_directory(directory)
@@ -164,8 +219,36 @@ class NativeGenerationScheduler(SimpleScheduler):
             for directory in directories:
                 self._remove_request_directory(directory)
 
+    def _result_media(self, result: Any) -> list[dict[str, Any]]:
+        if getattr(result, "size", None) != ("action",) and not getattr(
+            result, "output_file_path", None
+        ):
+            raise RuntimeError("Native generation returned no saved media")
+        metadata = {
+            "size": result.size,
+            "prompt": result.prompt,
+            "generation_time": result.generation_time,
+            "peak_memory_mb": result.peak_memory_mb,
+            "metrics": result.metrics,
+        }
+        if result.size == ("action",):
+            from sglang.multimodal_gen.runtime.entrypoints.action.protocol import (
+                action_generation_response,
+            )
+
+            response = action_generation_response(
+                result.samples, self.generator.server_args
+            )
+            return [{**metadata, "kind": "action", **item} for item in response["data"]]
+        return [{**metadata, "path": result.output_file_path}]
+
     def _generate(self, payload: StagePayload) -> StagePayload:
         params = build_sampling_params(payload, self.output_dir)
+        inline = payload.continuation is not None
+        if inline and payload.continuation.phase != "generation":
+            raise ValueError("Native generation received a non-generation continuation")
+        if inline and params.get("num_outputs_per_prompt", 1) != 1:
+            raise ValueError("Inline generation requires one output per turn")
         with self._abort_lock:
             if payload.request_id in self._aborted:
                 return payload
@@ -190,29 +273,34 @@ class NativeGenerationScheduler(SimpleScheduler):
                 )
             if not isinstance(results, list):
                 results = [results]
-            if not results or any(not result.output_file_path for result in results):
-                raise RuntimeError("Native generation returned no saved media")
+            if not results:
+                raise RuntimeError("Native generation returned no output")
             payload.data = {
                 "media": [
-                    {
-                        "path": result.output_file_path,
-                        "size": result.size,
-                        "prompt": result.prompt,
-                        "generation_time": result.generation_time,
-                        "peak_memory_mb": result.peak_memory_mb,
-                        "metrics": result.metrics,
-                    }
-                    for result in results
+                    item for result in results for item in self._result_media(result)
                 ],
                 "finish_reason": "stop",
             }
+            if inline:
+                if len(results) != 1:
+                    raise ValueError("Inline generation requires one output per turn")
+                for item in payload.data["media"]:
+                    if item.get("kind") == "action":
+                        continue
+                    item.update(
+                        _inline_media(
+                            item.pop("path"),
+                            request.directory,
+                            self.inline_media_limit_bytes,
+                        )
+                    )
             succeeded = True
             return payload
         finally:
             with self._abort_lock:
                 request.running = False
                 request.result = payload if succeeded else None
-                cleanup = not succeeded or request.cancelled.is_set()
+                cleanup = inline or not succeeded or request.cancelled.is_set()
                 if cleanup and self._native_requests.get(payload.request_id) is request:
                     self._native_requests.pop(payload.request_id)
             if cleanup:
@@ -261,11 +349,19 @@ def native_server_kwargs(
 def create_generation_scheduler(
     model_path: str,
     *,
-    gpu_id: int = 0,
+    device: str | None = None,
+    gpu_id: int | None = None,
     output_dir: str = "outputs",
+    inline_media_limit_bytes: int = INLINE_MEDIA_LIMIT_BYTES,
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, Any] | None = None,
 ) -> NativeGenerationScheduler:
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    concrete_device = resolve_concrete_device(device, gpu_id)
+    if concrete_device.index is None:
+        raise ValueError("Native Cosmos3 execution requires an indexed accelerator")
+    gpu_id = concrete_device.index
     if multiprocessing.current_process().daemon:
         raise RuntimeError("Native generation requires allow_child_processes=true")
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
@@ -280,7 +376,9 @@ def create_generation_scheduler(
     Path(output_dir).mkdir(parents=True, exist_ok=True)
     generator = DiffGenerator.from_server_args(ServerArgs.from_kwargs(**kwargs))
     try:
-        return NativeGenerationScheduler(generator, output_dir)
+        return NativeGenerationScheduler(
+            generator, output_dir, inline_media_limit_bytes
+        )
     except BaseException:
         generator.shutdown()
         raise

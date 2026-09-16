@@ -128,6 +128,7 @@ class ChatCompletionStreamDelta(BaseModel):
     role: str | None = None
     content: str | None = None
     audio: ChatCompletionAudio | None = None
+    segment: dict[str, Any] | None = None
 
 
 class ChatCompletionStreamChoice(BaseModel):
@@ -286,6 +287,7 @@ class GenerateResponse(BaseModel):
     text: str = ""
     audio: GenerateAudio | None = None
     media: list[dict[str, Any]] | None = None
+    segments: list[dict[str, Any]] | None = None
     meta_info: GenerateMetaInfo
 
 
