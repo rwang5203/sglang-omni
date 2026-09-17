@@ -2,7 +2,7 @@
 
 Nano reuses native SGLang `Engine` and `OpenAIServingChat` for understanding and `multimodal_gen.DiffGenerator` for generation. Omni owns request routing, continuation state and delivery. Native SGLang owns model loading, scheduling, KV caches, codecs and parallelism.
 
-Use compatible SGLang source with Cosmos3 support, cooperative SDK cancellation, video job settlement and scheduler failure propagation. Audiovisual generation requires the full Nano checkpoint and FFmpeg with AAC support. Policy-DROID requires its separate checkpoint. Keep checkpoint configuration and tokenizer files alongside the weights.
+The native prerequisites are not yet published as an installable revision. The pinned `sglang==0.5.19` package is insufficient. These launch instructions require the coordinated SGLang changes for cooperative SDK cancellation, video job settlement, scheduler failure propagation and Nano modality contracts. A tested public native revision and its installation instructions remain required before this setup can be reproduced from public packages. Audiovisual generation requires the full Nano checkpoint and FFmpeg with AAC support. Policy-DROID requires its separate checkpoint. Keep checkpoint configuration and tokenizer files alongside the weights.
 
 ## Interleaved understanding and generation
 

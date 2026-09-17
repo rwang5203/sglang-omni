@@ -10,6 +10,7 @@ import json
 from copy import deepcopy
 from typing import Any
 
+from sglang_omni.admission import InvalidRequestError
 from sglang_omni.models.cosmos3.reasoner import build_chat_messages
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
@@ -150,12 +151,15 @@ class Cosmos3UMMAdapter:
     """Translate model decisions while native runtimes retain model execution."""
 
     def start(self, request: OmniRequest) -> list[dict]:
-        messages = build_chat_messages(request.inputs)
+        try:
+            messages = build_chat_messages(request.inputs)
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
         if any(
             message.get("role") not in ("system", "user", "assistant")
             for message in messages
         ):
-            raise ValueError(
+            raise InvalidRequestError(
                 "Cosmos3 interleaving accepts native user and assistant chat history"
             )
         if messages[0].get("role") == "system" and isinstance(
@@ -177,14 +181,14 @@ class Cosmos3UMMAdapter:
         for key in ("stage_sampling", "stage_params"):
             value = params.pop(key, {})
             if not isinstance(value, dict):
-                raise ValueError(f"{key} must be a mapping")
+                raise InvalidRequestError(f"{key} must be a mapping")
             reasoner = value.get("reasoner", {})
             if not isinstance(reasoner, dict):
-                raise ValueError("Reasoner stage parameters must be a mapping")
+                raise InvalidRequestError("Reasoner stage parameters must be a mapping")
             params.update(reasoner)
         template = params.get("chat_template_kwargs") or {}
         if not isinstance(template, dict):
-            raise ValueError("chat_template_kwargs must be a mapping")
+            raise InvalidRequestError("chat_template_kwargs must be a mapping")
         params.update(
             stream=False,
             n=1,
@@ -234,13 +238,16 @@ class Cosmos3UMMAdapter:
         )
         if validated.kind != "generate":
             raise ValueError("Only generation decisions can enter the generation stage")
-        options = resolve_generation_options(deepcopy(request.params))
+        try:
+            options = resolve_generation_options(deepcopy(request.params))
+        except ValueError as exc:
+            raise InvalidRequestError(str(exc)) from exc
         action_mode = options.get("action_mode")
         if action_mode is not None and (
             not isinstance(action_mode, str)
             or action_mode.strip().lower() != "forward_dynamics"
         ):
-            raise ValueError(
+            raise InvalidRequestError(
                 "Cosmos3 visual interleaving cannot return action-only results"
             )
         generation = validated.generation
@@ -248,12 +255,16 @@ class Cosmos3UMMAdapter:
         options["num_outputs_per_prompt"] = 1
         if generation["modality"] == "image":
             if action_mode is not None:
-                raise ValueError("Cosmos3 forward_dynamics requires a video decision")
+                raise InvalidRequestError(
+                    "Cosmos3 forward_dynamics requires a video decision"
+                )
             options["num_frames"] = 1
         else:
             options.setdefault("num_frames", 33)
             if type(options["num_frames"]) is not int or options["num_frames"] <= 1:
-                raise ValueError("Video interleaving requires more than one frame")
+                raise InvalidRequestError(
+                    "Video interleaving requires more than one frame"
+                )
         return OmniRequest(
             {"prompt": generation["prompt"]},
             {"diffusion": options, "stream": False},

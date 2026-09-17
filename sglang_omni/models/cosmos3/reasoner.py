@@ -210,6 +210,8 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
         else:
             data = _response_dict(response)
             if "error" in data or "choices" not in data:
+                if getattr(response, "status_code", None) == 400:
+                    raise InvalidRequestError(str(data.get("message", data)))
                 raise ValueError(str(data.get("error", data)))
             choice = data["choices"][0]
             payload.data = {

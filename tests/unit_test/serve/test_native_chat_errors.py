@@ -11,6 +11,7 @@ from fastapi.testclient import TestClient
 from sglang.srt.entrypoints.openai.protocol import (
     ChatCompletionRequest as NativeChatRequest,
 )
+from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.client import Client
@@ -59,11 +60,18 @@ class NativeValidationClient:
     [
         {"stream_options": {"include_usage": "invalid"}},
         {"n": 2},
+        {"stage_params": {"reasoner": {"return_sampling_mask": True}}},
         {"stream_options": {"include_usage": QueueFullError.MESSAGE}},
     ],
 )
 def test_native_chat_rejections_survive_http_and_stage_transport(stream, option):
     backend = NativeValidationClient()
+    native_validation = "stage_params" in option
+    if native_validation:
+        native = object.__new__(OpenAIServingChat)
+        backend.scheduler.serving_chat.handle_request = AsyncMock(
+            wraps=native.handle_request
+        )
     body = {
         "messages": [{"role": "user", "content": "hello"}],
         "stream": stream,
@@ -84,7 +92,10 @@ def test_native_chat_rejections_survive_http_and_stage_transport(stream, option)
         assert backend.closed == 1
     else:
         assert response.status_code == 400
-    backend.scheduler.serving_chat.handle_request.assert_not_called()
+    if native_validation:
+        backend.scheduler.serving_chat.handle_request.assert_awaited_once()
+    else:
+        backend.scheduler.serving_chat.handle_request.assert_not_called()
 
 
 def test_internal_value_errors_keep_server_error_classification():
@@ -95,11 +106,18 @@ def test_internal_value_errors_keep_server_error_classification():
 
 
 @pytest.mark.parametrize("stream", [False, True])
-def test_native_internal_errors_remain_server_errors(stream):
+@pytest.mark.parametrize("structured", [False, True])
+def test_native_internal_errors_remain_server_errors(stream, structured):
     backend = NativeValidationClient()
-    backend.scheduler.serving_chat.handle_request.side_effect = ValueError(
-        "internal shape mismatch"
-    )
+    if structured:
+        native = object.__new__(OpenAIServingChat)
+        backend.scheduler.serving_chat.handle_request.return_value = (
+            native.create_error_response("internal shape mismatch", status_code=500)
+        )
+    else:
+        backend.scheduler.serving_chat.handle_request.side_effect = ValueError(
+            "internal shape mismatch"
+        )
     body = {"messages": [{"role": "user", "content": "hello"}], "stream": stream}
     with TestClient(create_app(backend, model_name="native-model")) as client:
         response = client.post("/v1/chat/completions", json=body)

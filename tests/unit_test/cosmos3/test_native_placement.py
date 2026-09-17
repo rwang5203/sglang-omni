@@ -1,4 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
+from types import SimpleNamespace
+
 import pytest
 
 from sglang_omni.config import StageConfig
@@ -94,3 +96,49 @@ def test_native_runtime_cannot_share_a_process_with_another_stage(monkeypatch):
     )
     with pytest.raises(ValueError, match="own its OS process"):
         runtime_config.prepare_pipeline_runtime(cfg)
+
+
+@pytest.mark.parametrize("devices", [None, [3, 5]])
+def test_generation_factory_passes_resolved_device_to_native(
+    monkeypatch, tmp_path, devices
+):
+    from sglang.multimodal_gen.runtime.server_args import ServerArgs
+
+    from sglang_omni.models.cosmos3.stages import create_generation_scheduler
+    from sglang_omni.utils import device as device_utils
+
+    monkeypatch.setattr(
+        device_utils,
+        "resolve_concrete_device",
+        lambda device, index: SimpleNamespace(index=3),
+    )
+
+    def startup(**kwargs):
+        if devices is None:
+            assert kwargs["base_gpu_id"] == 3
+        else:
+            assert kwargs["gpu_ids"] == [3, 5]
+        raise RuntimeError("native startup reached")
+
+    monkeypatch.setattr(ServerArgs, "from_kwargs", startup)
+    with pytest.raises(RuntimeError, match="native startup reached"):
+        create_generation_scheduler(
+            "checkpoint",
+            device=None,
+            gpu_id=None,
+            runtime_gpu_ids=devices,
+            output_dir=str(tmp_path),
+        )
+
+
+def test_generation_factory_rejects_cpu_before_native_startup(monkeypatch):
+    from sglang_omni.models.cosmos3.stages import create_generation_scheduler
+    from sglang_omni.utils import device as device_utils
+
+    monkeypatch.setattr(
+        device_utils,
+        "resolve_concrete_device",
+        lambda device, index: SimpleNamespace(index=None),
+    )
+    with pytest.raises(ValueError, match="indexed accelerator"):
+        create_generation_scheduler("checkpoint", device="cpu")

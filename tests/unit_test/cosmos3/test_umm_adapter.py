@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from sglang_omni.admission import InvalidRequestError, QueueFullError
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3.reasoner import build_chat_fields
@@ -20,7 +21,7 @@ from sglang_omni.models.cosmos3.stages import (
     build_sampling_params,
 )
 from sglang_omni.models.cosmos3.umm import INLINE_MEDIA_LIMIT_BYTES, Cosmos3UMMAdapter
-from sglang_omni.pipeline.umm import UMMDecision
+from sglang_omni.pipeline.umm import UMMController, UMMDecision
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.proto.continuation import ContinuationToken
 
@@ -50,14 +51,34 @@ def media(content=b"image fixture", kind="image"):
     }
 
 
-@pytest.mark.parametrize("messages", [[1], [None], ["bad"], [{"role": "user"}, 1]])
+@pytest.mark.parametrize(
+    "messages",
+    [
+        [1],
+        [None],
+        ["bad"],
+        [{"role": "user"}, 1],
+        [{"role": "tool", "content": "result"}],
+    ],
+)
 @pytest.mark.parametrize("media", [{}, {"images": ["image.png"]}])
 def test_invalid_chat_elements_reject_before_umm_session(messages, media):
     request = OmniRequest({"messages": messages, **media})
     original = deepcopy(request)
-    with pytest.raises(ValueError):
-        Cosmos3UMMAdapter().start(request)
+    controller = UMMController(Cosmos3UMMAdapter())
+    with pytest.raises(InvalidRequestError) as rejected:
+        controller._advance(StagePayload("invalid", request, None))
+    assert isinstance(
+        QueueFullError.from_message(str(rejected.value)), InvalidRequestError
+    )
+    assert controller.active_sessions == 0
     assert request == original
+    assert (
+        controller._advance(
+            StagePayload("healthy", OmniRequest("hello"), None)
+        ).continuation.phase
+        == "reasoner"
+    )
 
 
 def test_native_chat_contract_and_user_options_survive_internal_decision():
@@ -119,8 +140,10 @@ def test_native_chat_contract_and_user_options_survive_internal_decision():
     ],
 )
 def test_prose_fences_duplicates_and_truncated_decisions_are_not_handoffs(response):
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as rejected:
         Cosmos3UMMAdapter().interpret_reasoner(response)
+    assert not isinstance(rejected.value, InvalidRequestError)
+    assert type(QueueFullError.from_message(str(rejected.value))) is RuntimeError
 
 
 def test_generation_decision_controls_prompt_and_modality_with_native_tuning(tmp_path):
@@ -165,7 +188,7 @@ def test_video_uses_native_frame_options_and_rejects_image_frame_count():
         ).params["diffusion"]["num_frames"]
         == 65
     )
-    with pytest.raises(ValueError, match="more than one frame"):
+    with pytest.raises(InvalidRequestError, match="more than one frame"):
         adapter.generation_request(
             d, OmniRequest("task", {"diffusion": {"num_frames": 1}})
         )
@@ -380,14 +403,14 @@ def test_action_only_override_rejects_before_visual_generation(mode):
     request = OmniRequest(
         {"prompt": "Draw a cube"}, {"diffusion": {"action_mode": mode}}
     )
-    with pytest.raises(ValueError, match="action"):
+    with pytest.raises(InvalidRequestError, match="action"):
         Cosmos3UMMAdapter().generation_request(decision(), request)
 
 
 def test_forward_dynamics_requires_a_video_decision():
     options = {"action_mode": "forward_dynamics", "action": [[0.0] * 8] * 4}
     request = OmniRequest({"prompt": "Predict motion"}, {"diffusion": options})
-    with pytest.raises(ValueError, match="forward_dynamics requires a video"):
+    with pytest.raises(InvalidRequestError, match="forward_dynamics requires a video"):
         Cosmos3UMMAdapter().generation_request(decision(modality="image"), request)
     forwarded = Cosmos3UMMAdapter().generation_request(
         decision(modality="video"), request
@@ -423,3 +446,27 @@ def test_malformed_structured_decisions_fail_before_routing(change):
         Cosmos3UMMAdapter().interpret_reasoner(
             {"text": json.dumps({**response, **change})}
         )
+
+
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"stage_params": []},
+        {"stage_sampling": []},
+        {"stage_params": {"reasoner": []}},
+        {"stage_sampling": {"reasoner": []}},
+        {"chat_template_kwargs": "invalid"},
+        {"diffusion": []},
+        {"stage_params": {"generation": []}},
+        {"stage_sampling": {"generation": []}},
+    ],
+)
+def test_user_option_rejections_survive_stage_transport(params):
+    adapter = Cosmos3UMMAdapter()
+    request = OmniRequest("hello", params)
+    with pytest.raises(InvalidRequestError) as rejected:
+        adapter.reasoner_request(adapter.start(request), request)
+        adapter.generation_request(decision(), request)
+    assert isinstance(
+        QueueFullError.from_message(str(rejected.value)), InvalidRequestError
+    )

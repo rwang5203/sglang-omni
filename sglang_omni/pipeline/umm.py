@@ -12,6 +12,7 @@ import uuid
 from dataclasses import asdict, dataclass, field
 from typing import Any, Callable, Literal, Protocol
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.proto.continuation import ContinuationToken, UMMSegment
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.scheduling.messages import OutgoingMessage
@@ -233,7 +234,7 @@ class UMMController(SimpleScheduler):
                 if session is not None:
                     return _Discarded(payload.arrival_id, keep_active=True)
                 if len(self._sessions) >= self.limits.max_sessions:
-                    raise ValueError("UMM max_sessions capacity exceeded")
+                    raise QueueFullError()
                 deadline = self._clock() + self.limits.timeout_s
                 request = copy.deepcopy(payload.request)
                 session = _Session(

@@ -16,6 +16,7 @@ from sglang_omni.models.cosmos3.config import Cosmos3ReasonerPipelineConfig, Var
 from sglang_omni.models.cosmos3.reasoner import (
     NativeReasonerScheduler,
     build_chat_fields,
+    create_reasoner_scheduler,
     native_reasoner_kwargs,
 )
 from sglang_omni.proto import OmniRequest, StagePayload, StreamMessage
@@ -376,3 +377,41 @@ def test_stage_sampling_is_preserved_and_stage_params_take_precedence():
     )
     assert fields["temperature"] == 0.2
     assert fields["max_tokens"] == 9
+
+
+@pytest.mark.parametrize("devices", [None, [3, 5]])
+def test_reasoner_factory_passes_resolved_device_to_native(monkeypatch, devices):
+    import sglang
+
+    from sglang_omni.utils import device as device_utils
+
+    monkeypatch.setattr(
+        device_utils,
+        "resolve_concrete_device",
+        lambda device, index: SimpleNamespace(index=3),
+    )
+
+    def startup(**kwargs):
+        assert kwargs["base_gpu_id"] == 3
+        if devices is not None:
+            assert kwargs["gpu_id_step"] == 2
+            assert kwargs["tp_size"] == 2
+        raise RuntimeError("native startup reached")
+
+    monkeypatch.setattr(sglang, "Engine", startup)
+    with pytest.raises(RuntimeError, match="native startup reached"):
+        create_reasoner_scheduler(
+            "checkpoint", device=None, gpu_id=None, runtime_gpu_ids=devices
+        )
+
+
+def test_reasoner_factory_rejects_cpu_before_native_startup(monkeypatch):
+    from sglang_omni.utils import device as device_utils
+
+    monkeypatch.setattr(
+        device_utils,
+        "resolve_concrete_device",
+        lambda device, index: SimpleNamespace(index=None),
+    )
+    with pytest.raises(ValueError, match="indexed accelerator"):
+        create_reasoner_scheduler("checkpoint", device="cpu")

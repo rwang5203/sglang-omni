@@ -11,6 +11,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, _construct_stage
 from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits, route_umm
@@ -143,9 +144,14 @@ def test_timeout_while_waiting_for_native_stage_emits_error_and_recovers():
 def test_capacity_rejection_preserves_existing_session():
     controller = UMMController(Adapter(), limits=UMMLimits(max_sessions=1))
     original = controller._advance(request())
-    with pytest.raises(ValueError, match="max_sessions"):
+    with pytest.raises(QueueFullError) as rejected:
         controller._advance(request("excess"))
+    assert isinstance(QueueFullError.from_message(str(rejected.value)), QueueFullError)
+    assert controller.active_sessions == 1
     assert controller._sessions["req"].expected == original.continuation
+    controller._advance(reply(original, {"kind": "final", "text": "done"}))
+    assert controller.active_sessions == 0
+    assert controller._advance(request("healthy")).continuation.phase == "reasoner"
 
 
 def test_turn_bound_still_allows_final_reasoning_after_last_generation():
