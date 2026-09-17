@@ -36,6 +36,13 @@ def test_native_http_app_and_generation_share_no_rpc_deadline(monkeypatch):
     server_args.set_global_server_args = lambda args: None
     monkeypatch.setitem(sys.modules, http_server.__name__, http_server)
     monkeypatch.setitem(sys.modules, server_args.__name__, server_args)
+    scheduler_client = ModuleType("sglang.multimodal_gen.runtime.scheduler_client")
+
+    def initialize(self, server_args, *, worker_failure=None):
+        pass
+
+    scheduler_client.AsyncSchedulerClient = SimpleNamespace(initialize=initialize)
+    monkeypatch.setitem(sys.modules, scheduler_client.__name__, scheduler_client)
     from sglang_omni.models.cosmos3 import media
 
     def available_port(excluded):
