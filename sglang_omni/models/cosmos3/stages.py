@@ -261,11 +261,18 @@ def native_server_kwargs(
 def create_generation_scheduler(
     model_path: str,
     *,
-    gpu_id: int = 0,
+    device: str | None = None,
+    gpu_id: int | None = None,
     output_dir: str = "outputs",
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, Any] | None = None,
 ) -> NativeGenerationScheduler:
+    from sglang_omni.utils.device import resolve_concrete_device
+
+    concrete_device = resolve_concrete_device(device, gpu_id)
+    if concrete_device.index is None:
+        raise ValueError("Native Cosmos3 execution requires an indexed accelerator")
+    gpu_id = concrete_device.index
     if multiprocessing.current_process().daemon:
         raise RuntimeError("Native generation requires allow_child_processes=true")
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
