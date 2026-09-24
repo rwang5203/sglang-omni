@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="_static/documentation_options.js?v=98feffa1"></script>
+    <script src="_static/documentation_options.js?v=8f8a7fc7"></script>
     <script src="_static/doctools.js?v=fd6eb6e6"></script>
     <script src="_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="_static/clipboard.min.js?v=a7894cd8"></script>
@@ -59,8 +59,8 @@
     <link rel="next" title="🚀 Installation" href="get_started/installation.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.5" />
-    <meta name="docbuild:last-update" content="Sep 14, 2026"/>
+  <meta name="docsearch:version" content="0.1.6" />
+    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
   
     
     <script src="_static/searchtools.js"></script>
@@ -208,9 +208,10 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation.html">🚀 Installation</a></li>
-<li class="toctree-l1"><a class="reference internal" href="get_started/installation_npu.html">Installation — Ascend NPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_npu.html">🚀 Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_musa.html">🚀 Installation — MUSA</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -230,6 +231,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
@@ -523,7 +525,7 @@
 <li><p><strong>Multi-Stage Pipeline</strong>: Flexible framework for orchestrating preprocessing, AR engine, codec, and vocoder stages across processes and GPUs.</p></li>
 <li><p><strong>Native SGLang Integration</strong>: Leverages SGLang’s RadixAttention, continuous batching, and CUDA Graph optimizations for the AR backbone.</p></li>
 <li><p><strong>OpenAI-Compatible Server</strong>: Drop-in <code class="docutils literal notranslate"><span class="pre">/v1/audio/speech</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/transcriptions</span></code>, <code class="docutils literal notranslate"><span class="pre">/v1/audio/translations</span></code>, and <code class="docutils literal notranslate"><span class="pre">/v1/chat/completions</span></code> endpoints with real-time streaming support.</p></li>
-<li><p><strong>Broad Model Support</strong>: TTS (Higgs, Fish S2-Pro, Voxtral, Qwen3-TTS, MOSS-TTS / Local, Ming-Omni-TTS, dots.tts, ZONOS2), Music (MiniMax Music 3), ASR (Qwen3-ASR, Fun-ASR, ARK-ASR, Whisper, MOSS-Transcribe-Diarize), Omni (Qwen3-Omni, Ming-Omni), and LLaDA2.0-Uni.</p></li>
+<li><p><strong>Broad Model Support</strong>: TTS (Higgs, Fish S2-Pro, Voxtral, Qwen3-TTS, MOSS-TTS / Local, Ming-Omni-TTS, dots.tts, ZONOS2), Music (MiniMax Music 3), ASR (Qwen3-ASR, Fun-ASR, ARK-ASR, Whisper, MOSS-Transcribe-Diarize), Omni (Qwen3-Omni, MiniCPM-o, Ming-Omni), and LLaDA2.0-Uni.</p></li>
 </ul>
 </section>
 <section id="supported-models">
@@ -605,11 +607,15 @@
 <td><p>Omni</p></td>
 <td><p>Text, image, audio, video → text + audio</p></td>
 </tr>
-<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/openbmb/MiniCPM-o-4_5">openbmb/MiniCPM-o-4_5</a></p></td>
+<td><p>Omni</p></td>
+<td><p>Text, image, audio, video → text + audio</p></td>
+</tr>
+<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/Ming-flash-omni-2.0">inclusionAI/Ming-flash-omni-2.0</a></p></td>
 <td><p>Omni</p></td>
 <td><p>Streaming TTS</p></td>
 </tr>
-<tr class="row-odd"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
+<tr class="row-even"><td><p><a class="reference external" href="https://huggingface.co/inclusionAI/LLaDA2.0-Uni">inclusionAI/LLaDA2.0-Uni</a></p></td>
 <td><p>Multimodal</p></td>
 <td><p>Text + image understanding and generation</p></td>
 </tr>
@@ -620,9 +626,10 @@
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation.html">🚀 Installation</a></li>
-<li class="toctree-l1"><a class="reference internal" href="get_started/installation_npu.html">Installation — Ascend NPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_npu.html">🚀 Installation — Ascend NPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation_xpu.html">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="get_started/installation_cpu.html">🚀 Installation — Intel CPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="get_started/installation_musa.html">🚀 Installation — MUSA</a></li>
 </ul>
 </div>
 <div class="toctree-wrapper compound">
@@ -644,6 +651,7 @@
 <li class="toctree-l1"><a class="reference internal" href="cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
@@ -764,7 +772,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 14, 2026.
+  Last updated on Sep 24, 2026.
   <br/>
 </p>
   </div>

@@ -42,7 +42,7 @@
   <link rel="preload" as="script" href="../_static/scripts/bootstrap.js?digest=90905a2f556bf617f1a9" />
 <link rel="preload" as="script" href="../_static/scripts/pydata-sphinx-theme.js?digest=90905a2f556bf617f1a9" />
 
-    <script src="../_static/documentation_options.js?v=98feffa1"></script>
+    <script src="../_static/documentation_options.js?v=8f8a7fc7"></script>
     <script src="../_static/doctools.js?v=fd6eb6e6"></script>
     <script src="../_static/sphinx_highlight.js?v=6ffebe34"></script>
     <script src="../_static/clipboard.min.js?v=a7894cd8"></script>
@@ -57,11 +57,11 @@
     <link rel="index" title="Index" href="../genindex.html" />
     <link rel="search" title="Search" href="../search.html" />
     <link rel="next" title="🚀 Installation — Intel CPU" href="installation_cpu.html" />
-    <link rel="prev" title="Installation — Ascend NPU" href="installation_npu.html" />
+    <link rel="prev" title="🚀 Installation — Ascend NPU" href="installation_npu.html" />
   <meta name="viewport" content="width=device-width, initial-scale=1"/>
   <meta name="docsearch:language" content="en"/>
-  <meta name="docsearch:version" content="0.1.5" />
-    <meta name="docbuild:last-update" content="Sep 14, 2026"/>
+  <meta name="docsearch:version" content="0.1.6" />
+    <meta name="docbuild:last-update" content="Sep 24, 2026"/>
   
     
     <script src="../_static/searchtools.js"></script>
@@ -207,9 +207,10 @@
         <p aria-level="2" class="caption" role="heading"><span class="caption-text">Get Started</span></p>
 <ul class="current nav bd-sidenav">
 <li class="toctree-l1"><a class="reference internal" href="installation.html">🚀 Installation</a></li>
-<li class="toctree-l1"><a class="reference internal" href="installation_npu.html">Installation — Ascend NPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation_npu.html">🚀 Installation — Ascend NPU</a></li>
 <li class="toctree-l1 current active"><a class="current reference internal" href="#">🚀 Installation — Intel XPU</a></li>
 <li class="toctree-l1"><a class="reference internal" href="installation_cpu.html">🚀 Installation — Intel CPU</a></li>
+<li class="toctree-l1"><a class="reference internal" href="installation_musa.html">🚀 Installation — MUSA</a></li>
 </ul>
 <p aria-level="2" class="caption" role="heading"><span class="caption-text">Cookbook</span></p>
 <ul class="nav bd-sidenav">
@@ -229,6 +230,7 @@
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/moss_transcribe_diarize.html">MOSS-Transcribe-Diarize</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/whisper_asr.html">Whisper ASR</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/qwen3_omni.html">Qwen3-Omni</a></li>
+<li class="toctree-l1"><a class="reference internal" href="../cookbook/minicpm_o.html">MiniCPM-o Reference Audio</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/ming_omni.html">Ming-Omni</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/nemotron_voicechat.html">NemotronLabs VoiceChat</a></li>
 <li class="toctree-l1"><a class="reference internal" href="../cookbook/llada2_uni.html">LLaDA2.0-Uni</a></li>
@@ -565,14 +567,6 @@ docker<span class="w"> </span>run<span class="w"> </span>-it<span class="w"> </s
 </div>
 <p>Built on Intel Deep Learning Essentials with the <code class="docutils literal notranslate"><span class="pre">+xpu</span></code> torch wheels. It deliberately does <strong>not</strong>
 source oneAPI — see <a class="reference internal" href="#runtime-environment-important"><span class="std std-ref">Runtime environment</span></a>.</p>
-<p>Pinning SGLang does not pin the SYCL kernels: its XPU manifest requires <code class="docutils literal notranslate"><span class="pre">sgl-kernel-xpu</span></code>
-from git with no revision. The Dockerfile therefore pins that commit itself, so rebuilds
-are reproducible by default. Override it only to move deliberately:</p>
-<div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>docker<span class="w"> </span>build<span class="w"> </span>-f<span class="w"> </span>docker/xpu.Dockerfile<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>--build-arg<span class="w"> </span><span class="nv">SGL_KERNEL_XPU_REF</span><span class="o">=</span>&lt;sgl-kernel-xpu<span class="w"> </span>commit<span class="w"> </span>sha&gt;<span class="w"> </span><span class="se">\</span>
-<span class="w">  </span>-t<span class="w"> </span>sglang-omni:xpu<span class="w"> </span>.
-</pre></div>
-</div>
 </section>
 <section id="option-b-install-into-an-existing-xpu-env-recommended-here">
 <h2>🛠️ Option B: Install into an existing XPU env (recommended here)<a class="headerlink" href="#option-b-install-into-an-existing-xpu-env-recommended-here" title="Link to this heading">#</a></h2>
@@ -605,9 +599,10 @@ cp<span class="w"> </span>-f<span class="w"> </span>.pyproject.cuda.bak<span cla
 It cannot be pinned even as a range: every published wheel requires <code class="docutils literal notranslate"><span class="pre">flashinfer_python[cu13]</span></code> and the
 <code class="docutils literal notranslate"><span class="pre">nvidia-*</span></code> runtime, so <strong>any</strong> specifier pulls the CUDA stack over <code class="docutils literal notranslate"><span class="pre">torch+xpu</span></code>. Build from source:</p>
 <div class="highlight-bash notranslate"><div class="highlight"><pre><span></span>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/sgl-project/sglang<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>sglang
-git<span class="w"> </span>checkout<span class="w"> </span>v0.5.19<span class="w">   </span><span class="c1"># the pinned release</span>
+git<span class="w"> </span>checkout<span class="w"> </span>v0.5.20<span class="w">   </span><span class="c1"># the pinned release</span>
 <span class="nb">cd</span><span class="w"> </span>python<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span>cp<span class="w"> </span>pyproject_xpu.toml<span class="w"> </span>pyproject.toml
 pip<span class="w"> </span>install<span class="w"> </span>-e<span class="w"> </span>.<span class="w"> </span>--no-build-isolation<span class="w"> </span>--extra-index-url<span class="w"> </span>https://download.pytorch.org/whl/xpu
+pip<span class="w"> </span>install<span class="w"> </span>--no-deps<span class="w"> </span><span class="nv">xgrammar</span><span class="o">==</span><span class="m">0</span>.1.33
 </pre></div>
 </div>
 <p>Use that commit: the XPU port targets this SGLang revision’s APIs and does not carry
@@ -722,7 +717,7 @@ curl<span class="w"> </span>-s<span class="w"> </span>-X<span class="w"> </span>
       <i class="fa-solid fa-angle-left"></i>
       <div class="prev-next-info">
         <p class="prev-next-subtitle">previous</p>
-        <p class="prev-next-title">Installation — Ascend NPU</p>
+        <p class="prev-next-title">🚀 Installation — Ascend NPU</p>
       </div>
     </a>
     <a class="right-next"
@@ -800,7 +795,7 @@ By SGLang-Omni Team
   
   <div class="footer-item">
     <p class="last-updated">
-  Last updated on Sep 14, 2026.
+  Last updated on Sep 24, 2026.
   <br/>
 </p>
   </div>
