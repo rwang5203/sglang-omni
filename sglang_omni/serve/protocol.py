@@ -102,6 +102,19 @@ class ChatCompletionRequest(BaseModel):
     def effective_max_tokens(self) -> int | None:
         return self.max_completion_tokens or self.max_tokens
 
+    @model_validator(mode="after")
+    def refuse_length_alias(self) -> ChatCompletionRequest:
+        # Backend options pass through as extra fields. The internal name of
+        # the declared length would silently replace or bypass it.
+        if "max_new_tokens" in (self.model_extra or {}):
+            raise ValueError(
+                "Set the completion length with max_tokens or "
+                "max_completion_tokens, not max_new_tokens"
+            )
+        else:
+            pass
+        return self
+
 
 class ChatCompletionChoice(BaseModel):
     """A single choice in a chat completion response."""
@@ -196,12 +209,16 @@ class SerializedMultimodalTensor(BaseModel):
     data: str
 
     @model_validator(mode="after")
-    def _validate_payload(self) -> SerializedMultimodalTensor:
+    def validate_payload(self) -> SerializedMultimodalTensor:
         itemsize = _SERIALIZED_DTYPE_ITEMSIZE.get(self.dtype)
         if itemsize is None:
             raise ValueError(f"unsupported tensor dtype {self.dtype!r}")
+        else:
+            pass
         if any(dim < 0 for dim in self.shape):
             raise ValueError(f"invalid tensor shape {self.shape}")
+        else:
+            pass
         try:
             raw_len = len(base64.b64decode(self.data, validate=True))
         except binascii.Error as exc:
@@ -212,6 +229,8 @@ class SerializedMultimodalTensor(BaseModel):
                 f"tensor data has {raw_len} bytes, expected {expected} "
                 f"for shape={self.shape} dtype={self.dtype}"
             )
+        else:
+            pass
         return self
 
 

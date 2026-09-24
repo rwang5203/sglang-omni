@@ -4,7 +4,10 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from fastapi.testclient import TestClient
 
-from sglang_omni.serve.native_media import mount_native_media_app
+from sglang_omni.serve.native_media import (
+    mount_native_media_app,
+    resolve_native_media_frontend,
+)
 
 
 def test_native_routes_and_lifetime_are_composed_without_a_proxy():
@@ -47,13 +50,39 @@ def test_native_routes_and_lifetime_are_composed_without_a_proxy():
     assert events == ["omni_start", "native_start", "native_stop", "omni_stop"]
 
 
+def test_health_reports_warming_until_the_native_warmup_finishes():
+    import asyncio
+
+    from sglang_omni.serve import create_app
+
+    class RunningClient:
+        def health(self):
+            return {"running": True}
+
+    @asynccontextmanager
+    async def native_lifespan(app):
+        app.state.server_warmup_done = asyncio.Event()
+        yield
+
+    native = FastAPI(lifespan=native_lifespan)
+    omni = create_app(RunningClient(), model_name="native-media")
+    mount_native_media_app(omni, native)
+    with TestClient(omni) as client:
+        warming = client.get("/health")
+        assert warming.status_code == 503
+        assert warming.json()["status"] == "warming"
+        native.state.server_warmup_done.set()
+        ready = client.get("/health")
+        assert ready.status_code == 200
+        assert ready.json()["status"] == "healthy"
+
+
 def test_unrelated_models_select_their_own_native_frontend(monkeypatch):
     import sys
     from types import ModuleType
     from typing import ClassVar
 
     from sglang_omni.config import PipelineConfig, StageConfig
-    from sglang_omni.serve.native_media import prepare_native_media_app
 
     selected = []
 
@@ -68,7 +97,7 @@ def test_unrelated_models_select_their_own_native_frontend(monkeypatch):
             def identify():
                 return {"adapter": name, "model": config.model_path}
 
-            return app
+            return lambda: app
 
         module.create = create
         monkeypatch.setitem(sys.modules, name, module)
@@ -93,8 +122,8 @@ def test_unrelated_models_select_their_own_native_frontend(monkeypatch):
         (ModelA(model_path="checkpoint-a"), "_umm_test_a"),
         (ModelB(model_path="checkpoint-b"), "_umm_test_b"),
     ]:
-        app = prepare_native_media_app(config, host="127.0.0.1", port=4321)
-        with TestClient(app) as client:
+        frontend = resolve_native_media_frontend(config, host="127.0.0.1", port=4321)
+        with TestClient(frontend()) as client:
             assert client.get("/model-adapter").json() == {
                 "adapter": name,
                 "model": config.model_path,
@@ -120,7 +149,8 @@ def test_inactive_native_frontend_does_not_import_model_factory(monkeypatch):
         native_media_factory_path="unavailable.model.factory",
     )
     assert (
-        native_media.prepare_native_media_app(config, host="localhost", port=1) is None
+        native_media.resolve_native_media_frontend(config, host="localhost", port=1)
+        is None
     )
 
 
@@ -129,32 +159,58 @@ def test_native_frontend_without_model_factory_fails_before_loading():
 
     import pytest
 
-    from sglang_omni.serve.native_media import prepare_native_media_app
-
     config = SimpleNamespace(
         native_media_stage="generation",
         native_media_factory_path=None,
     )
     with pytest.raises(ValueError, match="native_media_factory_path"):
-        prepare_native_media_app(config, host="localhost", port=1)
+        resolve_native_media_frontend(config, host="localhost", port=1)
 
 
-def test_model_factory_must_return_a_native_application(monkeypatch):
+def test_model_factory_must_return_a_resolved_frontend(monkeypatch):
     from types import SimpleNamespace
 
     import pytest
 
     from sglang_omni.serve import native_media
 
-    monkeypatch.setattr(
-        native_media, "import_string", lambda path: lambda *a, **k: None
-    )
     config = SimpleNamespace(
         native_media_stage="generation",
         native_media_factory_path="model.factory",
     )
-    with pytest.raises(TypeError, match="FastAPI application"):
-        native_media.prepare_native_media_app(config, host="localhost", port=1)
+    # An application or a builder that needs arguments is callable too.
+    for returned in (None, FastAPI(), lambda server_kwargs: FastAPI()):
+        monkeypatch.setattr(
+            native_media,
+            "import_string",
+            lambda path, returned=returned: lambda *a, **k: returned,
+        )
+        with pytest.raises(TypeError, match="application builder"):
+            native_media.resolve_native_media_frontend(config, host="localhost", port=1)
+
+
+def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
+    from sglang_omni.models.cosmos3 import media
+    from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
+
+    built = []
+    app = FastAPI()
+    monkeypatch.setattr(
+        media, "build_native_media_app", lambda kwargs: built.append(kwargs) or app
+    )
+    config = Cosmos3PipelineConfig(model_path="checkpoint")
+    frontend = resolve_native_media_frontend(config, host="127.0.0.1", port=19000)
+    overrides = config.stages[0].factory.server_args_overrides
+    # Stage processes read these overrides when they spawn, so they must be
+    # resolved before the native runtime is imported or the app is built.
+    assert overrides["host"] == "127.0.0.1" and overrides["port"] == 19000
+    assert overrides["strict_ports"] is True
+    assert {"scheduler_port", "master_port", "nccl_port", "output_path"} <= set(
+        overrides
+    )
+    assert built == []
+    assert frontend() is app
+    assert built[0]["model_path"] == "checkpoint" and built[0]["base_gpu_id"] == 0
 
 
 def test_cosmos3_declares_model_owned_native_frontend():
@@ -191,3 +247,38 @@ def test_native_lifespan_receives_the_existing_runtime_failure_signal():
         failure.cancel()
 
     asyncio.run(run())
+
+
+def test_native_frontend_builds_before_stage_startup(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    import pytest
+
+    from sglang_omni.serve import launcher, native_media
+
+    events = []
+
+    class Runner:
+        def __init__(self, config):
+            pass
+
+        async def start(self, timeout):
+            events.append("startup")
+
+        async def stop(self):
+            events.append("stopped")
+
+    def fail():
+        events.append("frontend")
+        raise RuntimeError("frontend build failed")
+
+    monkeypatch.setattr(launcher, "MultiProcessPipelineRunner", Runner)
+    monkeypatch.setattr(launcher, "find_available_port", lambda host, port: port)
+    monkeypatch.setattr(
+        native_media, "resolve_native_media_frontend", lambda *a, **k: fail
+    )
+    with pytest.raises(RuntimeError, match="frontend build failed"):
+        asyncio.run(launcher.run_server(SimpleNamespace()))
+    # The native worker binds the frontend's strict ports, so stages start later.
+    assert events == ["frontend"]

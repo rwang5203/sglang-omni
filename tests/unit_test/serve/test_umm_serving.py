@@ -3,16 +3,18 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 
 import pytest
 from fastapi.testclient import TestClient
 
+from sglang_omni.admission import InvalidRequestError, QueueFullError
 from sglang_omni.client import Client
 from sglang_omni.client.types import CompletionResult, GenerateChunk, GenerateRequest
 from sglang_omni.proto import CompleteMessage, StreamMessage
 from sglang_omni.proto.continuation import UMMSegment
 from sglang_omni.serve import create_app
-from sglang_omni.serve.openai_api import _generate_stream
+from sglang_omni.serve.openai_api import generate_stream
 
 SEGMENTS = [
     UMMSegment("session", 0, "text", "Drawing."),
@@ -40,6 +42,7 @@ class Coordinator:
 
     async def submit(self, request_id, request):
         return {
+            "type": "umm_result",
             "session_id": "session",
             "segments": [s.to_dict() for s in SEGMENTS],
             "finish_reason": "stop",
@@ -104,7 +107,11 @@ def test_generate_sse_preserves_segment_order_and_explicit_final_snapshot():
         s.to_dict() for s in SEGMENTS
     ]
     final = json.loads(events[3].splitlines()[1][6:])
-    assert final["segments"] == [s.to_dict() for s in SEGMENTS]
+    assert final["segments"] == [
+        {"segment_index": s.segment_index, "kind": s.kind} for s in SEGMENTS
+    ]
+    assert "media" not in final
+    assert response.text.count(SEGMENTS[1].data["url"]) == 1
     assert final["finish_reason"] == "stop"
     assert events[-1] == "data: [DONE]"
 
@@ -147,14 +154,50 @@ async def test_generate_stream_error_closes_owned_iterator_and_has_no_success_se
     client = FailingClient()
     output = [
         event
-        async for event in _generate_stream(
-            client, GenerateRequest(prompt="hello"), "r"
-        )
+        async for event in generate_stream(client, GenerateRequest(prompt="hello"), "r")
     ]
     assert client.closed
     assert output[-1].startswith("event: error")
     assert "native worker failed" in output[-1]
     assert not any("[DONE]" in event for event in output)
+
+
+@pytest.mark.parametrize(
+    "error,status,error_type,logged",
+    [
+        (
+            InvalidRequestError("UMM request exceeds max_turns=8"),
+            400,
+            "invalid_request_error",
+            False,
+        ),
+        (QueueFullError(), 503, "server_error", False),
+        (RuntimeError("native worker failed"), 500, "server_error", True),
+    ],
+)
+@pytest.mark.asyncio
+async def test_generate_stream_error_reports_status_and_logs_only_server_errors(
+    error, status, error_type, logged, caplog
+):
+    class FailingClient:
+        async def generate(self, request, request_id):
+            yield GenerateChunk(request_id, segment=SEGMENTS[0])
+            raise error
+
+    with caplog.at_level(logging.ERROR, logger="sglang_omni.serve.openai_api"):
+        output = [
+            event
+            async for event in generate_stream(
+                FailingClient(), GenerateRequest(prompt="hello"), "r"
+            )
+        ]
+    payload = json.loads(output[-1].split("data: ", 1)[1])
+    assert payload["error"] == {
+        "message": str(error),
+        "type": error_type,
+        "code": status,
+    }
+    assert bool(caplog.records) is logged
 
 
 def test_streaming_generate_rejects_unsupported_rollout_artifacts_before_dispatch():
@@ -296,7 +339,11 @@ def test_legacy_chunk_serialization_does_not_add_segment_keys():
 
 @pytest.mark.parametrize("invalid", ["not_list", "wrong_session", "reordered"])
 def test_corrupt_terminal_manifest_is_rejected(invalid):
-    manifest = {"session_id": "session", "segments": [s.to_dict() for s in SEGMENTS]}
+    manifest = {
+        "type": "umm_result",
+        "session_id": "session",
+        "segments": [s.to_dict() for s in SEGMENTS],
+    }
     if invalid == "not_list":
         manifest["segments"] = {"unexpected": 1}
     elif invalid == "wrong_session":
@@ -304,7 +351,16 @@ def test_corrupt_terminal_manifest_is_rejected(invalid):
     else:
         manifest["segments"].reverse()
     with pytest.raises(ValueError, match="UMM terminal"):
-        Client._default_result_builder("r", manifest)
+        Client.default_result_builder("r", manifest)
+
+
+def test_untagged_terminal_segments_keep_the_generic_result_path():
+    timestamped = {"id": 0, "start": 0.0, "end": 1.5, "text": "hello"}
+    chunk = Client.default_result_builder(
+        "r", {"text": "hello", "segments": [timestamped]}
+    )
+    assert chunk.text == "hello"
+    assert chunk.segments is None
 
 
 def test_completion_result_keeps_legacy_positional_finish_reason():

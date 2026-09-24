@@ -34,6 +34,8 @@ class UsageInfo:
     def from_dict(cls, data: dict[str, Any] | None) -> "UsageInfo | None":
         if not data:
             return None
+        else:
+            pass
         return cls(
             prompt_tokens=data.get("prompt_tokens"),
             completion_tokens=data.get("completion_tokens"),
@@ -49,6 +51,8 @@ class UsageInfo:
         }
         if self.engine_time_s is not None:
             d["engine_time_s"] = self.engine_time_s
+        else:
+            pass
         return d
 
 
@@ -172,8 +176,12 @@ class GenerateChunk:
 
         if self.segment is not None:
             result["segment"] = self.segment.to_dict()
+        else:
+            pass
         if self.segments is not None:
             result["segments"] = [segment.to_dict() for segment in self.segments]
+        else:
+            pass
         return result
 
 

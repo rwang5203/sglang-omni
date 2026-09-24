@@ -63,9 +63,9 @@ def request():
 def test_action_result_keeps_native_structure_without_a_file(tmp_path, terminal):
     values = np.arange(32, dtype=np.float32).reshape(4, 8)
     scheduler = NativeGenerationScheduler(ActionGenerator(values), str(tmp_path))
-    payload = scheduler._generate(request())
+    payload = scheduler.generate(request())
     assert scheduler.claim_result(payload, terminal=terminal)
-    chunk = Client._default_result_builder(payload.request_id, payload.data)
+    chunk = Client.default_result_builder(payload.request_id, payload.data)
     item = chunk.media[0]
     assert item["kind"] == "action"
     assert "path" not in item
@@ -76,14 +76,14 @@ def test_action_result_keeps_native_structure_without_a_file(tmp_path, terminal)
     assert item["metrics"] == {"denoise": 0.2}
     json.dumps(chunk.to_dict(), allow_nan=False)
     scheduler.release_result(payload, delivered=True)
-    assert not scheduler._native_requests
+    assert not scheduler.native_requests
     assert not list(tmp_path.iterdir())
 
 
 def test_action_batch_preserves_input_order(tmp_path):
     values = np.arange(64, dtype=np.float32).reshape(2, 4, 8)
     scheduler = NativeGenerationScheduler(ActionGenerator(values), str(tmp_path))
-    payload = scheduler._generate(request())
+    payload = scheduler.generate(request())
     assert [item["input_index"] for item in payload.data["media"]] == [0, 1]
     assert [
         item["action"]["values"] for item in payload.data["media"]
@@ -98,17 +98,17 @@ def test_action_continuation_does_not_read_a_media_file(tmp_path):
     )
     payload = request()
     payload.continuation = ContinuationToken("session", 0, "generation", "nonce")
-    result = scheduler._generate(payload)
+    result = scheduler.generate(payload)
     assert result.data["media"][0]["kind"] == "action"
     assert result.continuation == payload.continuation
-    assert not scheduler._native_requests
+    assert not scheduler.native_requests
     assert not list(tmp_path.iterdir())
 
 
 def test_action_cancellation_event_reaches_native_runtime(tmp_path):
     generator = ActionGenerator(np.zeros((4, 8)))
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    payload = scheduler._generate(request())
+    payload = scheduler.generate(request())
     scheduler.abort(payload.request_id)
     assert generator.calls[0]["cancellation_event"].is_set()
     assert not scheduler.claim_result(payload, terminal=True)

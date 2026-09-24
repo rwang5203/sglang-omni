@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -36,9 +37,9 @@ class NativeValidationClient:
         return {"running": True}
 
     async def completion(self, request, *, request_id, audio_format):
-        payload = StagePayload(request_id, Client._build_omni_request(request), None)
+        payload = StagePayload(request_id, Client.build_omni_request(request), None)
         try:
-            return await self.scheduler._complete(payload)
+            return await self.scheduler.complete(payload)
         except ValueError as exc:
             raise QueueFullError.from_message(str(exc)) from exc
 
@@ -139,7 +140,7 @@ def test_native_internal_errors_remain_server_errors(stream, structured):
 
 @pytest.mark.asyncio
 async def test_cancelled_chat_stream_closes_its_source():
-    from sglang_omni.serve.openai_api import _chat_stream_errors
+    from sglang_omni.serve.openai_api import chat_stream_errors
 
     entered = asyncio.Event()
     closed = asyncio.Event()
@@ -152,7 +153,7 @@ async def test_cancelled_chat_stream_closes_its_source():
         finally:
             closed.set()
 
-    stream = _chat_stream_errors(source())
+    stream = chat_stream_errors(source())
     assert await anext(stream) == "first"
     pending = asyncio.create_task(anext(stream))
     await entered.wait()
@@ -160,3 +161,21 @@ async def test_cancelled_chat_stream_closes_its_source():
     with pytest.raises(asyncio.CancelledError):
         await pending
     assert closed.is_set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("error", "status", "logged"),
+    [(QueueFullError(), 503, False), (RuntimeError("native failure"), 500, True)],
+)
+async def test_chat_stream_logs_only_unexpected_errors(caplog, error, status, logged):
+    from sglang_omni.serve.openai_api import chat_stream_errors
+
+    async def source():
+        raise error
+        yield
+
+    with caplog.at_level(logging.ERROR, logger="sglang_omni.serve.openai_api"):
+        frames = [frame async for frame in chat_stream_errors(source())]
+    assert json.loads(frames[0].removeprefix("data: "))["error"]["code"] == status
+    assert ("Error generating chat stream" in caplog.text) is logged

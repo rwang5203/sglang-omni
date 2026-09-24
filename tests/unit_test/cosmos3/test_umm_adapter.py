@@ -21,18 +21,22 @@ from sglang_omni.models.cosmos3.stages import (
     build_sampling_params,
 )
 from sglang_omni.models.cosmos3.umm import INLINE_MEDIA_LIMIT_BYTES, Cosmos3UMMAdapter
-from sglang_omni.pipeline.umm import UMMController, UMMDecision
+from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.proto.continuation import ContinuationToken
 
 
-def decision(kind="generate", text="", modality="image", prompt="A blue cube"):
+def reasoner_reply(kind="generate", text="", modality="image", prompt="A blue cube"):
     generation = None if kind == "final" else {"modality": modality, "prompt": prompt}
+    return {
+        "text": json.dumps({"kind": kind, "text": text, "generation": generation}),
+        "finish_reason": "stop",
+    }
+
+
+def decision(kind="generate", text="", modality="image", prompt="A blue cube"):
     return Cosmos3UMMAdapter().interpret_reasoner(
-        {
-            "text": json.dumps({"kind": kind, "text": text, "generation": generation}),
-            "finish_reason": "stop",
-        }
+        reasoner_reply(kind, text, modality, prompt)
     )
 
 
@@ -67,14 +71,14 @@ def test_invalid_chat_elements_reject_before_umm_session(messages, media):
     original = deepcopy(request)
     controller = UMMController(Cosmos3UMMAdapter())
     with pytest.raises(InvalidRequestError) as rejected:
-        controller._advance(StagePayload("invalid", request, None))
+        controller.advance(StagePayload("invalid", request, None))
     assert isinstance(
         QueueFullError.from_message(str(rejected.value)), InvalidRequestError
     )
     assert controller.active_sessions == 0
     assert request == original
     assert (
-        controller._advance(
+        controller.advance(
             StagePayload("healthy", OmniRequest("hello"), None)
         ).continuation.phase
         == "reasoner"
@@ -102,7 +106,7 @@ def test_native_chat_contract_and_user_options_survive_internal_decision():
     original = deepcopy(request)
     adapter = Cosmos3UMMAdapter()
     history = adapter.start(request)
-    internal = adapter.reasoner_request(history, request)
+    internal = adapter.reasoner_request(history, request, remaining_generation_turns=1)
     fields = build_chat_fields(
         StagePayload("r", internal, None),
         "cosmos3",
@@ -219,6 +223,56 @@ def test_media_modality_must_match_the_model_decision():
         Cosmos3UMMAdapter().incorporate_media([], decision(), media(kind="video"))
 
 
+def test_media_transition_decodes_each_generated_item_once(monkeypatch):
+    controller = UMMController(Cosmos3UMMAdapter())
+    request = OmniRequest("Draw a cube.")
+    first = controller.advance(StagePayload("r", request, None))
+    generation = controller.advance(
+        StagePayload("r", request, reasoner_reply(), first.continuation)
+    )
+    decoded = []
+    b64decode = base64.b64decode
+
+    def counted_b64decode(encoded, validate):
+        decoded.append(encoded)
+        return b64decode(encoded, validate=validate)
+
+    monkeypatch.setattr(base64, "b64decode", counted_b64decode)
+    resumed = controller.advance(
+        StagePayload("r", request, media(), generation.continuation)
+    )
+    assert resumed.continuation.phase == "reasoner"
+    assert len(decoded) == 1
+
+
+def test_last_generation_turn_allows_only_a_final_decision():
+    controller = UMMController(Cosmos3UMMAdapter(), limits=UMMLimits(max_turns=1))
+    request = OmniRequest("Draw a cube, then describe it.")
+    first = controller.advance(StagePayload("r", request, None))
+    generation = controller.advance(
+        StagePayload("r", request, reasoner_reply(), first.continuation)
+    )
+    last = controller.advance(
+        StagePayload("r", request, media(), generation.continuation)
+    )
+    schemas = [
+        payload.request.params["response_format"]["json_schema"]["schema"]
+        for payload in (first, last)
+    ]
+    assert [schema["properties"]["kind"]["enum"] for schema in schemas] == [
+        ["final", "generate"],
+        ["final"],
+    ]
+    assert schemas[1]["properties"]["generation"] == {"type": "null"}
+    final = controller.advance(
+        StagePayload(
+            "r", request, reasoner_reply("final", "A cube."), last.continuation
+        )
+    )
+    parsed = Client.default_result_builder("r", final.data)
+    assert [segment.kind for segment in parsed.segments] == ["image", "text"]
+
+
 class SavedGenerator:
     local_scheduler_process = None
 
@@ -265,9 +319,9 @@ def test_inline_output_is_owned_hashed_and_released_before_forwarding(tmp_path):
     keep = tmp_path / "keep"
     keep.write_text("keep")
     scheduler = NativeGenerationScheduler(SavedGenerator(), str(tmp_path))
-    result = scheduler._generate(inline_payload())
+    result = scheduler.generate(inline_payload())
     assert list(tmp_path.iterdir()) == [keep]
-    assert not scheduler._native_requests
+    assert not scheduler.native_requests
     item = result.data["media"][0]
     assert "path" not in item
     assert item["sha256"] == hashlib.sha256(b"png fixture").hexdigest()
@@ -285,10 +339,10 @@ def test_inline_generation_rejects_foreign_files_without_removing_them(
         SavedGenerator(foreign=foreign, symlink=symlink), str(tmp_path)
     )
     with pytest.raises(ValueError, match="outside its owned request directory"):
-        scheduler._generate(inline_payload())
+        scheduler.generate(inline_payload())
     assert list(tmp_path.iterdir()) == [foreign]
     assert foreign.read_bytes() == b"retain"
-    assert not scheduler._native_requests
+    assert not scheduler.native_requests
 
 
 @pytest.mark.parametrize("content,limit", [(b"1234", 3), (b"", 3)])
@@ -299,21 +353,21 @@ def test_inline_byte_bounds_fail_and_release_only_owned_directory(
         SavedGenerator(content), str(tmp_path), inline_media_limit_bytes=limit
     )
     with pytest.raises(ValueError, match="byte limit"):
-        scheduler._generate(inline_payload())
+        scheduler.generate(inline_payload())
     assert list(tmp_path.iterdir()) == []
-    assert not scheduler._native_requests
+    assert not scheduler.native_requests
 
 
 def test_multiple_native_outputs_fail_and_release_directory(tmp_path):
     scheduler = NativeGenerationScheduler(SavedGenerator(count=2), str(tmp_path))
     with pytest.raises(ValueError, match="one output"):
-        scheduler._generate(inline_payload())
+        scheduler.generate(inline_payload())
     assert list(tmp_path.iterdir()) == []
 
 
 def test_sdk_success_keeps_default_file_delivery(tmp_path):
     scheduler = NativeGenerationScheduler(SavedGenerator(), str(tmp_path))
-    result = scheduler._generate(StagePayload("r", OmniRequest("cube"), None))
+    result = scheduler.generate(StagePayload("r", OmniRequest("cube"), None))
     assert Path(result.data["media"][0]["path"]).read_bytes() == b"png fixture"
     assert "url" not in result.data["media"][0]
     scheduler.abort("r")
@@ -339,7 +393,7 @@ def test_umm_variant_keeps_native_engines_and_one_conditional_terminal():
     assert stages["reasoner"].gpu != stages["generation"].gpu
     controller = create_umm_scheduler("checkpoint", max_turns=2)
     assert isinstance(controller, UMMController)
-    assert controller.limits.max_turns == 2
+    assert controller.limits == UMMLimits(max_turns=2)
     assert controller.active_sessions == 0
     controller.stop()
 
@@ -349,7 +403,7 @@ def test_wrong_continuation_phase_rejects_before_native_allocation(tmp_path):
     request.continuation = ContinuationToken("session", 0, "reasoner", "nonce")
     scheduler = NativeGenerationScheduler(SavedGenerator(), str(tmp_path))
     with pytest.raises(ValueError, match="non-generation continuation"):
-        scheduler._generate(request)
+        scheduler.generate(request)
     assert list(tmp_path.iterdir()) == []
 
 
@@ -377,7 +431,9 @@ def test_completed_receipt_binds_model_prompt_and_preserves_history(kind):
         "type": f"{kind}_url",
         f"{kind}_url": {"url": generated["media"][0]["url"]},
     }
-    native_request = adapter.reasoner_request(resumed, request)
+    native_request = adapter.reasoner_request(
+        resumed, request, remaining_generation_turns=1
+    )
     assert native_request.inputs["messages"][-1] == resumed[-1]
     assert history == original_history
     assert chosen == original_decision
@@ -390,7 +446,7 @@ def test_umm_generation_preserves_sdk_seed(seed):
     request = GenerateRequest(prompt="draw a lake", sampling=SamplingParams(seed=seed))
     native_request = Cosmos3UMMAdapter().generation_request(
         UMMDecision("generate", generation={"modality": "image", "prompt": "a lake"}),
-        Client._build_omni_request(request),
+        Client.build_omni_request(request),
     )
     native = build_sampling_params(
         StagePayload("owned", native_request, None), "outputs"
@@ -465,7 +521,9 @@ def test_user_option_rejections_survive_stage_transport(params):
     adapter = Cosmos3UMMAdapter()
     request = OmniRequest("hello", params)
     with pytest.raises(InvalidRequestError) as rejected:
-        adapter.reasoner_request(adapter.start(request), request)
+        adapter.reasoner_request(
+            adapter.start(request), request, remaining_generation_turns=1
+        )
         adapter.generation_request(decision(), request)
     assert isinstance(
         QueueFullError.from_message(str(rejected.value)), InvalidRequestError

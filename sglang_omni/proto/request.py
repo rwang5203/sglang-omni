@@ -90,6 +90,8 @@ class StagePayload:
         }
         if self.continuation is not None:
             payload["continuation"] = self.continuation.to_dict()
+        else:
+            pass
         return payload
 
     @classmethod

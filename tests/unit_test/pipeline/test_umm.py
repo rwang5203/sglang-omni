@@ -11,13 +11,14 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from sglang_omni.admission import QueueFullError
+from sglang_omni.admission import InvalidRequestError, QueueFullError
 from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.pipeline.stage_workers import StageLaunchConfig, _construct_stage
+from sglang_omni.pipeline.stage_workers import StageLaunchConfig, construct_stage
 from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits, route_umm
 from sglang_omni.proto.continuation import ContinuationToken
 from sglang_omni.proto.request import OmniRequest, StagePayload
-from sglang_omni.scheduling.messages import IncomingMessage, OutgoingMessage
+from sglang_omni.proto.session import SESSION_METADATA_KEY
+from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from tests.unit_test.fixtures.pipeline_fakes import fake_factory_path
 from tests.unit_test.pipeline.helpers import make_stage, stage
 
@@ -26,7 +27,7 @@ class Adapter:
     def start(self, request):
         return [{"role": "user", "content": request.inputs}]
 
-    def reasoner_request(self, history, request):
+    def reasoner_request(self, history, request, *, remaining_generation_turns):
         return OmniRequest(inputs={"messages": copy.deepcopy(history)}, params={})
 
     def interpret_reasoner(self, result):
@@ -66,20 +67,21 @@ def generate(payload, text=""):
 
 def test_two_model_adapter_cycles_and_ordered_segments():
     controller = UMMController(Adapter())
-    current = controller._advance(request(stream=True))
+    current = controller.advance(request(stream=True))
     session = current.continuation.session_id
     for turn in range(2):
         assert current.continuation.phase == "reasoner"
         assert current.continuation.turn_index == turn
-        current = controller._advance(generate(current, f"render {turn}"))
+        current = controller.advance(generate(current, f"render {turn}"))
         assert current.continuation.phase == "generation"
-        current = controller._advance(reply(current, {"url": f"inline-{turn}"}))
+        current = controller.advance(reply(current, {"url": f"inline-{turn}"}))
         assert (
             current.request.inputs["messages"][-1]["content"]["url"] == f"inline-{turn}"
         )
-    final = controller._advance(reply(current, {"kind": "final", "text": "finished"}))
+    final = controller.advance(reply(current, {"kind": "final", "text": "finished"}))
     assert route_umm("req", final) is None
     assert controller.active_sessions == 0
+    assert final.data["type"] == "umm_result"
     assert final.data["text"] == "render 0render 1finished"
     segments = final.data["segments"]
     assert [s["segment_index"] for s in segments] == list(range(5))
@@ -92,21 +94,21 @@ def test_two_model_adapter_cycles_and_ordered_segments():
 
 def test_stale_and_duplicate_results_never_advance_or_corrupt_current_turn():
     controller = UMMController(Adapter())
-    first = controller._advance(request())
-    second = controller._advance(generate(first))
-    stale = controller._advance(generate(first))
-    controller._emit_result("req", stale, controller.outbox)
+    first = controller.advance(request())
+    second = controller.advance(generate(first))
+    stale = controller.advance(generate(first))
+    controller.emit_result("req", stale, controller.outbox)
     discarded = controller.outbox.get_nowait()
     assert discarded.type == "discard"
     assert discarded.metadata["keep_active"] is True
     forged = reply(second, {"url": "not accepted"})
     forged.continuation = replace(second.continuation, nonce="wrong")
-    controller._advance(forged)
-    assert controller._sessions["req"].expected == second.continuation
-    resumed = controller._advance(reply(second, {"url": "accepted"}))
-    final = controller._advance(reply(resumed, {"kind": "final", "text": "done"}))
-    late = controller._advance(reply(second, {"url": "late"}))
-    controller._emit_result("req", late, controller.outbox)
+    controller.advance(forged)
+    assert controller.sessions["req"].expected == second.continuation
+    resumed = controller.advance(reply(second, {"url": "accepted"}))
+    final = controller.advance(reply(resumed, {"kind": "final", "text": "done"}))
+    late = controller.advance(reply(second, {"url": "late"}))
+    controller.emit_result("req", late, controller.outbox)
     assert controller.outbox.get_nowait().metadata["keep_active"] is False
     assert len(final.data["segments"]) == 2
     assert controller.active_sessions == 0
@@ -114,11 +116,11 @@ def test_stale_and_duplicate_results_never_advance_or_corrupt_current_turn():
 
 def test_abort_and_stop_release_all_sessions_and_late_results():
     controller = UMMController(Adapter())
-    first = controller._advance(request("first"))
-    controller._advance(request("second"))
+    first = controller.advance(request("first"))
+    controller.advance(request("second"))
     controller.abort("first")
     assert controller.active_sessions == 1
-    dropped = controller._advance(generate(first))
+    dropped = controller.advance(generate(first))
     assert dropped.keep_active is False
     controller.stop()
     controller.stop()
@@ -130,78 +132,153 @@ def test_timeout_while_waiting_for_native_stage_emits_error_and_recovers():
     controller = UMMController(
         Adapter(), limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
     )
-    late = controller._advance(request())
+    late = controller.advance(request())
     clock[0] = 1.0
-    controller._expire()
+    controller.expire()
     error = controller.outbox.get_nowait()
     assert error.type == "error"
     assert isinstance(error.data, TimeoutError)
+    assert "timeout_s=1. Raise stages.<orchestrator>.factory.timeout_s" in str(
+        error.data
+    )
     assert controller.active_sessions == 0
-    assert controller._advance(generate(late)).keep_active is False
-    assert controller._advance(request("healthy")).continuation.phase == "reasoner"
+    assert controller.advance(generate(late)).keep_active is False
+    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
 
 
 def test_capacity_rejection_preserves_existing_session():
     controller = UMMController(Adapter(), limits=UMMLimits(max_sessions=1))
-    original = controller._advance(request())
+    original = controller.advance(request())
     with pytest.raises(QueueFullError) as rejected:
-        controller._advance(request("excess"))
+        controller.advance(request("excess"))
     assert isinstance(QueueFullError.from_message(str(rejected.value)), QueueFullError)
     assert controller.active_sessions == 1
-    assert controller._sessions["req"].expected == original.continuation
-    controller._advance(reply(original, {"kind": "final", "text": "done"}))
+    assert controller.sessions["req"].expected == original.continuation
+    controller.advance(reply(original, {"kind": "final", "text": "done"}))
     assert controller.active_sessions == 0
-    assert controller._advance(request("healthy")).continuation.phase == "reasoner"
+    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
 
 
 def test_turn_bound_still_allows_final_reasoning_after_last_generation():
     controller = UMMController(Adapter(), limits=UMMLimits(max_turns=1))
-    reasoner = controller._advance(request())
-    generation = controller._advance(generate(reasoner))
-    last_reasoner = controller._advance(reply(generation, {"url": "media"}))
-    final = controller._advance(reply(last_reasoner, {"kind": "final", "text": "done"}))
+    reasoner = controller.advance(request())
+    generation = controller.advance(generate(reasoner))
+    last_reasoner = controller.advance(reply(generation, {"url": "media"}))
+    final = controller.advance(reply(last_reasoner, {"kind": "final", "text": "done"}))
     assert final.continuation is None
 
-    reasoner = controller._advance(request())
-    generation = controller._advance(generate(reasoner))
-    last_reasoner = controller._advance(reply(generation, {"url": "media"}))
-    with pytest.raises(ValueError, match="max_turns"):
-        controller._advance(generate(last_reasoner, "must not stream"))
+    reasoner = controller.advance(request())
+    generation = controller.advance(generate(reasoner))
+    last_reasoner = controller.advance(reply(generation, {"url": "media"}))
+    with pytest.raises(
+        InvalidRequestError,
+        match=r"max_turns=1\. Raise stages\.<orchestrator>\.factory\.max_turns",
+    ) as refused:
+        controller.advance(generate(last_reasoner, "must not stream"))
+    assert isinstance(
+        QueueFullError.from_message(str(refused.value)), InvalidRequestError
+    )
     assert controller.active_sessions == 0
+
+
+def test_adapter_receives_the_remaining_generation_turns():
+    remaining = []
+
+    class RecordingAdapter(Adapter):
+        def reasoner_request(self, history, request, *, remaining_generation_turns):
+            remaining.append(remaining_generation_turns)
+            return super().reasoner_request(
+                history,
+                request,
+                remaining_generation_turns=remaining_generation_turns,
+            )
+
+    controller = UMMController(RecordingAdapter(), limits=UMMLimits(max_turns=1))
+    reasoner = controller.advance(request())
+    generation = controller.advance(generate(reasoner))
+    controller.advance(reply(generation, {"url": "media"}))
+    assert remaining == [1, 0]
+
+
+def test_default_segment_budget_allows_a_message_with_every_generation_turn():
+    controller = UMMController(Adapter())
+    current = controller.advance(request())
+    for turn in range(controller.limits.max_turns):
+        current = controller.advance(generate(current, f"turn {turn}"))
+        current = controller.advance(reply(current, {"url": f"media-{turn}"}))
+    final = controller.advance(reply(current, {"kind": "final", "text": "done"}))
+    assert len(final.data["segments"]) == 2 * controller.limits.max_turns + 1
 
 
 def test_segment_budget_rejects_entire_transition_before_stream_publication():
     controller = UMMController(Adapter(), limits=UMMLimits(max_segments=1))
-    reasoner = controller._advance(request(stream=True))
-    generation = controller._advance(generate(reasoner, "first"))
+    reasoner = controller.advance(request(stream=True))
+    generation = controller.advance(generate(reasoner, "first"))
     assert controller.outbox.get_nowait().type == "stream"
-    with pytest.raises(ValueError, match="max_segments"):
-        controller._advance(reply(generation, {"url": "media"}))
+    with pytest.raises(InvalidRequestError, match="max_segments=1"):
+        controller.advance(reply(generation, {"url": "media"}))
     assert controller.outbox.empty()
     assert controller.active_sessions == 0
 
 
 def test_retained_byte_budget_covers_initial_input_and_generated_media():
     small = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=10))
-    with pytest.raises(ValueError, match="max_context_bytes"):
-        small._advance(request())
+    with pytest.raises(InvalidRequestError, match="max_context_bytes=10"):
+        small.advance(request())
     assert small.active_sessions == 0
 
     controller = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=2048))
-    reasoner = controller._advance(request())
-    generation = controller._advance(generate(reasoner))
-    with pytest.raises(ValueError, match="max_context_bytes"):
-        controller._advance(reply(generation, {"url": "x" * 4096}))
+    reasoner = controller.advance(request())
+    generation = controller.advance(generate(reasoner))
+    with pytest.raises(InvalidRequestError, match="max_context_bytes=2048"):
+        controller.advance(reply(generation, {"url": "x" * 4096}))
     assert controller.active_sessions == 0
+
+
+def test_result_without_continuation_for_live_session_fails_and_drops_it():
+    controller = UMMController(Adapter())
+    reasoner = controller.advance(request())
+    rebuilt = StagePayload(
+        request_id="req",
+        request=reasoner.request,
+        data={"kind": "final", "text": "lost"},
+    )
+    with pytest.raises(RuntimeError, match="dropped its continuation"):
+        controller.advance(rebuilt)
+    assert controller.active_sessions == 0
+
+
+def test_session_operations_are_refused_before_a_session_exists():
+    controller = UMMController(Adapter())
+    payload = request()
+    payload.request.metadata[SESSION_METADATA_KEY] = {"operation": "open"}
+    with pytest.raises(InvalidRequestError, match="session operations"):
+        controller.advance(payload)
+    assert controller.active_sessions == 0
+
+
+def test_internal_turns_never_stream_when_the_adapter_forwards_client_params():
+    class ForwardingAdapter(Adapter):
+        def reasoner_request(self, history, request, *, remaining_generation_turns):
+            return OmniRequest(inputs=history, params=dict(request.params))
+
+        def generation_request(self, decision, request):
+            return OmniRequest(inputs=decision.generation, params=dict(request.params))
+
+    controller = UMMController(ForwardingAdapter())
+    reasoner = controller.advance(request(stream=True))
+    generation = controller.advance(generate(reasoner))
+    assert reasoner.request.params["stream"] is False
+    assert generation.request.params["stream"] is False
 
 
 def test_adapter_failure_isolated_and_next_request_recovers():
     controller = UMMController(Adapter())
-    reasoner = controller._advance(request())
+    reasoner = controller.advance(request())
     with pytest.raises(ValueError, match="Invalid structured"):
-        controller._advance(reply(reasoner, {"kind": "unknown"}))
+        controller.advance(reply(reasoner, {"kind": "unknown"}))
     assert controller.active_sessions == 0
-    assert controller._advance(request("healthy")).continuation.phase == "reasoner"
+    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
 
 
 def test_existing_scheduler_thread_runs_controller_and_reaps_waiting_deadline():
@@ -220,6 +297,10 @@ def test_existing_scheduler_thread_runs_controller_and_reaps_waiting_deadline():
         controller.stop()
         worker.join(timeout=2)
     assert not worker.is_alive()
+
+
+def route_nowhere(request_id, output):
+    return None
 
 
 def test_conditional_terminal_schema_and_route_target_validation():
@@ -252,21 +333,25 @@ def test_conditional_terminal_schema_and_route_target_validation():
         },
         comm_config={"slot_size_mb": 1},
     )
-    obj = _construct_stage(spec, logging.getLogger(__name__))
+    obj = construct_stage(spec, logging.getLogger(__name__))
     payload = request()
     assert obj.get_next("req", payload) is None
     payload.continuation = ContinuationToken("s", 0, "generation", "n")
     assert obj.get_next("req", payload) == "generation"
-    obj = _construct_stage(
-        replace(spec, next_stages=["reasoner"]), logging.getLogger(__name__)
-    )
-    with pytest.raises(ValueError, match="outside the static topology"):
-        obj.get_next("req", payload)
-    nonterminal = _construct_stage(
-        replace(spec, is_terminal=False), logging.getLogger(__name__)
+    with pytest.raises(ValueError, match="exactly the UMM phase stages"):
+        construct_stage(
+            replace(spec, next_stages=["planner", "painter"]),
+            logging.getLogger(__name__),
+        )
+    with pytest.raises(ValueError, match="must be terminal"):
+        construct_stage(replace(spec, is_terminal=False), logging.getLogger(__name__))
+    # Other routed stages may return no target only when they are terminal.
+    routed = construct_stage(
+        replace(spec, is_terminal=False, route_fn=f"{__name__}.route_nowhere"),
+        logging.getLogger(__name__),
     )
     with pytest.raises(ValueError, match="returned no targets"):
-        nonterminal.get_next("req", request())
+        routed.get_next("req", request())
     with pytest.raises(ValueError, match="identity mismatch"):
         route_umm("different", payload)
 
@@ -275,54 +360,54 @@ def test_conditional_terminal_schema_and_route_target_validation():
 async def test_stream_order_and_ownership_survive_controller_reentry_until_completion():
     obj = make_stage(name="orchestrator", is_terminal=True, get_next=route_umm)
     obj.control_plane.send_stream = AsyncMock()
-    obj._send_to_stage = AsyncMock()
+    obj.send_to_stage = AsyncMock()
     payload = request()
-    obj._active_requests.add("req")
-    await obj._execute(payload)
+    obj.active_requests.add("req")
+    await obj.execute(payload)
     for index in range(2):
-        await obj._send_stream_to_coordinator("req", {"text": str(index)})
+        await obj.send_stream_to_coordinator("req", {"text": str(index)})
         payload.continuation = ContinuationToken("s", index, "reasoner", str(index))
-        await obj._route_result("req", payload)
-        assert "req" in obj._active_requests
+        await obj.route_result("req", payload)
+        assert "req" in obj.active_requests
         payload = reply(payload, {})
-        await obj._receive_payload_from_stage("req", "reasoner", payload)
-    await obj._send_stream_to_coordinator("req", {"text": "done"})
+        await obj.receive_payload_from_stage("req", "reasoner", payload)
+    await obj.send_stream_to_coordinator("req", {"text": "done"})
     assert [
         call.args[0].chunk_id for call in obj.control_plane.send_stream.call_args_list
     ] == [0, 1, 2]
     payload.continuation = None
-    await obj._route_result("req", payload)
-    assert "req" not in obj._active_requests
-    assert "req" not in obj._request_arrivals
-    assert not obj._stream_chunk_counters
+    await obj.route_result("req", payload)
+    assert "req" not in obj.active_requests
+    assert "req" not in obj.request_arrivals
+    assert not obj.stream_chunk_counters
 
 
 @pytest.mark.asyncio
 async def test_fast_cycle_cannot_clear_new_arrival_during_send():
     obj = make_stage(name="reasoner", get_next=lambda *_: "orchestrator")
     first = request()
-    obj._active_requests.add("req")
-    await obj._execute(first)
-    old_arrival = obj._request_arrivals["req"]
+    obj.active_requests.add("req")
+    await obj.execute(first)
+    old_arrival = obj.request_arrivals["req"]
 
     async def reenter(*args, **kwargs):
-        await obj._receive_payload_from_stage("req", "orchestrator", request())
+        await obj.receive_payload_from_stage("req", "orchestrator", request())
 
-    obj._send_to_stage = reenter
-    await obj._route_result("req", first)
-    assert "req" in obj._active_requests
-    assert obj._request_arrivals["req"] is not old_arrival
+    obj.send_to_stage = reenter
+    await obj.route_result("req", first)
+    assert "req" in obj.active_requests
+    assert obj.request_arrivals["req"] is not old_arrival
     assert obj.scheduler.inbox.qsize() == 2
 
 
 @pytest.mark.asyncio
 async def test_old_discard_cannot_clear_new_arrival_but_retired_discard_releases_state():
     obj = make_stage(name="orchestrator", is_terminal=True)
-    obj._active_requests.add("req")
+    obj.active_requests.add("req")
     old = request()
-    await obj._execute(old)
+    await obj.execute(old)
     fresh = request()
-    await obj._execute(fresh)
+    await obj.execute(fresh)
     obj.scheduler.outbox.put(
         OutgoingMessage(
             "req",
@@ -330,8 +415,8 @@ async def test_old_discard_cannot_clear_new_arrival_but_retired_discard_releases
             metadata={"arrival_id": old.arrival_id, "keep_active": False},
         )
     )
-    await obj._drain_outbox_external()
-    assert "req" in obj._active_requests
+    await obj.drain_outbox_external()
+    assert "req" in obj.active_requests
     obj.scheduler.outbox.put(
         OutgoingMessage(
             "req",
@@ -339,9 +424,9 @@ async def test_old_discard_cannot_clear_new_arrival_but_retired_discard_releases
             metadata={"arrival_id": fresh.arrival_id, "keep_active": False},
         )
     )
-    await obj._drain_outbox_external()
-    assert "req" not in obj._active_requests
-    assert not obj._request_arrivals
+    await obj.drain_outbox_external()
+    assert "req" not in obj.active_requests
+    assert not obj.request_arrivals
 
 
 @pytest.mark.asyncio
@@ -353,59 +438,77 @@ async def test_waiting_controller_deadline_reaches_stage_failure_and_abort_clean
         get_next=route_umm,
         scheduler=controller,
     )
-    obj._send_to_stage = AsyncMock()
+    obj.send_to_stage = AsyncMock()
     obj.control_plane.send_stream = AsyncMock()
     initial = request()
-    obj._active_requests.add("req")
-    await obj._execute(initial)
-    result = controller._advance(initial)
-    await obj._route_result("req", result)
-    assert "req" in obj._active_requests
+    obj.active_requests.add("req")
+    await obj.execute(initial)
+    result = controller.advance(initial)
+    await obj.route_result("req", result)
+    assert "req" in obj.active_requests
     controller.outbox.put(OutgoingMessage("req", "error", TimeoutError("expired")))
-    await obj._drain_outbox_external()
+    await obj.drain_outbox_external()
     assert len(obj.control_plane.completions) == 1
     assert obj.control_plane.completions[0].success is False
-    obj._on_abort("req")
-    await obj._send_stream_to_coordinator("req", {"text": "late"})
+    obj.on_abort("req")
+    await obj.send_stream_to_coordinator("req", {"text": "late"})
     assert obj.control_plane.send_stream.await_count == 0
     assert controller.active_sessions == 0
-    assert not obj._request_arrivals
+    assert not obj.request_arrivals
 
 
 @pytest.mark.asyncio
 async def test_cleanup_uses_producing_arrival_when_new_turn_is_already_queued():
     obj = make_stage(name="reasoner", get_next=lambda *_: "orchestrator")
-    obj._send_to_stage = AsyncMock()
+    obj.send_to_stage = AsyncMock()
     old = request()
-    obj._active_requests.add("req")
-    await obj._execute(old)
+    obj.active_requests.add("req")
+    await obj.execute(old)
     newer = request()
-    await obj._execute(newer)
-    await obj._route_result("req", old)
-    assert "req" in obj._active_requests
-    assert obj._request_arrivals["req"] is newer.arrival_id
+    await obj.execute(newer)
+    await obj.route_result("req", old)
+    assert "req" in obj.active_requests
+    assert obj.request_arrivals["req"] is newer.arrival_id
+
+
+@pytest.mark.asyncio
+async def test_only_a_terminal_stage_forwarding_a_continuation_keeps_request_state():
+    token = ContinuationToken("s", 0, "reasoner", "n")
+    for name, is_terminal, continuation in (
+        ("orchestrator", True, None),
+        ("reasoner", False, token),
+    ):
+        obj = make_stage(name=name, is_terminal=is_terminal, get_next=lambda *_: "b")
+        obj.send_to_stage = AsyncMock()
+        payload = request()
+        payload.continuation = continuation
+        obj.active_requests.add("req")
+        await obj.execute(payload)
+        await obj.route_result("req", payload)
+        assert "req" not in obj.active_requests
+        assert "req" not in obj.request_arrivals
 
 
 def test_controller_output_preserves_the_arrival_that_produced_it():
     controller = UMMController(Adapter())
     initial = request()
     initial.arrival_id = object()
-    reasoner = controller._advance(initial)
+    reasoner = controller.advance(initial)
     assert reasoner.arrival_id is initial.arrival_id
     result = reply(reasoner, {"kind": "final", "text": "done"})
     result.arrival_id = object()
-    final = controller._advance(result)
+    final = controller.advance(result)
     assert final.arrival_id is result.arrival_id
 
 
 @pytest.mark.asyncio
 async def test_legacy_reconstructed_payload_without_arrival_still_cleans_up():
     obj = make_stage()
-    obj._active_requests.add("req")
-    await obj._execute(request())
-    await obj._route_result("req", request())
-    assert not obj._active_requests
-    assert not obj._request_arrivals
+    obj.active_requests.add("req")
+    await obj.execute(request())
+    await obj.route_result("req", request())
+    assert not obj.active_requests
+    assert not obj.request_arrivals
 
 
 @pytest.mark.parametrize(
@@ -425,8 +528,8 @@ def test_adapter_work_cannot_admit_a_transition_after_its_deadline(
     adapter = Adapter()
     original = getattr(adapter, boundary)
 
-    def slow(*args):
-        value = original(*args)
+    def slow(*args, **kwargs):
+        value = original(*args, **kwargs)
         clock[0] = 2.0
         return value
 
@@ -435,12 +538,12 @@ def test_adapter_work_cannot_admit_a_transition_after_its_deadline(
         adapter, limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
     )
     with pytest.raises(TimeoutError, match="deadline"):
-        current = controller._advance(request(stream=True))
+        current = controller.advance(request(stream=True))
         if boundary == "interpret_reasoner":
-            controller._advance(reply(current, {"kind": "final", "text": "late text"}))
+            controller.advance(reply(current, {"kind": "final", "text": "late text"}))
         else:
-            current = controller._advance(generate(current))
-            controller._advance(reply(current, {"url": "late media"}))
+            current = controller.advance(generate(current))
+            controller.advance(reply(current, {"url": "late media"}))
     assert controller.active_sessions == 0
     assert controller.outbox.empty()
 
@@ -457,16 +560,16 @@ async def test_expired_queued_continuation_is_not_forwarded_and_fails_once():
         is_terminal=True,
         get_next=route_umm,
     )
-    obj._send_to_stage = AsyncMock()
+    obj.send_to_stage = AsyncMock()
     payload = request()
-    obj._active_requests.add("req")
-    await obj._execute(payload)
-    result = controller._advance(payload)
-    controller._emit_result("req", result, controller.outbox)
+    obj.active_requests.add("req")
+    await obj.execute(payload)
+    result = controller.advance(payload)
+    controller.emit_result("req", result, controller.outbox)
     clock[0] = 2.0
-    controller._expire()
-    await obj._drain_outbox_external()
-    assert obj._send_to_stage.await_count == 0
+    controller.expire()
+    await obj.drain_outbox_external()
+    assert obj.send_to_stage.await_count == 0
     assert len(obj.control_plane.completions) == 1
     assert obj.control_plane.completions[0].success is False
     assert controller.active_sessions == 0
@@ -477,15 +580,15 @@ def test_route_validation_expires_once_but_delivers_accepted_final_snapshots():
     controller = UMMController(
         Adapter(), limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
     )
-    result = controller._advance(request())
+    result = controller.advance(request())
     clock[0] = 2.0
     assert controller.validate_result(result) is False
     assert controller.validate_result(result) is False
-    controller._expire()
+    controller.expire()
     assert controller.outbox.qsize() == 1
     assert controller.outbox.get_nowait().type == "error"
-    current = controller._advance(request("fresh"))
-    final = controller._advance(reply(current, {"kind": "final", "text": "done"}))
+    current = controller.advance(request("fresh"))
+    final = controller.advance(reply(current, {"kind": "final", "text": "done"}))
     clock[0] = 4.0
     assert controller.validate_result(final) is True
 
@@ -508,32 +611,36 @@ async def test_readmitted_retired_id_fails_at_entry_and_fresh_identity_recovers(
 
     first = asyncio.create_task(coordinator.submit("req", "initial"))
     await asyncio.sleep(0)
-    await obj._on_submit(control.submitted[-1][2])
+    await obj.on_submit(control.submitted[-1][2])
     await coordinator.abort("req")
-    obj._on_abort("req")
+    obj.on_abort("req")
     with pytest.raises(asyncio.CancelledError):
         await first
     queued = obj.scheduler.inbox.qsize()
 
     repeated = asyncio.create_task(coordinator.submit("req", "reused"))
     await asyncio.sleep(0)
-    await obj._on_submit(control.submitted[-1][2])
+    await obj.on_submit(control.submitted[-1][2])
     assert obj.scheduler.inbox.qsize() == queued
-    await coordinator._handle_completion(obj.control_plane.completions[-1])
-    with pytest.raises(RuntimeError, match="fresh request ID"):
+    await coordinator.handle_completion(obj.control_plane.completions[-1])
+    with pytest.raises(
+        RuntimeError,
+        match=r"^Request req \(retired after abort or failure, use a fresh "
+        r"request ID\) already exists$",
+    ):
         await asyncio.wait_for(repeated, timeout=1)
     completions = len(obj.control_plane.completions)
-    await obj._receive_payload_from_stage("req", "reasoner", request())
+    await obj.receive_payload_from_stage("req", "reasoner", request())
     assert len(obj.control_plane.completions) == completions
     assert obj.scheduler.inbox.qsize() == queued
 
     fresh = asyncio.create_task(coordinator.submit("fresh", "healthy"))
     await asyncio.sleep(0)
     message = control.submitted[-1][2]
-    await obj._on_submit(message)
+    await obj.on_submit(message)
     message.data.data = {"text": "healthy"}
-    await obj._route_result("fresh", message.data)
-    await coordinator._handle_completion(obj.control_plane.completions[-1])
+    await obj.route_result("fresh", message.data)
+    await coordinator.handle_completion(obj.control_plane.completions[-1])
     assert await asyncio.wait_for(fresh, timeout=1) == {"text": "healthy"}
-    assert not obj._active_requests
-    assert not obj._request_arrivals
+    assert not obj.active_requests
+    assert not obj.request_arrivals
