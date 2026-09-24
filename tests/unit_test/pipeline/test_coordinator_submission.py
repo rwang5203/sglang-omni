@@ -61,7 +61,7 @@ def test_initial_submission_failure_releases_ownership_and_preserves_error(
             else coordinator.submit("failed", "draw and inspect")
         )
         await asyncio.wait_for(control_plane.started.wait(), 1)
-        future = coordinator._completion_futures["failed"]
+        future = coordinator.completion_futures["failed"]
         error = OSError("entry transport unavailable")
         if cancel:
             pending.cancel("caller cancelled during submission")
@@ -77,11 +77,11 @@ def test_initial_submission_failure_releases_ownership_and_preserves_error(
                 assert caught.value is error
             assert [msg.request_id for msg in control_plane.aborts] == ["failed"]
             assert future.cancelled()
-            assert coordinator._requests == {}
-            assert coordinator._completion_futures == {}
-            assert coordinator._stream_queues == {}
-            assert coordinator._partial_results == {}
-            assert coordinator._abort_tasks == {}
+            assert coordinator.requests == {}
+            assert coordinator.completion_futures == {}
+            assert coordinator.stream_queues == {}
+            assert coordinator.partial_results == {}
+            assert coordinator.abort_tasks == {}
 
             # A fresh request can use the released admission slot and complete.
             control_plane.error = None
@@ -89,16 +89,16 @@ def test_initial_submission_failure_releases_ownership_and_preserves_error(
             control_plane.release.set()
             recovered = asyncio.create_task(coordinator.submit("recovered", "hello"))
             await asyncio.wait_for(control_plane.started.wait(), 1)
-            await coordinator._handle_completion(
+            await coordinator.handle_completion(
                 CompleteMessage("recovered", "orchestrator", True, result="done")
             )
             assert await asyncio.wait_for(recovered, 1) == "done"
-            assert coordinator._requests == {}
-            assert coordinator._completion_futures == {}
+            assert coordinator.requests == {}
+            assert coordinator.completion_futures == {}
         finally:
             if stream is not None:
                 await stream.aclose()
-            for retained in coordinator._completion_futures.values():
+            for retained in coordinator.completion_futures.values():
                 retained.cancel()
 
     asyncio.run(run())
@@ -114,9 +114,9 @@ def test_duplicate_submission_does_not_abort_or_clear_the_original_owner(
         original = coordinator.stream("shared", "original")
         pending = asyncio.create_task(anext(original))
         await asyncio.wait_for(control_plane.started.wait(), 1)
-        info = coordinator._requests["shared"]
-        future = coordinator._completion_futures["shared"]
-        queue = coordinator._stream_queues["shared"]
+        info = coordinator.requests["shared"]
+        future = coordinator.completion_futures["shared"]
+        queue = coordinator.stream_queues["shared"]
         duplicate = (
             coordinator.stream("shared", "duplicate") if streaming_duplicate else None
         )
@@ -126,15 +126,15 @@ def test_duplicate_submission_does_not_abort_or_clear_the_original_owner(
                     await anext(duplicate)
                 else:
                     await coordinator.submit("shared", "duplicate")
-            assert coordinator._requests["shared"] is info
-            assert coordinator._completion_futures["shared"] is future
-            assert coordinator._stream_queues["shared"] is queue
+            assert coordinator.requests["shared"] is info
+            assert coordinator.completion_futures["shared"] is future
+            assert coordinator.stream_queues["shared"] is queue
             assert not future.done()
             assert control_plane.aborts == []
             assert len(control_plane.submitted) == 1
 
             control_plane.release.set()
-            await coordinator._handle_completion(
+            await coordinator.handle_completion(
                 CompleteMessage("shared", "orchestrator", True, result="original")
             )
             assert (await asyncio.wait_for(pending, 1)).result == "original"
@@ -142,9 +142,9 @@ def test_duplicate_submission_does_not_abort_or_clear_the_original_owner(
             if duplicate is not None:
                 await duplicate.aclose()
             await original.aclose()
-        assert coordinator._requests == {}
-        assert coordinator._completion_futures == {}
-        assert coordinator._stream_queues == {}
+        assert coordinator.requests == {}
+        assert coordinator.completion_futures == {}
+        assert coordinator.stream_queues == {}
         assert control_plane.aborts == []
 
     asyncio.run(run())
@@ -167,7 +167,7 @@ def test_cancelled_submission_keeps_id_reserved_until_abort_finishes():
         coordinator = make_coordinator(control_plane)
         pending = asyncio.create_task(coordinator.submit("held", "draw"))
         await asyncio.wait_for(control_plane.started.wait(), 1)
-        future = coordinator._completion_futures["held"]
+        future = coordinator.completion_futures["held"]
         pending.cancel("original cancellation")
         try:
             await asyncio.wait_for(control_plane.abort_started.wait(), 1)
@@ -178,17 +178,17 @@ def test_cancelled_submission_keeps_id_reserved_until_abort_finishes():
             with pytest.raises(asyncio.CancelledError, match="original cancellation"):
                 await asyncio.wait_for(pending, 1)
             assert future.cancelled()
-            assert coordinator._requests == {}
-            assert coordinator._completion_futures == {}
-            assert "held" in coordinator._abort_tasks
+            assert coordinator.requests == {}
+            assert coordinator.completion_futures == {}
+            assert "held" in coordinator.abort_tasks
             with pytest.raises(ValueError, match="already exists"):
                 await coordinator.submit("held", "duplicate")
             assert len(control_plane.submitted) == 1
         finally:
             control_plane.release_abort.set()
-            await asyncio.gather(*coordinator._abort_tasks.values())
+            await asyncio.gather(*coordinator.abort_tasks.values())
             await asyncio.gather(pending, return_exceptions=True)
-        assert coordinator._abort_tasks == {}
+        assert coordinator.abort_tasks == {}
         assert [msg.request_id for msg in control_plane.aborts] == ["held"]
 
     asyncio.run(run())

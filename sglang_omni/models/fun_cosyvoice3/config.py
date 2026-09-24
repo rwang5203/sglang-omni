@@ -87,6 +87,8 @@ def reject_conflicting_dit_accelerators(
 ) -> None:
     if enable_flow_estimator_trt and enable_dit_torch_compile:
         raise ValueError(_DIT_ACCELERATOR_CONFLICT)
+    else:
+        pass
 
 
 class FunCosyVoice3EngineFactoryArgs(FactoryArgs):
@@ -141,20 +143,9 @@ class FunCosyVoice3PipelineConfig(PipelineConfig):
             factory=FactoryArgs(max_concurrency=8),
             next="tts_engine",
         ),
-        FunCosyVoice3EngineStageConfig(
-            name="tts_engine",
-            process="pipeline",
-            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
-            factory=FunCosyVoice3EngineFactoryArgs(
-                dtype="bfloat16",
-                onnx_intra_op_threads=16,
-                # Keep in sync with vocoder token_hop_len (AR flush cadence).
-                token_hop_len=25,
-            ),
-            gpu=0,
-            next="vocoder",
-            stream_to=["vocoder"],
-        ),
+        # note(ratish): stages in one process are built in list order; the
+        # vocoder comes before the engine so Flow, HiFT and their graphs are
+        # resident when sglang sizes the KV pool from free memory.
         FunCosyVoice3VocoderStageConfig(
             name="vocoder",
             process="pipeline",
@@ -181,6 +172,19 @@ class FunCosyVoice3PipelineConfig(PipelineConfig):
             terminal=True,
             can_accept_stream_before_payload=True,
         ),
+        FunCosyVoice3EngineStageConfig(
+            name="tts_engine",
+            process="pipeline",
+            factory_path=f"{_PKG}.stages.create_sglang_tts_engine_executor",
+            factory=FunCosyVoice3EngineFactoryArgs(
+                dtype="bfloat16",
+                onnx_intra_op_threads=16,
+                token_hop_len=25,
+            ),
+            gpu=0,
+            next="vocoder",
+            stream_to=["vocoder"],
+        ),
     ]
 
     def model_post_init(self, __context: Any = None) -> None:
@@ -197,19 +201,27 @@ class FunCosyVoice3PipelineConfig(PipelineConfig):
     def stage_factory_kwargs(self, stage_name: str) -> dict[str, Any]:
         if stage_name != "vocoder":
             return {}
+        else:
+            pass
         vocoder_factory = self.stage_named("vocoder").factory
         if vocoder_factory.mlx_model_path is not None:
             # Note (yexiaodong): A separate vocoder artifact must keep its own
             # revision; both explicit fields therefore stay in typed config.
             return {}
+        else:
+            pass
         # Note (yexiaodong): The converted artifact contains the speech-token
         # LLM, Flow, and HiFT weights, so reuse it unless the vocoder overrides it.
         engine_factory = self.stage_named("tts_engine").factory
         kwargs: dict[str, Any] = {}
         if engine_factory.mlx_model_path is not None:
             kwargs["mlx_model_path"] = engine_factory.mlx_model_path
+        else:
+            pass
         if engine_factory.mlx_model_revision is not None:
             kwargs["mlx_model_revision"] = engine_factory.mlx_model_revision
+        else:
+            pass
         return kwargs
 
 
