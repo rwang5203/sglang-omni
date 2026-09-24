@@ -49,10 +49,10 @@ def test_stage_process_child_ownership(monkeypatch, allow_children):
         process.join(timeout=15)
         assert not process.is_alive()
         assert process.exitcode == 0
-        assert group._ready_events[0].is_set() is allow_children
+        assert group.ready_events[0].is_set() is allow_children
         if not allow_children:
             assert "daemonic processes are not allowed to have children" in (
-                group._startup_error_channels[0].get(timeout=2)
+                group.startup_error_channels[0].get(timeout=2)
             )
     finally:
         asyncio.run(group.shutdown(join_timeout=1))

@@ -43,7 +43,7 @@ SGLang tag from source with its `all_mps` dependencies before installing
 SGLang-Omni:
 
 ```bash
-git clone --branch v0.5.19 https://github.com/sgl-project/sglang.git
+git clone --branch v0.5.20 https://github.com/sgl-project/sglang.git
 git clone https://github.com/sgl-project/sglang-omni.git
 
 uv venv -p 3.12 sglang-omni/.venv-apple
@@ -145,6 +145,19 @@ This qualified profile keeps the model in BF16, limits the stage to 16 running
 requests, and sets `mem_fraction_static` to `0.65`. Its bounds are specific to
 the validated RTX 4090 layout; use the default configuration or a separately
 qualified profile on other GPU architectures.
+
+For a single 32 GB RTX 5090, use:
+
+```bash
+sgl-omni serve \
+  --config examples/configs/qwen3_asr_rtx5090.yaml \
+  --port 8000
+```
+
+This profile uses BF16, allows up to 16 running requests, and sets
+`mem_fraction_static=0.65`. See the
+[RTX 5090 benchmark report](https://github.com/sgl-project/sglang-omni/issues/1212)
+for results measured on an earlier release.
 
 For example, force synchronous decode when comparing modes:
 
