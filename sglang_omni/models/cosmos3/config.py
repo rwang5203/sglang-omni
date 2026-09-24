@@ -38,7 +38,7 @@ class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
             process="reasoner",
             factory_path="sglang_omni.models.cosmos3.reasoner.create_reasoner_scheduler",
             allow_child_processes=True,
-            factory=FactoryArgs(max_concurrency=8),
+            factory=FactoryArgs(),
             gpu=0,
             terminal=True,
         )

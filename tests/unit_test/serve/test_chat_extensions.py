@@ -12,7 +12,7 @@ from sglang_omni.client.types import CompletionStreamChunk, UsageInfo
 from sglang_omni.models.cosmos3.reasoner import build_chat_fields
 from sglang_omni.proto import StagePayload
 from sglang_omni.serve import create_app
-from sglang_omni.serve.openai_api import _build_chat_generate_request
+from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.protocol import ChatCompletionRequest
 
 
@@ -27,6 +27,7 @@ def test_backend_options_reach_the_native_request_validator():
         "ignore_eos": True,
         "min_tokens": 4,
         "rid": "untrusted-id",
+        "stop_token_ids": [7],
     }
     request = ChatCompletionRequest(
         messages=[{"role": "user", "content": "hello"}],
@@ -35,9 +36,9 @@ def test_backend_options_reach_the_native_request_validator():
         temperature=0.0,
         **options,
     )
-    generated = _build_chat_generate_request(request)
+    generated = build_chat_generate_request(request)
     assert generated.extra_params == options
-    payload = StagePayload("owned-request", Client._build_omni_request(generated), None)
+    payload = StagePayload("owned-request", Client.build_omni_request(generated), None)
     fields = build_chat_fields(
         payload, "native-model", set(NativeChatRequest.model_fields)
     )
@@ -46,9 +47,20 @@ def test_backend_options_reach_the_native_request_validator():
     assert native.chat_template_kwargs == {"enable_thinking": False}
     assert native.ignore_eos is True
     assert native.min_tokens == 4
+    assert native.stop_token_ids == [7]
     assert native.rid == "owned-request"
     assert native.max_tokens == 12 and native.temperature == 0.0
     assert request.model_extra == options
+
+
+def test_backend_options_cannot_replace_declared_params():
+    for length in ({"max_tokens": 16}, {}):
+        with pytest.raises(ValidationError, match="max_completion_tokens"):
+            ChatCompletionRequest(
+                messages=[{"role": "user", "content": "hello"}],
+                max_new_tokens=10**9,
+                **length,
+            )
 
 
 def test_invalid_backend_options_reach_native_validation():
@@ -63,7 +75,7 @@ def test_invalid_backend_options_reach_native_validation():
     )
     payload = StagePayload(
         "owned-request",
-        Client._build_omni_request(_build_chat_generate_request(request)),
+        Client.build_omni_request(build_chat_generate_request(request)),
         None,
     )
     fields = build_chat_fields(

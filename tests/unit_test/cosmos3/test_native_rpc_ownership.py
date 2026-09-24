@@ -7,7 +7,7 @@ from fastapi import FastAPI
 
 from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
 from sglang_omni.models.cosmos3.stages import native_server_kwargs
-from sglang_omni.serve.native_media import prepare_native_media_app
+from sglang_omni.serve.native_media import resolve_native_media_frontend
 
 
 @pytest.mark.parametrize("overrides", [None, {"scheduler_rpc_timeout": None}])
@@ -52,10 +52,11 @@ def test_native_http_app_and_generation_share_no_rpc_deadline(monkeypatch):
             if port not in excluded and port + 1 not in excluded
         )
 
-    monkeypatch.setattr(media, "_unused_port", available_port)
+    monkeypatch.setattr(media, "unused_port", available_port)
     config = Cosmos3PipelineConfig(model_path="checkpoint")
     config.stages[0].gpu = 0
-    assert prepare_native_media_app(config, host="127.0.0.1", port=19000) is app
+    frontend = resolve_native_media_frontend(config, host="127.0.0.1", port=19000)
+    assert frontend() is app
     assert captured[0].scheduler_rpc_timeout is None
     assert captured[0].scheduler_port not in {19000, 19001}
     assert captured[0].master_port not in {19000, 19001}
