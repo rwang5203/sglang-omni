@@ -80,7 +80,7 @@ def test_direct_ipc_metadata_preserves_wire_fields_and_resets_local_state(
 ):
     # Only CUDA storage export is mocked. This qualifies metadata framing,
     # not real CUDA IPC storage transfer.
-    monkeypatch.setattr(stage_io, "_ipc_pickle", pickle.dumps)
+    monkeypatch.setattr(stage_io, "ipc_pickle", pickle.dumps)
     original = _payload(continuation, {"tensor": _fake_cuda_tensor()})
     ref = stage_io.serialize_direct_cuda_ipc_payload(original)
     header = pickle.loads(ref["header"])
@@ -97,7 +97,7 @@ class _Adapter:
     def start(self, request):
         return []
 
-    def reasoner_request(self, history, request):
+    def reasoner_request(self, history, request, *, remaining_generation_turns):
         return OmniRequest(inputs=history)
 
     def interpret_reasoner(self, result):
@@ -124,7 +124,7 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
             await super().send_to_stage(target, endpoint, msg)
             raw = json.loads(json.dumps(msg.to_dict()))
             if isinstance(msg, DataAckMessage):
-                stages[target]._comm.ack_transfer(DataAckMessage.from_dict(raw))
+                stages[target].comm.ack_transfer(DataAckMessage.from_dict(raw))
                 return
             assert isinstance(msg, DataReadyMessage)
             ready = DataReadyMessage.from_dict(raw)
@@ -134,7 +134,7 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
             assert header.continuation is not None
             assert header.arrival_id is None
             transfers.append((msg.from_stage, target, header.continuation))
-            await stages[target]._on_data_ready(ready)
+            await stages[target].on_data_ready(ready)
 
     endpoints = {
         name: "inproc://" + name for name in ("orchestrator", "reasoner", "generation")
@@ -153,11 +153,11 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
         )
 
     async def route(name, value):
-        await asyncio.wait_for(stages[name]._route_result("req", value), timeout=2)
+        await asyncio.wait_for(stages[name].route_result("req", value), timeout=2)
         pending = [
             item.task
             for obj in stages.values()
-            for item in obj._comm._pending.values()
+            for item in obj.comm.pending.values()
             if item.task is not None
         ]
         if pending:
@@ -166,16 +166,16 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
     def received(name):
         item = stages[name].scheduler.inbox.get_nowait().data
         assert item.continuation is not None
-        assert item.arrival_id is stages[name]._request_arrivals["req"]
+        assert item.arrival_id is stages[name].request_arrivals["req"]
         return item
 
     try:
         initial = StagePayload("req", OmniRequest("draw then revise"), None)
-        await stages["orchestrator"]._receive_payload_from_stage(
+        await stages["orchestrator"].receive_payload_from_stage(
             "req", "coordinator", initial
         )
         item = controller.inbox.get_nowait().data
-        await route("orchestrator", controller._advance(item))
+        await route("orchestrator", controller.advance(item))
         for turn in range(2):
             item = received("reasoner")
             assert item.continuation.turn_index == turn
@@ -186,18 +186,18 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
             }
             await route("reasoner", item)
             item = received("orchestrator")
-            await route("orchestrator", controller._advance(item))
+            await route("orchestrator", controller.advance(item))
             item = received("generation")
             assert item.continuation.phase == "generation"
             item.data = {"url": f"inline-{turn}"}
             await route("generation", item)
             item = received("orchestrator")
-            await route("orchestrator", controller._advance(item))
+            await route("orchestrator", controller.advance(item))
         item = received("reasoner")
         item.data = {"kind": "final", "text": "done"}
         await route("reasoner", item)
         item = received("orchestrator")
-        await route("orchestrator", controller._advance(item))
+        await route("orchestrator", controller.advance(item))
         assert controller.active_sessions == 0
         completions = stages["orchestrator"].control_plane.completions
         assert len(completions) == 1
@@ -205,13 +205,13 @@ async def test_actual_stage_routing_preserves_two_umm_cycles_over_packed_shm():
         assert completions[0].result["text"] == "turn0turn1done"
         assert len(completions[0].result["segments"]) == 5
         assert len(transfers) == 10
-        assert all(not obj._comm._pending for obj in stages.values())
+        assert all(not obj.comm.pending for obj in stages.values())
     finally:
         controller.stop()
         tasks = [
-            task for obj in stages.values() for task in obj._comm._send_workers.values()
+            task for obj in stages.values() for task in obj.comm.send_workers.values()
         ]
         for obj in stages.values():
-            await obj._comm.close()
+            await obj.comm.close()
         if tasks:
             await asyncio.gather(*tasks, return_exceptions=True)
