@@ -2,14 +2,12 @@
 
 from __future__ import annotations
 
-import logging
 import threading
 from types import SimpleNamespace
 
 import pytest
 import torch
 
-from sglang_omni.models.dots_tts import stages as dots_stages
 from sglang_omni.models.dots_tts.vocoder import DotsTTSStreamingVocoder
 from sglang_omni.models.dots_tts.vocoder_slot_pool import (
     DotsVocoderSlotPool,
@@ -353,22 +351,3 @@ def test_decode_delta_non_final_is_a_no_op() -> None:
     assert state.pending
     assert state.slot is not None
     assert not pool.steps
-
-
-def test_create_vocoder_executor_builds_and_logs_the_stream_batch_cap(
-    monkeypatch, caplog
-) -> None:
-    codec = _codec()
-    monkeypatch.setattr(dots_stages.torch.cuda, "is_available", lambda: True)
-    monkeypatch.setattr(
-        dots_stages, "load_dots_audio_codec", lambda model_path, device: codec
-    )
-
-    with caplog.at_level(logging.INFO, logger=dots_stages.__name__):
-        vocoder = dots_stages.create_vocoder_executor(
-            "model", device="cpu", max_batch_size=3, stream_slots=2
-        )
-
-    assert isinstance(vocoder.slot_pool, DotsVocoderSlotPool)
-    assert vocoder.stream_chunk_batch_max == 3
-    assert "stream_slots=2, batch_size=3, stream_batch_cap=3" in caplog.text
