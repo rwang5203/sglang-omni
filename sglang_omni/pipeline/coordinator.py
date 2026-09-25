@@ -161,9 +161,11 @@ class Coordinator(CoordinatorSessions):
         logger.info("Coordinator started")
 
     async def stop(self) -> None:
-        """Stop the coordinator."""
+        """Stop the coordinator and fail every request it still owns."""
         await self.stop_sessions()
-        self.running = False
+        # This also rejects later submissions, which would otherwise be sent on
+        # the closed control plane and never answered.
+        await self.fail_pending_requests(self.fatal_error or "Coordinator stopped")
         self.control_plane.close()
         logger.info("Coordinator stopped")
 
@@ -458,6 +460,14 @@ class Coordinator(CoordinatorSessions):
             pass
         if self.request_id_is_reserved(request_id):
             raise ValueError(f"Request {request_id} already exists")
+        else:
+            pass
+        if stream_queue is not None and stream_queue.maxsize > 0:
+            raise ValueError(
+                "stream_queue must be unbounded because one completion loop "
+                "delivers events for every request and a full queue would stall "
+                f"them all, got maxsize={stream_queue.maxsize}"
+            )
         else:
             pass
 
