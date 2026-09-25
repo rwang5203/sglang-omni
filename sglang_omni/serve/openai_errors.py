@@ -44,6 +44,7 @@ _BAD_REQUEST_PATTERNS = (
     ),
     re.compile(r"^Request\s+\S+\s+exceeds the maximum number of tokens:"),
     re.compile(r"^Request\s+\S+\s+requires too many SWA KV tokens for"),
+    re.compile(r"^Request .+ already exists$", re.DOTALL),
     re.compile(r"^stop_regex is \d+ bytes, over the \d+-byte limit"),
 )
 
