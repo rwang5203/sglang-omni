@@ -61,10 +61,10 @@ class ImageMediaIO(MediaIO[Image.Image]):
 
 
 def compute_image_cache_key(images: object) -> str | None:
-    """Compute cache key from raw image inputs (paths, URLs, PIL Images).
+    """Compute a cache key from loaded images.
 
-    This should be called BEFORE ensure_image_list() to capture original
-    paths/URLs which are much cheaper to hash than pixel data.
+    Pass decoded images, such as the output of ensure_image_list_async. A URL or
+    path can name different pixels over time, so it is not a stable key.
     """
     return compute_media_cache_key(images, prefix="image")
 

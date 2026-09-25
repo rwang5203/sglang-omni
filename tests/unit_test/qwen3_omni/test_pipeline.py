@@ -1841,6 +1841,65 @@ def test_qwen_audio_cache_key_requires_complete_content(decoded_audio_preprocess
     assert run(video=True) is None
 
 
+@pytest.mark.parametrize("changed", ["image", "video"])
+def test_qwen_visual_cache_key_tracks_decoded_content(
+    decoded_audio_preprocessor, monkeypatch, changed
+):
+    from PIL import Image
+
+    from sglang_omni.models.qwen3_omni.components import preprocessor as mod
+
+    pre, _, _ = decoded_audio_preprocessor
+    media = {"image": Image.new("RGB", (2, 2), "red"), "video": torch.zeros(4, 3, 2, 2)}
+
+    class Processor:
+        def apply_chat_template(self, *args, **kwargs):
+            return "visual prompt"
+
+        def __call__(self, **kwargs):
+            return {
+                "input_ids": torch.tensor([[1, 2]]),
+                "pixel_values": torch.ones(1, 3),
+            }
+
+    async def image_loader(raw, **kwargs):
+        return [media["image"]]
+
+    async def video_loader(raw, **kwargs):
+        return [media["video"]], [2.0], None
+
+    pre.processor = Processor()
+    monkeypatch.setattr(mod, "ensure_image_list_async", image_loader)
+    monkeypatch.setattr(mod, "ensure_video_list_async", video_loader)
+
+    def run(name="same"):
+        inputs = {
+            "messages": [{"role": "user", "content": "hello"}],
+            "images": [f"https://media.invalid/{name}.png"],
+            "videos": [f"https://media.invalid/{name}.mp4"],
+        }
+        payload = StagePayload(
+            request_id="visual-cache", request=OmniRequest(inputs=inputs), data={}
+        )
+        state = Qwen3OmniPipelineState.from_dict(
+            asyncio.run(pre.call_impl(payload)).data
+        )
+        return state.encoder_inputs["image_encoder"]["cache_key"]
+
+    before = run()
+    assert run() == before
+    # New content behind the same URL must not reuse the previous entry.
+    media[changed] = (
+        Image.new("RGB", (2, 2), "blue")
+        if changed == "image"
+        else torch.ones(4, 3, 2, 2)
+    )
+    after = run()
+    assert after != before
+    # Identical content at another address shares the entry.
+    assert run("other") == after
+
+
 def test_preprocessing_executor_defaults_to_serial_dispatch(monkeypatch):
     from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
     from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler

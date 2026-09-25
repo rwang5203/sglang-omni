@@ -320,10 +320,10 @@ def build_audio_mm_inputs(
 
 
 def compute_audio_cache_key(audios: object) -> str | None:
-    """Compute cache key from raw audio inputs (paths, numpy arrays).
+    """Compute a cache key from loaded audio waveforms.
 
-    This should be called BEFORE ensure_audio_list() to capture original
-    paths which are much cheaper to hash than audio data.
+    Pass decoded waveforms, such as the output of ensure_audio_list_async. A URL
+    or path can name different samples over time, so it is not a stable key.
     """
     from .cache_key import compute_media_cache_key
 

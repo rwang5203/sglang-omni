@@ -459,7 +459,7 @@ def compute_video_cache_key(
     max_pixels: int | None = None,
     total_pixels: int | None = None,
 ) -> str | None:
-    """Compute cache key from raw video inputs + effective decode params.
+    """Compute cache key from loaded video frames + effective decode params.
 
     Decode params change the resulting frame count and thus the encoder
     output length. They must be part of the cache key — otherwise an entry

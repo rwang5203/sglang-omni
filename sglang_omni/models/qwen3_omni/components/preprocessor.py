@@ -585,9 +585,6 @@ class Qwen3OmniPreprocessor:
                 else None
             )
 
-            image_cache_key = compute_image_cache_key(raw_images)
-            video_cache_key = compute_video_cache_key(raw_videos)
-
             # Count explicit audio inputs (for placeholder insertion)
             if raw_audios is not None:
                 num_explicit_audios = (
@@ -661,8 +658,6 @@ class Qwen3OmniPreprocessor:
             images = []
             videos = []
             audios = []
-            image_cache_key = None
-            video_cache_key = None
             audio_target_sr = 16000
             video_fps = self.default_video_fps
             video_max_frames = self.default_video_max_frames
@@ -686,6 +681,9 @@ class Qwen3OmniPreprocessor:
         # Note (wenyao): URLs can change content and sampled hashes can miss edits,
         # so audio cache keys include every decoded sample, including video tracks.
         audio_cache_key = compute_audio_cache_key(audios)
+        # Image and video keys follow the same rule and hash the loaded media.
+        image_cache_key = compute_image_cache_key(images)
+        video_cache_key = compute_video_cache_key(videos)
 
         messages_norm = normalize_messages(messages)
         # Insert placeholders:
