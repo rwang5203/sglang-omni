@@ -56,5 +56,6 @@ def test_an_unrelated_failure_stays_internal() -> None:
         "CUDA out of memory",
         "AuK generated latent contains NaN/Inf",
         "internal cache size is a server-level setting",
+        "index out of range in self",
     ):
         assert not is_bad_request_error(RuntimeError(message))
