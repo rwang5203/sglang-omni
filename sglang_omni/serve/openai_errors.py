@@ -64,6 +64,8 @@ _BAD_REQUEST_PATTERNS = (
         r"^Qwen3-TTS (?:Base|VoiceDesign) requires "
         r"(?:ref_audio|reference audio|non-empty ref_text|instructions)\b"
     ),
+    re.compile(r"^Qwen3-TTS task_type must be one of "),
+    re.compile(r"^Unsupported Qwen3-TTS CustomVoice speaker "),
 )
 
 

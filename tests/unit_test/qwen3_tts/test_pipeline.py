@@ -2211,7 +2211,9 @@ def test_qwen3_tts_custom_voice_rejects_invalid_speaker(
     talker = Qwen3TTSTalker.__new__(Qwen3TTSTalker)
     talker.config = SimpleNamespace(spk_id={"Vivian": 3065})
 
-    with pytest.raises(ValueError, match="Unsupported Qwen3-TTS CustomVoice speaker"):
+    with pytest.raises(
+        ValueError, match="Unsupported Qwen3-TTS CustomVoice speaker"
+    ) as raised:
         Qwen3TTSTalker.build_custom_voice_inputs(
             talker,
             input_id=torch.arange(8, dtype=torch.long).unsqueeze(0),
@@ -2219,6 +2221,8 @@ def test_qwen3_tts_custom_voice_rejects_invalid_speaker(
             language="auto",
             non_streaming_mode=True,
         )
+
+    assert is_bad_request_error(raised.value)
 
 
 def test_qwen3_tts_vocoder_batches_decode_requests(
@@ -6094,6 +6098,7 @@ def test_qwen3_tts_prepare_voice_design_uses_instruction_path(
             "Base requires non-empty ref_text",
         ),
         ("base", {"task_type": "CustomVoice"}, "Base checkpoint does not support"),
+        ("base", {"task_type": "Clone"}, "task_type must be one of"),
         ("voice_design", {}, "VoiceDesign checkpoint does not support"),
         (
             "voice_design",

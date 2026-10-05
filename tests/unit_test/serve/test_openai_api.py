@@ -736,7 +736,6 @@ def test_chat_stream_failure_before_output_reports_error_before_done_sentinel(
 @pytest.mark.parametrize(
     ("invalid_fields", "field"),
     [
-        ({"messages": []}, "messages"),
         ({"max_tokens": 0}, "max_tokens"),
         ({"max_tokens": -1}, "max_tokens"),
         ({"max_completion_tokens": 0}, "max_completion_tokens"),
@@ -754,6 +753,30 @@ def test_chat_rejects_invalid_envelope_before_generation(
 
     assert response.status_code == 422
     assert response.json()["detail"][0]["loc"] == ["body", field]
+
+
+@pytest.mark.parametrize(
+    ("media", "expected_status"),
+    [
+        ({}, 422),
+        ({"audios": []}, 422),
+        ({"audios": ["caller.wav"]}, 500),
+        ({"images": ["image.png"]}, 500),
+        ({"videos": ["clip.mp4"]}, 500),
+    ],
+)
+def test_chat_empty_messages_need_top_level_media(
+    media: dict[str, list[str]], expected_status: int
+) -> None:
+    client = TestClient(create_app(fault_client("qwen3-omni"), model_name="qwen3-omni"))
+
+    response = client.post("/v1/chat/completions", json={"messages": [], **media})
+
+    assert response.status_code == expected_status
+    if expected_status == 422:
+        assert "messages must not be empty" in response.json()["detail"][0]["msg"]
+    else:
+        assert "cuda out of memory" in response.json()["detail"]
 
 
 def test_speech_stream_admission_reject_returns_503_without_traceback(

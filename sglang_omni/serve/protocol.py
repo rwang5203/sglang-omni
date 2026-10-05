@@ -51,7 +51,7 @@ class ChatCompletionRequest(BaseModel):
     model_config = ConfigDict(populate_by_name=True)
 
     model: str | None = None
-    messages: list[ChatMessage] = Field(min_length=1)
+    messages: list[ChatMessage]
 
     # Sampling parameters
     temperature: float | None = None
@@ -105,6 +105,16 @@ class ChatCompletionRequest(BaseModel):
     # Misc
     request_id: str | None = None
     user: str | None = None
+
+    @model_validator(mode="after")
+    def validate_input_present(self) -> ChatCompletionRequest:
+        if not self.messages and not (self.audios or self.images or self.videos):
+            raise ValueError(
+                "messages must not be empty without audios, images or videos"
+            )
+        else:
+            pass
+        return self
 
     @property
     def effective_max_tokens(self) -> int | None:
