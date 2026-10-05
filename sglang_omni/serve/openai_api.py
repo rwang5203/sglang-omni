@@ -63,7 +63,7 @@ from sglang_omni.client.audio import (
     encode_pcm,
     select_audio_delta,
 )
-from sglang_omni.client.types import UsageInfo
+from sglang_omni.client.types import UNKNOWN_FINISH_REASON, UsageInfo
 from sglang_omni.config import (
     CustomVoiceConfig,
     RealtimeTranscriptionConfig,
@@ -121,10 +121,12 @@ from sglang_omni.serve.speech_errors import (
     speech_generation_error,
 )
 from sglang_omni.serve.speech_limits import (
+    MAX_SPEECH_STREAM_OUTCOMES,
     MAX_VOICE_UPLOAD_BODY_BYTES,
     MAX_VOICE_UPLOAD_BYTES,
 )
 from sglang_omni.serve.speech_service import SpeechRequestValidator
+from sglang_omni.serve.speech_stream_outcomes import SpeechStreamOutcomes
 from sglang_omni.serve.speech_voices import SpeakerSampleStore
 from sglang_omni.serve.speech_ws import SpeechWebSocketSession
 from sglang_omni.serve.streaming import STREAM_DONE_SENTINEL
@@ -289,6 +291,9 @@ def create_app(
     app.state.supports_realtime_audio_output = supports_realtime_audio_output
     app.state.realtime_transcription = realtime_transcription
     app.state.speaker_sample_store = SpeakerSampleStore()
+    app.state.speech_stream_outcomes = SpeechStreamOutcomes(
+        max_entries=MAX_SPEECH_STREAM_OUTCOMES
+    )
     app.state.speech_service = SpeechRequestValidator(
         default_model=app.state.model_name,
         custom_voice_config=custom_voice_config,
@@ -1555,6 +1560,7 @@ def register_speech(app: FastAPI) -> None:
                     gen_req=gen_req,
                     request_id=request_id,
                     speed=req.speed,
+                    speech_stream_outcomes=app.state.speech_stream_outcomes,
                     stream_format=req.stream_format,
                 )
             except ClientError as exc:
@@ -1588,13 +1594,11 @@ def register_speech(app: FastAPI) -> None:
 
         headers = {
             "Content-Disposition": f'attachment; filename="speech.{result.format}"',
-        }
-        if result.finish_reason is not None:
+            "X-Request-Id": request_id,
             # note (Junnan Li): the body is binary audio, so the terminal state
             # travels in the same X- header channel as usage.
-            headers["X-Finish-Reason"] = str(result.finish_reason)
-        else:
-            pass
+            "X-Finish-Reason": result.finish_reason,
+        }
         if result.usage is not None:
             if result.usage.prompt_tokens is not None:
                 headers["X-Prompt-Tokens"] = str(result.usage.prompt_tokens)
@@ -1616,6 +1620,17 @@ def register_speech(app: FastAPI) -> None:
             media_type=result.mime_type,
             headers=headers,
         )
+
+    @app.get("/v1/audio/speech/{request_id}")
+    async def get_speech_stream_outcome(request_id: str) -> JSONResponse:
+        stream_outcome = app.state.speech_stream_outcomes.get(request_id)
+        if stream_outcome is None:
+            raise HTTPException(
+                status_code=404,
+                detail=f"No finished speech stream with request id {request_id}",
+            )
+        else:
+            return JSONResponse(stream_outcome.model_dump())
 
 
 def register_speech_batch(app: FastAPI) -> None:
@@ -1743,10 +1758,27 @@ async def speech_audio_response(
     request_id: str,
     speed: float,
     stream_format: Literal["audio", "sse"],
+    *,
+    speech_stream_outcomes: SpeechStreamOutcomes,
 ) -> StreamingResponse:
     """Stream raw PCM or SSE events once the first audio chunk sets the headers."""
     emitted_samples = 0
+    finish_reason = UNKNOWN_FINISH_REASON
     final_usage: UsageInfo | None = None
+
+    def record_terminal_chunk_state(chunk: GenerateChunk) -> None:
+        # note (Yucheng Hu): the terminal chunk carries these; the last reported
+        # value wins so the outcome can be served once the stream has ended.
+        nonlocal finish_reason, final_usage
+        if chunk.reported_finish_reason:
+            finish_reason = chunk.reported_finish_reason
+        else:
+            pass
+        if chunk.usage is not None:
+            final_usage = chunk.usage
+        else:
+            pass
+
     chunk_stream = client.generate(gen_req, request_id=request_id)
     first_audio_bytes: bytes | None = None
     stream_sample_rate: int | None = None
@@ -1778,10 +1810,7 @@ async def speech_audio_response(
             except StopAsyncIteration:
                 stream_completed = True
                 break
-            if chunk.usage is not None:
-                final_usage = chunk.usage
-            else:
-                pass
+            record_terminal_chunk_state(chunk)
             if chunk.audio_data is None:
                 continue
             else:
@@ -1826,16 +1855,13 @@ async def speech_audio_response(
             pass
 
     async def _body() -> AsyncGenerator[bytes, None]:
-        nonlocal emitted_samples, final_usage
+        nonlocal emitted_samples
         active_request = True
         try:
             yield first_audio_bytes
 
             async for chunk in chunk_stream:
-                if chunk.usage is not None:
-                    final_usage = chunk.usage
-                else:
-                    pass
+                record_terminal_chunk_state(chunk)
                 if chunk.audio_data is None:
                     continue
                 else:
@@ -1859,6 +1885,10 @@ async def speech_audio_response(
                     pass
                 yield audio_bytes
             active_request = False
+            if stream_format == "audio":
+                speech_stream_outcomes.record(request_id, finish_reason, final_usage)
+            else:
+                pass
         finally:
             if active_request:
                 await abort_and_close_speech_stream(client, request_id, chunk_stream)
@@ -1893,10 +1923,15 @@ async def speech_audio_response(
                     "output_tokens": final_usage.completion_tokens,
                     "total_tokens": final_usage.total_tokens,
                 }
-            done = {"type": "speech.audio.done", "usage": usage}
+            done = {
+                "type": "speech.audio.done",
+                "usage": usage,
+                "finish_reason": finish_reason,
+            }
             yield f"data: {json.dumps(done)}\n\n"
 
     headers = {
+        "X-Request-Id": request_id,
         "X-Sample-Rate": str(stream_sample_rate),
         "X-Channels": "1",
         "X-Bit-Depth": "16",
@@ -1906,6 +1941,7 @@ async def speech_audio_response(
             _sse_body(), media_type="text/event-stream", headers=headers
         )
     else:
+        headers["X-SGLang-Omni-Speech-Id"] = request_id
         return StreamingResponse(_body(), media_type="audio/pcm", headers=headers)
 
 
