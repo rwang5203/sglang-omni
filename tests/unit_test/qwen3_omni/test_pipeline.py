@@ -16,6 +16,7 @@ from sglang.srt.arg_groups.overrides import resolution_result
 from sglang.srt.layers.rotary_embedding.mrope_rope_index import (
     get_rope_index_qwen3_omni,
 )
+from tokenizers.normalizers import NFC
 
 import sglang_omni.models.qwen3_omni.stages as qwen_stages
 from sglang_omni.cli.serve import (
@@ -62,6 +63,7 @@ from sglang_omni.scheduling.sglang_backend.server_args_builder import (
     apply_encoder_mem_reserve,
     build_sglang_server_args,
 )
+from sglang_omni.serve.openai_errors import is_bad_request_error
 from sglang_omni.utils.imports import import_string
 from tests.unit_test.fixtures.qwen_fakes import (
     FakeQwenTokenizer,
@@ -636,7 +638,11 @@ def test_qwen_preprocessor_retries_without_special_token_compat(
         if "extra_special_tokens" in kwargs:
             raise TypeError("old transformers does not accept extra_special_tokens")
         return SimpleNamespace(
-            tokenizer=SimpleNamespace(chat_template=None),
+            tokenizer=SimpleNamespace(
+                chat_template=None,
+                get_vocab=lambda: {"token": 0},
+                backend_tokenizer=SimpleNamespace(normalizer=NFC()),
+            ),
             chat_template=None,
         )
 
@@ -654,6 +660,58 @@ def test_qwen_preprocessor_retries_without_special_token_compat(
         "audio_token": "<|audio_pad|>",
     }
     assert "extra_special_tokens" not in calls[1]
+
+
+@pytest.mark.parametrize(
+    ("prompt_text", "fits"),
+    [
+        pytest.param("x" * 221, False, id="normalized"),
+        pytest.param("x" * 100_000, False, id="past-the-nfc-bound"),
+        pytest.param("e\u0301" * 220, True, id="decomposed-text-that-nfc-halves"),
+    ],
+)
+def test_qwen_preprocessor_rejects_text_too_long_to_fit_before_tokenizing(
+    prompt_text: str, fits: bool
+) -> None:
+    from sglang_omni.models.qwen3_omni.components import (
+        preprocessor as preprocessor_mod,
+    )
+
+    tokenized_prompts: list[str] = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, *_args, **_kwargs):
+            return prompt_text
+
+        def __call__(self, *, text, **_kwargs):
+            tokenized_prompts.append(text)
+            return {"input_ids": torch.tensor([[1, 2]])}
+
+    pre = object.__new__(preprocessor_mod.Qwen3OmniPreprocessor)
+    # Room for (64 - 8 - 1) * 4 = 220 characters of NFC prompt text.
+    pre.max_seq_len = 64
+    pre.max_token_chars = 4
+    pre.normalizer = NFC()
+    for name in ("fps", "max_frames", "min_pixels", "max_pixels", "total_pixels"):
+        setattr(pre, "default_video_" + name, None)
+    pre.processor = FakeProcessor()
+    payload = StagePayload(
+        request_id="long-text",
+        request=OmniRequest(
+            inputs={"messages": [{"role": "user", "content": "hello"}]},
+            params={"max_new_tokens": 8},
+        ),
+        data={},
+    )
+
+    if fits:
+        asyncio.run(pre.call_impl(payload))
+        assert tokenized_prompts == [prompt_text]
+    else:
+        with pytest.raises(ValueError) as exc_info:
+            asyncio.run(pre.call_impl(payload))
+        assert is_bad_request_error(exc_info.value)
+        assert tokenized_prompts == []
 
 
 def test_qwen_talker_to_code2wav_projection_keeps_only_request_latch() -> None:
