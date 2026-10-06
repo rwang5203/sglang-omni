@@ -333,7 +333,7 @@ def register_admin_routes(
             },
         )
 
-    @app.post("/workers")
+    @app.post("/workers", dependencies=[Depends(_auth)])
     async def create_worker(request: Request) -> JSONResponse:
         payload, error = await read_json_object(request)
         if error is not None:
@@ -437,7 +437,7 @@ def register_admin_routes(
             payload.update(overlay(worker))
         return JSONResponse(payload)
 
-    @app.put("/workers/{worker_id:path}")
+    @app.put("/workers/{worker_id:path}", dependencies=[Depends(_auth)])
     async def update_worker(worker_id: str, request: Request) -> JSONResponse:
         payload, error = await read_json_object(request)
         if error is not None:
@@ -593,7 +593,7 @@ def register_admin_routes(
         notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker": worker.to_dict()}), reprobe
 
-    @app.delete("/workers/{worker_id:path}")
+    @app.delete("/workers/{worker_id:path}", dependencies=[Depends(_auth)])
     async def delete_worker(worker_id: str) -> JSONResponse:
         lock, rejected = registry_lock_or_reject(app)
         if rejected is not None:
