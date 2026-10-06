@@ -7,6 +7,7 @@ import asyncio
 import atexit
 import ipaddress
 import logging
+import os
 import socket
 import time
 from concurrent.futures import ThreadPoolExecutor
@@ -285,6 +286,18 @@ async def read_limited_response_bytes_async(
     return b"".join(chunks)
 
 
+ALLOWED_LOCAL_MEDIA_PATH_ENV = "SGLANG_OMNI_ALLOWED_LOCAL_MEDIA_PATH"
+ALLOWED_MEDIA_DOMAINS_ENV = "SGLANG_OMNI_ALLOWED_MEDIA_DOMAINS"
+
+
+def export_media_policy(
+    allowed_local_media_path: str | None, allowed_media_domains: list[str] | None
+) -> None:
+    """Hand the server's media policy to the stage processes it spawns."""
+    os.environ[ALLOWED_LOCAL_MEDIA_PATH_ENV] = allowed_local_media_path or ""
+    os.environ[ALLOWED_MEDIA_DOMAINS_ENV] = ",".join(allowed_media_domains or [])
+
+
 class MultiModalResourceConnector:
     """Connector for optimized multi-modal data loading."""
 
@@ -312,6 +325,12 @@ class MultiModalResourceConnector:
         """
         self.media_io_kwargs = media_io_kwargs or {}
         self.connection = connection
+        allowed_local_media_path = allowed_local_media_path or os.environ.get(
+            ALLOWED_LOCAL_MEDIA_PATH_ENV
+        )
+        allowed_media_domains = allowed_media_domains or os.environ.get(
+            ALLOWED_MEDIA_DOMAINS_ENV, ""
+        ).split(",")
 
         self.allowed_local_media_path = None
         if allowed_local_media_path:
@@ -405,6 +424,14 @@ class MultiModalResourceConnector:
             allowed_local_media_path=self.allowed_local_media_path,
         )
         return media_io.load_file(filepath)
+
+    def local_media_path(self, path: str | Path) -> str | Path:
+        if self.allowed_local_media_path is None:
+            return path
+        else:
+            return resolve_local_file(
+                path, allowed_local_media_path=self.allowed_local_media_path
+            )
 
     def load_local_path(self, path: str | Path, media_io: MediaIO[_M]) -> _M:
         """Load media from a bare local path.

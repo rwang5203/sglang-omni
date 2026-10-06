@@ -46,6 +46,7 @@ from sglang_omni.client.types import GenerateChunk
 from sglang_omni.config import PipelineConfig
 from sglang_omni.models.model_capabilities import get_model_capabilities
 from sglang_omni.pipeline.mp_runner import MultiProcessPipelineRunner
+from sglang_omni.preprocessing.resource_connector import export_media_policy
 from sglang_omni.profiler.event_recorder import get_recorder as _get_event_recorder
 from sglang_omni.profiler.profiler_control import ProfilerControlClient
 from sglang_omni.proto.messages import StreamMessage
@@ -477,6 +478,7 @@ async def run_server(
 
     This is the async entry point.  For a blocking call use :func:`launch_server`.
     """
+    export_media_policy(allowed_local_media_path, allowed_media_domains)
     # 0. Check port availability before loading models
     port = find_available_port(host, port)
 
