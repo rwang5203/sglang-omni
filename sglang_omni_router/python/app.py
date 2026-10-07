@@ -475,7 +475,6 @@ def register_admin_routes(
                 payload,
                 requested_is_dead,
                 requested_disabled,
-                request,
             )
         finally:
             if lock is not None:
@@ -487,35 +486,14 @@ def register_admin_routes(
         notify_registry_change(app)
         return JSONResponse({"status": "ok", "worker": reprobe.to_dict()})
 
-    def _discard_needs_admin_auth(resolved_worker_id: str) -> bool:
-        # Note (Jiaxin Deng): discarding a journal entry asserts the weights
-        # are verified; admin-sensitive even though ordinary worker CRUD is not.
-        journal = getattr(app.state, "update_journal", None)
-        if journal is None or not admin_api_key:
-            return False
-        try:
-            return resolved_worker_id in journal.pending()
-        except Exception:
-            return True  # unreadable journal: require auth to touch it
-
     async def _apply_worker_update(
         worker_id: str,
         payload: dict[str, JsonValue],
         requested_is_dead: bool | None,
         requested_disabled: bool | None,
-        request: Request,
     ) -> tuple[JSONResponse, Worker | None]:
         """Returns the response and, when set, a worker to re-probe unlocked."""
         worker = find_worker(workers, worker_id)
-        if (
-            requested_disabled is False
-            and worker is not None
-            and _discard_needs_admin_auth(worker.worker_id)
-        ):
-            try:
-                await _auth(authorization=request.headers.get("authorization"))
-            except HTTPException as exc:
-                return error_response(exc.status_code, str(exc.detail)), None
         if worker is None:
             return error_response(404, "worker not found"), None
         next_config = worker.config
