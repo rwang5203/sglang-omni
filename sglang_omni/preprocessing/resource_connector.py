@@ -96,6 +96,10 @@ class ResourceHTTPConnection:
 global_http_connection = ResourceHTTPConnection()
 
 
+class MediaPolicyError(ValueError):
+    """Media the server's local path or domain policy refuses to load."""
+
+
 def resolve_allowed_local_media_path(path: str | Path) -> Path:
     resolved = Path(path).expanduser().resolve()
     if not resolved.exists() or not resolved.is_dir():
@@ -117,7 +121,7 @@ def resolve_local_file(
     if allowed_local_media_path is not None and not resolved.is_relative_to(
         allowed_local_media_path
     ):
-        raise ValueError(f"File path {resolved} is not within allowed directory.")
+        raise MediaPolicyError(f"File path {resolved} is not within allowed directory.")
     else:
         pass
     return resolved
@@ -360,7 +364,7 @@ class MultiModalResourceConnector:
             not self.allowed_media_domains
             and not self.allow_remote_media_without_domains
         ):
-            raise ValueError(
+            raise MediaPolicyError(
                 "Remote media URLs require --allowed-media-domain to be configured."
             )
         else:
@@ -369,7 +373,7 @@ class MultiModalResourceConnector:
             is_allowed_remote_domain(normalized_hostname, domain)
             for domain in self.allowed_media_domains
         ):
-            raise ValueError(f"Domain {hostname} is not allowed.")
+            raise MediaPolicyError(f"Domain {hostname} is not allowed.")
         else:
             pass
 
@@ -377,7 +381,7 @@ class MultiModalResourceConnector:
             for address in resolve_remote_addresses(normalized_hostname):
                 category = unsafe_remote_address_category(address)
                 if category is not None:
-                    raise ValueError(
+                    raise MediaPolicyError(
                         f"Remote media URL resolves to a {category} address: {address}"
                     )
                 else:
