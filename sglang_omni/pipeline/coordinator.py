@@ -286,12 +286,25 @@ class Coordinator(CoordinatorSessions):
         stages: Sequence[str] | None = None,
         timeout_s: float = 60.0,
     ) -> AdminResponse:
-        return await self.admin(
+        in_flight = list(self.requests)
+        response = await self.admin(
             "pause_generation",
             payload,
             stages=stages,
             timeout_s=timeout_s,
         )
+        # note (Richard Wang): in abort mode the stages drop their requests
+        # without telling anyone, so end those requests here too, or their
+        # clients wait for output that never comes.
+        mode = str((payload or {}).get("mode") or "abort")
+        if response["success"] and mode == "abort":
+            await asyncio.gather(
+                *(self.abort(request_id) for request_id in in_flight),
+                return_exceptions=True,
+            )
+        else:
+            pass
+        return response
 
     async def continue_generation(
         self,
