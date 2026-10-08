@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from sglang_omni.admission import QueueFullError
 from sglang_omni.client import Client, ClientError, GenerateChunk
 from sglang_omni.client.audio import encode_pcm
-from sglang_omni.client.client import extract_inputs
+from sglang_omni.client.client import StreamedStopTrimmer, extract_inputs
 from sglang_omni.client.types import GenerateRequest, UsageInfo
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.proto import (
@@ -1203,6 +1203,23 @@ def test_chat_stream_never_sends_a_stop_string(
 
     assert "".join(content) == expected
     assert events[-1]["choices"][0]["finish_reason"] == "stop"
+
+
+def test_stream_stop_check_is_bounded_by_the_held_text() -> None:
+    class CountingStop(str):
+        prefixes = 0
+
+        def __getitem__(self, key: object) -> str:
+            CountingStop.prefixes += 1
+            return super().__getitem__(key)
+
+    trimmer = StreamedStopTrimmer(stop=[CountingStop("x" * 10_000)])
+    deltas = ["ab", "cd", "ef"]
+
+    released = "".join(trimmer.push(delta) for delta in deltas) + trimmer.finish()
+
+    assert released == "abcdef"
+    assert CountingStop.prefixes <= sum(len(delta) for delta in deltas)
 
 
 def test_chat_asgi_send_failure_aborts_backend_and_cleans_state() -> None:
