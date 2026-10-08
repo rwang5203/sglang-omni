@@ -19,6 +19,8 @@ from multiprocessing.queues import Queue
 from multiprocessing.synchronize import Event
 from typing import Literal, Sequence
 
+from sglang.srt.utils import kill_itself_when_parent_died
+
 from sglang_omni.config.runtime import (
     apply_typed_stage_kwargs,
     resolve_factory_signature_args,
@@ -488,8 +490,6 @@ def stage_process_main(
     startup_error_channel: Queue[str] | None = None,
 ) -> None:
     """Subprocess entrypoint: construct stage(s) from *spec* and run them."""
-    from sglang.srt.utils import kill_itself_when_parent_died
-
     # note (Richard Wang): exit with the parent, so a killed server does not
     # leave its stage workers holding the GPUs. A parent that died before the
     # signal was registered sends none, so check it once registered.

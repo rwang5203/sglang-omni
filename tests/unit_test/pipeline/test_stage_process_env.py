@@ -10,7 +10,6 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
-import sglang.srt.utils
 import torch
 
 import sglang_omni.platforms as platforms
@@ -617,7 +616,7 @@ def test_stage_teardown_reclaims_through_the_platform(
 def test_stage_process_asks_to_die_with_its_parent(monkeypatch) -> None:
     calls = []
     monkeypatch.setattr(
-        sglang.srt.utils, "kill_itself_when_parent_died", lambda: calls.append(1)
+        stage_workers, "kill_itself_when_parent_died", lambda: calls.append(1)
     )
     spec = SimpleNamespace(
         log_level=logging.getLogger().level, stage_specs=[], process_name="p"
