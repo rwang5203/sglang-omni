@@ -323,7 +323,7 @@ class OmniScheduler(Generic[RequestDataT]):
         request_finished_callback: Callable[[str], None] | None = None,
         enable_overlap: bool = False,
         enable_async_decode: bool = False,
-        async_decode_min_batch_size: int = 2,
+        async_decode_min_batch_size: int = 1,
         prefill_coalesce_requests: int = 0,
         prefill_coalesce_wait_ms: float = 60.0,
         prefill_coalesce_when_idle: bool = False,
