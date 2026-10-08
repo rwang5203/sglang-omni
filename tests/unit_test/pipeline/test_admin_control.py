@@ -74,6 +74,7 @@ def test_omni_scheduler_admin_enqueues_to_scheduler_thread() -> None:
 
     scheduler = object.__new__(OmniScheduler)
     scheduler.running = True
+    scheduler.tp_size = 1
     scheduler.admin_queue = queue.Queue()
     scheduler.scheduler_thread_id = None
 
