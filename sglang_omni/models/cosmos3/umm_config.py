@@ -94,17 +94,10 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
         # loaded for any model must not import.
         from sglang_omni.models.cosmos3.umm import max_model_bytes
 
-        factory = resolve_stage_typed_kwargs(self.stage_named("orchestrator"))
-        bounds = {
-            name: factory.get(name)
-            for name in ("max_dispatches", "max_outputs", "max_retained_bytes")
-        }
+        # UMMPipelineConfig has validated every bound, so only the relations
+        # Cosmos3 output needs remain.
+        bounds = resolve_stage_typed_kwargs(self.stage_named("orchestrator"))
         prefix = "stages.orchestrator.factory"
-        for name, value in bounds.items():
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"{prefix}.{name} must be a positive integer")
-            else:
-                pass
         dispatches = bounds["max_dispatches"]
         needed = max_model_bytes(dispatches)
         if bounds["max_outputs"] < dispatches:
