@@ -40,6 +40,11 @@ GENERATE = "generate"
 # stage_params.
 REASONER_STAGE = "reasoner"
 
+# The optional message of a generate decision is bounded by the schema. A
+# final answer and a generation prompt must not be blank, and native SGLang
+# accepts no length limit beside a pattern, so their length is unbounded. The
+# retained byte reservation plans for answers and prompts of these sizes, and
+# a longer one counts against max_retained_bytes like any other output.
 MAX_TEXT_CHARS = 8192
 MAX_PROMPT_CHARS = 4096
 
@@ -53,12 +58,7 @@ FINAL_DECISION = {
     "type": "object",
     "properties": {
         "kind": {"type": "string", "enum": ["final"]},
-        "text": {
-            "type": "string",
-            "minLength": 1,
-            "maxLength": MAX_TEXT_CHARS,
-            "pattern": NONBLANK_PATTERN,
-        },
+        "text": {"type": "string", "pattern": NONBLANK_PATTERN},
         "generation": {"type": "null"},
     },
     "required": ["kind", "text", "generation"],
@@ -74,12 +74,7 @@ GENERATE_DECISION = {
             "type": "object",
             "properties": {
                 "modality": {"type": "string", "enum": ["image", "video"]},
-                "prompt": {
-                    "type": "string",
-                    "minLength": 1,
-                    "maxLength": MAX_PROMPT_CHARS,
-                    "pattern": NONBLANK_PATTERN,
-                },
+                "prompt": {"type": "string", "pattern": NONBLANK_PATTERN},
             },
             "required": ["modality", "prompt"],
             "additionalProperties": False,
@@ -177,8 +172,8 @@ def parse_decision(value: object) -> Decision:
     else:
         pass
     kind, text, generation = value["kind"], value["text"], value["generation"]
-    if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
-        raise ValueError("Cosmos3 decision text exceeds its string limit")
+    if not isinstance(text, str):
+        raise ValueError("Cosmos3 decision text must be a string")
     elif kind == "final":
         if generation is not None or NONBLANK.search(text) is None:
             raise ValueError("Final Cosmos3 decisions require text and no generation")
@@ -186,18 +181,16 @@ def parse_decision(value: object) -> Decision:
             return Decision(kind, text, None)
     elif kind != "generate":
         raise ValueError("Unknown Cosmos3 decision kind")
+    elif len(text) > MAX_TEXT_CHARS:
+        raise ValueError("Cosmos3 decision text exceeds its string limit")
     elif not isinstance(generation, dict) or set(generation) != {"modality", "prompt"}:
         raise ValueError("Cosmos3 generation requires only modality and prompt")
     elif generation["modality"] not in MEDIA_TYPES:
         raise ValueError("Cosmos3 interleaving currently supports images and videos")
     else:
         prompt = generation["prompt"]
-        if (
-            not isinstance(prompt, str)
-            or NONBLANK.search(prompt) is None
-            or len(prompt) > MAX_PROMPT_CHARS
-        ):
-            raise ValueError("Cosmos3 generation requires a bounded nonempty prompt")
+        if not isinstance(prompt, str) or NONBLANK.search(prompt) is None:
+            raise ValueError("Cosmos3 generation requires a nonblank prompt")
         else:
             return Decision(
                 kind, text, {"modality": generation["modality"], "prompt": prompt}
@@ -440,7 +433,8 @@ def receipt(decision: Decision, kind: str) -> dict[str, object]:
 
 
 def worst_case_bytes() -> tuple[int, int]:
-    """Most bytes one Reasoner turn and one generation turn can add.
+    """Most bytes one Reasoner turn and one generation turn can add, for
+    answers and prompts within MAX_TEXT_CHARS and MAX_PROMPT_CHARS.
 
     A Reasoner turn adds its text output, counted in UTF-8 at up to four bytes
     a character, and its decision in the history, where a control character

@@ -12,6 +12,7 @@ from types import SimpleNamespace
 
 import pytest
 import xgrammar as xgr
+from sglang.srt.constrained.json_schema_validation import validate_xgrammar_json_schema
 from xgrammar.testing import _is_grammar_accept_string
 
 from sglang_omni.client.client import Client
@@ -286,12 +287,15 @@ def test_last_generation_turn_allows_only_a_final_decision():
         for schema in schemas
     ]
     assert kinds == [[["final"], ["generate"]], [["final"]]]
-    # Every decision the native grammar admits must be one the adapter accepts.
+    # Native SGLang must accept each schema, and every decision its grammar
+    # admits must be one the adapter accepts.
     for schema in schemas:
+        validate_xgrammar_json_schema(schema)
         grammar = xgr.Grammar.from_json_schema(
             json.dumps(schema), any_whitespace=True, strict_mode=True
         )
-        for value in ("", " ", "\t\n", "\u3000", "x", " x "):
+        long_value = "x" * (MAX_TEXT_CHARS + MAX_PROMPT_CHARS)
+        for value in ("", " ", "\t\n", "\u3000", "x", " x ", long_value):
             generation = {"modality": "image", "prompt": value}
             for decision in (
                 {"kind": "final", "text": value, "generation": None},

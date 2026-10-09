@@ -143,9 +143,10 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
             )
         elif bounds["max_retained_bytes"] <= needed:
             raise ValueError(
-                f"{prefix}.max_retained_bytes must exceed {needed}, the most "
-                f"{dispatches} dispatches of Cosmos3 output can retain. The rest "
-                "bounds the client's chat history"
+                f"{prefix}.max_retained_bytes must exceed {needed}, what "
+                f"{dispatches} dispatches of Cosmos3 output retain at most with "
+                "planned answer and prompt sizes. The rest bounds the client's "
+                "chat history"
             )
         else:
             pass
