@@ -292,6 +292,11 @@ def test_native_requests_follow_the_server_media_policy(
     requests = [
         ("/v1/videos", {"json": {"prompt": "a", "output_path": "/srv"}}, True),
         ("/v1/videos", {"json": {"prompt": "a", "video_path": outside}}, configured),
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "video_path": "/srv/a\0b"}},
+            configured,
+        ),
         ("/v1/videos", {"json": {"prompt": "a", "reference_url": remote}}, configured),
         (
             "/v1/videos",
@@ -327,6 +332,15 @@ def test_native_requests_follow_the_server_media_policy(
         (
             "/v1/images/edits",
             {"data": {"prompt": "a", "perf_dump_path": "/srv/perf.json"}},
+            True,
+        ),
+        # A body nested past the decoder limit, which native may still decode.
+        (
+            "/v1/videos",
+            {
+                "content": "[" * 100000 + "]" * 100000,
+                "headers": {"content-type": "application/json"},
+            },
             True,
         ),
         # Native decodes these JSON encoded values to the outside path.

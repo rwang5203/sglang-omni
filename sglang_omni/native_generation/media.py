@@ -253,16 +253,14 @@ class NativeMediaFrontend:
                 body = await request.json()
             except ValueError:
                 return
+            except RecursionError:
+                raise nested_too_deeply() from None
         try:
             self.police_fields(
                 body, inline_images=request.url.path.startswith("/v1/actions/")
             )
         except RecursionError:
-            # Native may still decode what nests too deeply for this check.
-            raise HTTPException(
-                status_code=400,
-                detail="Native media request refused: it nests too deeply to check.",
-            ) from None
+            raise nested_too_deeply() from None
 
     def police_fields(self, value: object, inline_images: bool = False) -> None:
         if isinstance(value, dict):
@@ -484,6 +482,14 @@ class NativeMediaFrontend:
             pass
 
 
+def nested_too_deeply() -> HTTPException:
+    # Native may still decode what nests too deeply for this check.
+    return HTTPException(
+        status_code=400,
+        detail="Native media request refused: it nests too deeply to check.",
+    )
+
+
 def parse_containers(value: object) -> object:
     if isinstance(value, str):
         try:
@@ -590,7 +596,9 @@ def police_media_reference(
                 connector.local_media_path(path)
         else:
             pass
-    except MediaPolicyError as exc:
+    except ValueError as exc:
+        # A media policy refusal, or a path that cannot be resolved at all,
+        # such as one with a NUL character.
         hint = " Send local media as a path." if file_url else ""
         raise HTTPException(
             status_code=400, detail=f"{name} refused: {exc}{hint}"
