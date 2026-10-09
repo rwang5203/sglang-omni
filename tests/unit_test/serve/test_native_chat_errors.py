@@ -20,7 +20,7 @@ from sglang_omni.client.types import CompletionStreamChunk
 from sglang_omni.models.cosmos3.reasoner import NativeReasonerScheduler
 from sglang_omni.proto import StagePayload
 from sglang_omni.serve import create_app
-from sglang_omni.serve.openai_errors import http_status_from_error
+from sglang_omni.serve.openai_errors import generation_error_status_code
 
 
 class NativeValidationClient:
@@ -101,7 +101,9 @@ def test_native_chat_rejections_survive_http_and_stage_transport(stream, option)
 
 def test_internal_value_errors_keep_server_error_classification():
     assert (
-        http_status_from_error(QueueFullError.from_message("internal shape mismatch"))
+        generation_error_status_code(
+            QueueFullError.from_message("internal shape mismatch")
+        )
         == 500
     )
 

@@ -64,7 +64,7 @@ class CoordinatorSessions:
 
     def __init__(self) -> None:
         self.is_sessions_stopping = False
-        self.next_incarnation = 1
+        self.next_open_index = 1
         self.session_unavailable_stages: set[str] = set()
         self.sessions: dict[str, Session] = {}
         self.session_stream_handlers: dict[str, SessionStreamHandler] = {}
@@ -97,7 +97,7 @@ class CoordinatorSessions:
             pass
 
     def get_session(self, session_identity: SessionIdentity) -> Session:
-        session = self.sessions.get(session_identity.session_id)
+        session = self.sessions.get(session_identity.id)
         if session is None or session.session_identity != session_identity:
             raise ValueError("unknown or stale session reference")
         else:
@@ -159,13 +159,13 @@ class CoordinatorSessions:
         else:
             pass
         session = Session(
-            session_identity=SessionIdentity(session_id, self.next_incarnation),
+            session_identity=SessionIdentity(session_id, self.next_open_index),
             request=request,
             stages=owners,
             bindings=bindings,
             limits=limits or SessionLimits(),
         )
-        self.next_incarnation += 1
+        self.next_open_index += 1
         self.sessions[session_id] = session
         try:
             async with session.lock:
@@ -202,7 +202,7 @@ class CoordinatorSessions:
         else:
             pass
         if chunk.seq != session.next_input:
-            raise ValueError("input seq must be contiguous within an incarnation")
+            raise ValueError("input seq must be contiguous within an open index")
         else:
             pass
         if chunk.modality in session.ended_modalities:
@@ -426,18 +426,14 @@ class CoordinatorSessions:
             raise
         finally:
             self.session_stream_handlers.pop(request_id, None)
-            if request_id in self.requests:
-                await self.abort(request_id)
-            else:
-                pass
-            future = self.completion_futures.pop(request_id, None)
-            if future is not None and not future.done():
-                future.cancel()
+            future = self.completion_futures.get(request_id)
+            if future is not None:
+                await self.release_submission(request_id, future)
             else:
                 pass
 
     async def close_session(self, session_identity: SessionIdentity) -> None:
-        session = self.sessions.get(session_identity.session_id)
+        session = self.sessions.get(session_identity.id)
         if session is None:
             return
         else:
@@ -508,7 +504,7 @@ class CoordinatorSessions:
         session.output_wake.set()
         # Note (Junnan Li): An unacknowledged owner may still hold buffers; keep its capacity reserved.
         if session.cleanup_error is None:
-            del self.sessions[session.session_identity.session_id]
+            del self.sessions[session.session_identity.id]
         else:
             pass
 

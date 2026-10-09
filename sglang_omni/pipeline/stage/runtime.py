@@ -15,9 +15,10 @@ import logging
 import os
 import queue as _queue_mod
 import threading
+from collections.abc import Iterable, Mapping
 from contextlib import suppress
 from dataclasses import replace
-from typing import Any, Awaitable, Callable, Literal
+from typing import Awaitable, Callable, Literal
 
 import torch
 
@@ -26,10 +27,16 @@ from sglang_omni.comm.data_ref import DataKind, DataRef
 from sglang_omni.comm.engine import CommEngine, KVTransferCancelled, KVTransferRejected
 from sglang_omni.comm.kv_transfer import KVPageTransfer
 from sglang_omni.comm.router import CommRouter
+from sglang_omni.pipeline.control_plane import StageControlPlane
+from sglang_omni.pipeline.local_dispatch import LocalStageDispatcher
 from sglang_omni.pipeline.replicas import ReplicaTopology
 from sglang_omni.pipeline.stage.input import DirectInput, InputHandler
 from sglang_omni.pipeline.stage.stream_queue import StreamItem, StreamQueue
-from sglang_omni.pipeline.tp_control import TPLeaderFanout, TPWorkMessage
+from sglang_omni.pipeline.tp_control import (
+    TPFollowerControlPlane,
+    TPLeaderFanout,
+    TPWorkMessage,
+)
 from sglang_omni.platforms import current_platform
 from sglang_omni.profiler.comm_trace import emit as _comm_trace
 from sglang_omni.profiler.event_recorder import emit as _emit_event
@@ -37,6 +44,7 @@ from sglang_omni.profiler.event_recorder import get_recorder as _get_recorder
 from sglang_omni.profiler.event_recorder import set_active_stage as _set_active_stage
 from sglang_omni.proto import (
     AdminMessage,
+    AdminOperation,
     AdminResult,
     AdminResultMessage,
     CompleteMessage,
@@ -52,7 +60,7 @@ from sglang_omni.proto import (
 )
 from sglang_omni.proto.session import find_session_operation
 from sglang_omni.relay.base import Relay
-from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.scheduling.message import IncomingMessage, StageScheduler
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -61,8 +69,9 @@ logger = logging.getLogger(__name__)
 _SCHEDULER_THREAD_JOIN_TIMEOUT_S = 5.0
 _OUTBOX_DRAIN_BATCH_SIZE = 64
 
-GetNextFn = Callable[[str, Any], str | list[str] | None]
-GetStreamDoneTargetsFn = Callable[[str, Any], str | list[str] | None]
+
+GetNextFn = Callable[[str, object], str | list[str] | None]
+GetStreamDoneTargetsFn = Callable[[str, object], str | list[str] | None]
 
 
 def error_text(exc: BaseException) -> str:
@@ -93,30 +102,32 @@ class Stage:
         get_next: GetNextFn,
         gpu_id: int | None,
         endpoints: dict[str, str],
-        control_plane: Any,
+        control_plane: StageControlPlane | TPFollowerControlPlane | None,
         rank_endpoints: dict[str, tuple[str, ...]] | None = None,
         tp_rank: int = 0,
         tp_size: int = 1,
         placement_gpu_id: int | None = None,
         input_handler: InputHandler | None = None,
         relay: Relay | None = None,
-        comm_config: dict[str, Any] | None = None,
-        scheduler: Any = None,
-        project_payload: dict[str, Callable[[Any], Any]] | None = None,
+        comm_config: Mapping[str, int | float | str | None] | None = None,
+        scheduler: StageScheduler | None = None,
+        project_payload: (
+            dict[str, Callable[[StagePayload], StagePayload]] | None
+        ) = None,
         stream_targets: list[str] | None = None,
         get_stream_done_targets: GetStreamDoneTargetsFn | None = None,
         gpu_stage_names: set[str] | None = None,
         stage_gpu_ids: dict[str, tuple[int, ...]] | None = None,
         remote_stage_names: set[str] | None = None,
         same_process_targets: set[str] | None = None,
-        local_dispatcher: Any | None = None,
+        local_dispatcher: LocalStageDispatcher | None = None,
         can_accept_stream_before_payload: bool = False,
         disable_direct_cuda_ipc_payload: bool = False,
         tp_fanout: TPLeaderFanout | None = None,
         is_terminal: bool = False,
         replica_topology: dict[str, list[str]] | None = None,
         allow_child_processes: bool = False,
-    ):
+    ) -> None:
         self.name = name
         self.role = role
         self.get_next = get_next
@@ -174,7 +185,7 @@ class Stage:
         self.first_stream_chunk_seen: set[str] = set()
         self.local_stream_targets: dict[str, set[str]] = {}
         self.nonlocal_stream_targets: dict[str, set[str]] = {}
-        self.receive_tasks: set[asyncio.Task] = set()
+        self.receive_tasks: set[asyncio.Task[None]] = set()
         self.receive_lane_tails: dict[tuple[str, str], asyncio.Future[None]] = {}
         self.scheduler_thread: threading.Thread | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
@@ -235,7 +246,7 @@ class Stage:
         # Start scheduler in dedicated thread
         if self.scheduler is not None:
 
-            def _run_scheduler():
+            def _run_scheduler() -> None:
                 # Active-stage binding so ``emit(stage=None)`` from
                 # scheduler-thread descendants resolves to this stage.
                 _set_active_stage(self.name)
@@ -423,7 +434,17 @@ class Stage:
             else:
                 pass
 
-    async def handle_message(self, msg: Any) -> None:
+    async def handle_message(
+        self,
+        msg: (
+            SubmitMessage
+            | DataAckMessage
+            | DataReadyMessage
+            | ProfilerStartMessage
+            | ProfilerStopMessage
+            | AdminMessage
+        ),
+    ) -> None:
         if isinstance(msg, SubmitMessage):
             await self.on_submit(msg)
         elif isinstance(msg, DataAckMessage):
@@ -456,7 +477,7 @@ class Stage:
 
         lane = (msg.request_id, msg.from_stage)
         predecessor = self.receive_lane_tails.get(lane)
-        completion = asyncio.get_running_loop().create_future()
+        completion: asyncio.Future[None] = asyncio.get_running_loop().create_future()
         self.receive_lane_tails[lane] = completion
         task = asyncio.create_task(
             self.run_receive_task(
@@ -595,7 +616,7 @@ class Stage:
         self,
         request_id: str,
         from_stage: str,
-        payload: Any,
+        payload: "StagePayload",
         replica_bindings: dict[str, int] | None = None,
     ) -> None:
         self.record_replica_bindings(request_id, replica_bindings)
@@ -606,8 +627,8 @@ class Stage:
         request_id: str,
         from_stage: str,
         chunk_id: int,
-        data: Any,
-        metadata: dict[str, Any] | None = None,
+        data: object,
+        metadata: dict[str, object] | None = None,
         replica_bindings: dict[str, int] | None = None,
     ) -> None:
         if request_id in self.aborted:
@@ -650,7 +671,7 @@ class Stage:
         self,
         request_id: str,
         from_stage: str,
-        payload: Any,
+        payload: "StagePayload",
     ) -> None:
         if request_id in self.aborted:
             return
@@ -1081,7 +1102,7 @@ class Stage:
             IncomingMessage(request_id=request_id, type="stream_chunk", data=item)
         )
 
-    async def execute(self, payload: Any) -> None:
+    async def execute(self, payload: StagePayload) -> None:
         request_id = payload.request_id
         if request_id in self.aborted:
             return
@@ -1157,7 +1178,7 @@ class Stage:
         result = await self.run_admin_operation(operation)
         await self.control_plane.send_admin_result(AdminResultMessage(result))
 
-    async def run_admin_operation(self, operation: Any) -> AdminResult:
+    async def run_admin_operation(self, operation: AdminOperation) -> AdminResult:
         try:
             handler = getattr(self.scheduler, "admin", None)
             if handler is None:
@@ -1191,7 +1212,9 @@ class Stage:
                 error=str(exc),
             )
 
-    def admin_result_from_outcome(self, operation: Any, outcome: Any) -> AdminResult:
+    def admin_result_from_outcome(
+        self, operation: AdminOperation, outcome: object
+    ) -> AdminResult:
         if isinstance(outcome, AdminResult):
             return outcome
         else:
@@ -1221,11 +1244,11 @@ class Stage:
 
     def admin_result(
         self,
-        operation: Any,
+        operation: AdminOperation,
         *,
         success: bool,
         message: str = "",
-        data: dict[str, Any] | None = None,
+        data: Mapping[str, object] | None = None,
         error: str | None = None,
     ) -> AdminResult:
         return AdminResult(
@@ -1366,12 +1389,12 @@ class Stage:
     def launch_kv_transfer(self, transfer: KVPageTransfer) -> None:
         started = False
 
-        async def send():
+        async def send() -> None:
             nonlocal started
             started = True
             await self.send_kv_transfer(transfer)
 
-        def done(task):
+        def done(task: asyncio.Task[None]) -> None:
             if not started:
                 self.discard_kv_transfer(transfer)
             else:
@@ -1442,13 +1465,13 @@ class Stage:
             self.clear_request_state(transfer.request_id)
 
     @staticmethod
-    def discard_kv_transfer(transfer: Any) -> None:
+    def discard_kv_transfer(transfer: object) -> None:
         if isinstance(transfer, KVPageTransfer) and transfer.lease is not None:
             transfer.lease.release()
         else:
             pass
 
-    def release_scheduler_result(self, result: Any, *, delivered: bool) -> None:
+    def release_scheduler_result(self, result: object, *, delivered: bool) -> None:
         """Settle optional scheduler-owned resources after routing or dropping."""
         release = getattr(self.scheduler, "release_result", None)
         if release is not None:
@@ -1456,7 +1479,7 @@ class Stage:
         else:
             pass
 
-    async def route_result(self, request_id: str, result: Any) -> None:
+    async def route_result(self, request_id: str, result: object) -> None:
         """Route a result and settle its resources even when routing fails."""
         delivered = False
 
@@ -1477,7 +1500,7 @@ class Stage:
         self.release_scheduler_result(result, delivered=delivered)
 
     async def route_scheduler_result(
-        self, request_id: str, result: Any, on_submitted: Callable[[], None]
+        self, request_id: str, result: object, on_submitted: Callable[[], None]
     ) -> None:
         """Route while recording transport acceptance before local cleanup."""
         if not self.owns_external_io:
@@ -1636,7 +1659,7 @@ class Stage:
         self,
         request_id: str,
         target: str,
-        payload: Any,
+        payload: StagePayload,
         *,
         allow_local_object: bool = False,
         allow_projected_local_object: bool = False,
@@ -1765,8 +1788,8 @@ class Stage:
 
     @staticmethod
     def is_isolated_projected_payload(
-        original_payload: Any,
-        projected_payload: Any,
+        original_payload: object,
+        projected_payload: object,
         *,
         projector_present: bool,
     ) -> bool:
@@ -1797,7 +1820,7 @@ class Stage:
         )
 
     @staticmethod
-    def shares_mutable_container(original: Any, projected: Any) -> bool:
+    def shares_mutable_container(original: object, projected: object) -> bool:
         original_ids = Stage.collect_mutable_container_ids(original)
         if not original_ids:
             return False
@@ -1807,7 +1830,7 @@ class Stage:
 
     @staticmethod
     def collect_mutable_container_ids(
-        obj: Any, seen: set[int] | None = None
+        obj: object, seen: set[int] | None = None
     ) -> set[int]:
         seen = set() if seen is None else seen
         obj_id = id(obj)
@@ -1829,7 +1852,7 @@ class Stage:
 
     @staticmethod
     def contains_mutable_container_id(
-        obj: Any, original_ids: set[int], seen: set[int] | None = None
+        obj: object, original_ids: set[int], seen: set[int] | None = None
     ) -> bool:
         seen = set() if seen is None else seen
         obj_id = id(obj)
@@ -1849,7 +1872,7 @@ class Stage:
         )
 
     @staticmethod
-    def iter_container_children(obj: Any):
+    def iter_container_children(obj: object) -> Iterable[object]:
         if isinstance(obj, dict):
             return obj.values()
         else:
@@ -1885,9 +1908,9 @@ class Stage:
     async def send_stream_to_target(
         self,
         request_id: str,
-        data: Any,
+        data: object,
         target: str,
-        metadata: dict[str, Any] | None = None,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         if not self.owns_external_io:
             return
@@ -2119,8 +2142,8 @@ class Stage:
     async def send_stream_to_coordinator(
         self,
         request_id: str,
-        data: Any,
-        metadata: dict[str, Any] | None = None,
+        data: object,
+        metadata: dict[str, object] | None = None,
     ) -> None:
         """Forward a terminal stage's stream chunk to the Coordinator."""
         if not self.is_terminal:
@@ -2188,15 +2211,17 @@ class Stage:
             raise RuntimeError(f"Follower stage {self.name} failed: {error}")
         else:
             pass
-        await self.control_plane.send_complete(
-            CompleteMessage(
-                request_id=request_id,
-                from_stage=self.name,
-                success=False,
-                error=error,
+        try:
+            await self.control_plane.send_complete(
+                CompleteMessage(
+                    request_id=request_id,
+                    from_stage=self.name,
+                    success=False,
+                    error=error,
+                )
             )
-        )
-        self.clear_request_state(request_id)
+        finally:
+            self.clear_request_state(request_id)
 
     def clear_request_state(
         self, request_id: str, *, keep_continuation: bool = False
@@ -2329,7 +2354,9 @@ class Stage:
         else:
             pass
 
-    def on_background_task_done(self, task: asyncio.Task, label: str) -> None:
+    def on_background_task_done(
+        self, task: asyncio.Task[bool | None], label: str
+    ) -> None:
         if task.cancelled():
             return
         else:
