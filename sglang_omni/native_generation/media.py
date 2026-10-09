@@ -110,6 +110,11 @@ class NativeMediaFrontend:
     client, warmup and video job shutdown, starts no native broker, since
     nothing in Omni sends offline jobs through one, answers 503 while native
     warmup runs, and turns a warmup failure into a startup failure.
+
+    A request in flight fails with 503 as soon as the generation stage fails
+    or a native scheduler socket closes, which happens when its process
+    exits, because native SGLang before worker_failure support would wait
+    for the answer forever.
     """
 
     def __init__(self, server_args: object) -> None:
@@ -123,6 +128,11 @@ class NativeMediaFrontend:
         self.ready = asyncio.Event()
         self.failure: BaseException | None = None
         self.failed = asyncio.Event()
+        self.stage_failed = False
+        # Last monitor event of each native scheduler endpoint.
+        self.scheduler_events: dict[bytes, int] = {}
+        self.unavailable_reason: str | None = None
+        self.unavailable = asyncio.Event()
         # Native create_app also serves weights, memory, LoRA, rollout, mesh,
         # realtime, server info and stats routes without Omni's admin key, so
         # only the image, video and action routers are included. The action
@@ -147,26 +157,11 @@ class NativeMediaFrontend:
     @classmethod
     def build(cls, server_kwargs: dict[str, object]) -> NativeMediaFrontend:
         """Import the native runtime and build the frontend off the event loop."""
-        from sglang.multimodal_gen.runtime.scheduler_client import AsyncSchedulerClient
         from sglang.multimodal_gen.runtime.server_args import (
             ServerArgs,
             set_global_server_args,
         )
 
-        if (
-            "worker_failure"
-            not in inspect.signature(AsyncSchedulerClient.initialize).parameters
-        ):
-            raise RuntimeError(
-                "Native media routes require SGLang scheduler owner-failure "
-                "support (worker_failure in AsyncSchedulerClient.initialize), "
-                "which the installed SGLang does not provide. Without it, a "
-                "request in flight when the generation worker dies waits for its "
-                "client deadline. Install an SGLang build with this capability, "
-                "then restart."
-            )
-        else:
-            pass
         server_args = ServerArgs.from_kwargs(**server_kwargs)
         set_global_server_args(server_args)
         return cls(server_args)
@@ -189,6 +184,7 @@ class NativeMediaFrontend:
 
     def mount(self, app: FastAPI, runtime_failure: asyncio.Future) -> None:
         """Serve the native media routes and run their lifespan inside Omni's."""
+        runtime_failure.add_done_callback(self.on_runtime_failure)
         previous_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -217,9 +213,13 @@ class NativeMediaFrontend:
             should_run_synthetic_server_warmup,
         )
 
-        async_scheduler_client.initialize(
-            self.server_args, worker_failure=runtime_failure
-        )
+        initialize = async_scheduler_client.initialize
+        if "worker_failure" in inspect.signature(initialize).parameters:
+            # Later native SGLang settles its own requests on stage failure.
+            initialize(self.server_args, worker_failure=runtime_failure)
+        else:
+            initialize(self.server_args)
+        watch = asyncio.create_task(self.watch_scheduler())
         config = self.server_args.prompt_enhancer_config
         enhancer = None if config is None else PromptEnhancer.from_file(config)
         self.app.state.prompt_enhancer = enhancer
@@ -231,12 +231,13 @@ class NativeMediaFrontend:
         try:
             yield
         finally:
-            if warmup is not None:
-                warmup.cancel()
-                with suppress(asyncio.CancelledError):
-                    await warmup
-            else:
-                pass
+            for task in (warmup, watch):
+                if task is not None:
+                    task.cancel()
+                    with suppress(asyncio.CancelledError):
+                        await task
+                else:
+                    pass
             await shutdown_video_jobs()
             if enhancer is not None:
                 await enhancer.close()
@@ -263,15 +264,101 @@ class NativeMediaFrontend:
         else:
             self.ready.set()
 
-    async def serve(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if self.warming:
-            # Nothing waits on warmup, so warmup can never hold up shutdown.
-            response = JSONResponse(
-                {"detail": "Native generation is warming up"}, status_code=503
-            )
-            await response(scope, receive, send)
+    def on_runtime_failure(self, runtime_failure: asyncio.Future) -> None:
+        # Serving shutdown cancels the watcher, which is no failure.
+        if not runtime_failure.cancelled():
+            self.stage_failed = True
+            self.update_availability()
         else:
-            await self.app(scope, receive, send)
+            pass
+
+    def update_availability(self) -> None:
+        import zmq
+
+        if self.stage_failed:
+            self.unavailable_reason = "The generation stage failed"
+        elif zmq.EVENT_DISCONNECTED in self.scheduler_events.values():
+            self.unavailable_reason = "The native generation scheduler is unreachable"
+        else:
+            self.unavailable_reason = None
+        if self.unavailable_reason is None:
+            self.unavailable.clear()
+        else:
+            logger.error("Native media routes unavailable: %s", self.unavailable_reason)
+            self.unavailable.set()
+
+    async def watch_scheduler(self) -> None:
+        """Follow the connection to each native scheduler socket.
+
+        A scheduler process that exits closes its socket, and the socket
+        monitor reports that at once, without polling. Reconnecting, which
+        only a live scheduler accepts, makes the routes available again.
+        """
+        import zmq
+        import zmq.asyncio
+        from zmq.utils.monitor import recv_monitor_message
+
+        context = zmq.asyncio.Context()
+        probe = context.socket(zmq.DEALER)
+        monitor = probe.get_monitor_socket(zmq.EVENT_CONNECTED | zmq.EVENT_DISCONNECTED)
+        try:
+            for endpoint in self.server_args.scheduler_endpoints:
+                probe.connect(endpoint)
+            while True:
+                event = await recv_monitor_message(monitor)
+                self.scheduler_events[event["endpoint"]] = event["event"]
+                self.update_availability()
+        finally:
+            probe.disable_monitor()
+            monitor.close(linger=0)
+            probe.close(linger=0)
+            context.term()
+
+    async def serve(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if self.unavailable.is_set():
+            await self.refuse(scope, receive, send, self.unavailable_reason)
+        elif self.warming:
+            # Nothing waits on warmup, so warmup can never hold up shutdown.
+            await self.refuse(scope, receive, send, "Native generation is warming up")
+        else:
+            await self.serve_while_available(scope, receive, send)
+
+    @staticmethod
+    async def refuse(scope: Scope, receive: Receive, send: Send, reason: str) -> None:
+        await JSONResponse({"detail": reason}, status_code=503)(scope, receive, send)
+
+    async def serve_while_available(
+        self, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        started = False
+
+        async def send_tracked(message: dict[str, object]) -> None:
+            nonlocal started
+            started = started or message["type"] == "http.response.start"
+            await send(message)
+
+        request = asyncio.ensure_future(self.app(scope, receive, send_tracked))
+        unavailable = asyncio.ensure_future(self.unavailable.wait())
+        try:
+            await asyncio.wait(
+                (request, unavailable), return_when=asyncio.FIRST_COMPLETED
+            )
+            reason = self.unavailable_reason or "Native generation stopped"
+        finally:
+            unavailable.cancel()
+            if not request.done():
+                request.cancel()
+                with suppress(asyncio.CancelledError):
+                    await request
+            else:
+                pass
+        if not request.cancelled():
+            request.result()
+        elif not started:
+            await self.refuse(scope, receive, send, reason)
+        else:
+            # The response already started, so the connection just closes.
+            pass
 
 
 class NativeMediaRoutes(BaseRoute):

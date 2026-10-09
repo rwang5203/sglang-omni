@@ -26,16 +26,17 @@ def native(monkeypatch):
         server_warmup,
     )
 
-    native = SimpleNamespace(events=[], warmup=None)
     args = SimpleNamespace(
         enable_metrics=False,
         prompt_enhancer_config=None,
+        scheduler_endpoints=[],
         warmup_resolutions=None,
         pipeline_config=SimpleNamespace(
             supports_action_endpoint=lambda: True,
             supports_openpi_endpoint=lambda: True,
         ),
     )
+    native = SimpleNamespace(args=args, events=[], warmup=None)
 
     def initialize(self, server_args, *, worker_failure=None):
         native.events.append("initialize")
@@ -173,6 +174,73 @@ def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
             failed.cancel()
 
     serve(create_app(RunningClient(), model_name="native"), frontend, check)
+
+
+@pytest.mark.parametrize("installed", [False, True])
+def test_native_worker_failure_is_used_when_installed(native, monkeypatch, installed):
+    from sglang.multimodal_gen.runtime import scheduler_client
+
+    received = []
+
+    def legacy_initialize(self, server_args):
+        received.append(None)
+
+    def initialize(self, server_args, *, worker_failure=None):
+        received.append(worker_failure)
+
+    monkeypatch.setattr(
+        scheduler_client.AsyncSchedulerClient,
+        "initialize",
+        initialize if installed else legacy_initialize,
+    )
+
+    async def check(client, runtime_failure):
+        assert received == [runtime_failure if installed else None]
+        assert (await client.get("/v1/videos")).status_code == 200
+
+    serve(FastAPI(), media.NativeMediaFrontend.build({}), check)
+
+
+@pytest.mark.parametrize("cause", ["scheduler", "stage"])
+def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
+    import zmq
+
+    context = zmq.Context()
+    scheduler = context.socket(zmq.ROUTER)
+    port = scheduler.bind_to_random_port("tcp://127.0.0.1")
+    native.args.scheduler_endpoints = [f"tcp://127.0.0.1:{port}"]
+    frontend = media.NativeMediaFrontend.build({})
+    entered = asyncio.Event()
+
+    @frontend.app.post("/v1/images/generations-waiting")
+    async def waiting():
+        # Native SGLang waits like this for a scheduler that never answers.
+        entered.set()
+        await asyncio.Event().wait()
+
+    async def check(client, runtime_failure):
+        async def connected():
+            while list(frontend.scheduler_events.values()) != [zmq.EVENT_CONNECTED]:
+                await asyncio.sleep(0.01)
+
+        await asyncio.wait_for(connected(), 5)
+        pending = asyncio.ensure_future(client.post("/v1/images/generations-waiting"))
+        await asyncio.wait_for(entered.wait(), 5)
+        if cause == "scheduler":
+            scheduler.close(linger=0)
+        else:
+            runtime_failure.set_exception(RuntimeError("generation stage died"))
+            runtime_failure.exception()
+        response = await asyncio.wait_for(pending, 5)
+        assert response.status_code == 503
+        response = await client.post("/v1/images/generations-waiting")
+        assert response.status_code == 503
+
+    try:
+        serve(FastAPI(), frontend, check)
+    finally:
+        scheduler.close(linger=0)
+        context.term()
 
 
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
