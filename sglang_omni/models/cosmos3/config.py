@@ -94,6 +94,8 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
                 # one output.
                 max_dispatches=17,
                 max_outputs=17,
+                # Bounds orchestrator memory and Reasoner concurrency. The
+                # adapter admits generation work by measured generation time.
                 max_active=32,
                 # Holds the most 17 dispatches can retain (about 87 MiB, eight
                 # maximal inline videos and their turns), and leaves the rest

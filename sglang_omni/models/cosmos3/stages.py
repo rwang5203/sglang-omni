@@ -5,7 +5,10 @@ from __future__ import annotations
 
 import base64
 import hashlib
+import heapq
+import itertools
 import logging
+import math
 import multiprocessing
 import multiprocessing.connection
 import os
@@ -15,6 +18,7 @@ import shutil
 import stat
 import tempfile
 import threading
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse, urlunparse
@@ -86,6 +90,11 @@ NATIVE_MAX_OUTPUTS_PER_PROMPT = 10
 
 # Largest saved output a stage with inline_media returns as bytes.
 INLINE_MEDIA_LIMIT_BYTES = 8 * 1024 * 1024
+# Request metadata key of the order a stage with inline_media serves its
+# queued requests in: a number or a list of numbers, smallest first, such as
+# a deadline and an admission index. Requests without one, and equal ones,
+# keep arrival order.
+DEADLINE_METADATA_KEY = "generation_deadline"
 INLINE_MEDIA_TYPES = {
     ".png": ("image", "image/png"),
     ".jpg": ("image", "image/jpeg"),
@@ -345,7 +354,9 @@ class NativeGenerationScheduler(SimpleScheduler):
     completion, the coordinator owns the media and removes them if it drops
     the completion. With inline_media the stage instead returns each output
     as bytes read from the workspace, for a receiver that is another stage,
-    so no saved media leave the workspace.
+    so no saved media leave the workspace. It then also serves queued
+    requests by the deadline in their metadata and reports the time each
+    request occupied it as service_s.
     """
 
     def __init__(
@@ -364,6 +375,8 @@ class NativeGenerationScheduler(SimpleScheduler):
         self.request_fields = request_fields
         self.cancellation_mode = cancellation_mode
         self.inline_media = inline_media
+        self.queued: list[tuple[tuple[float, ...], int, IncomingMessage]] = []
+        self.arrivals = itertools.count()
         self.native_requests: dict[str, GenerationRequest] = {}
         self.workers = list(generator.local_scheduler_process or [])
         self.worker_failure: RuntimeError | None = None
@@ -401,9 +414,39 @@ class NativeGenerationScheduler(SimpleScheduler):
     def next_message(self) -> IncomingMessage | None:
         if self.worker_failure is not None:
             raise self.worker_failure
+        elif not self.inline_media:
+            return super().next_message()
+        elif not self.queued:
+            # Wait for work as SimpleScheduler does.
+            message = super().next_message()
+            if message is None:
+                return None
+            else:
+                self.enqueue_by_deadline(message)
         else:
             pass
-        return super().next_message()
+        while True:
+            try:
+                self.enqueue_by_deadline(self.inbox.get_nowait())
+            except queue.Empty:
+                break
+        return heapq.heappop(self.queued)[2]
+
+    def enqueue_by_deadline(self, message: IncomingMessage) -> None:
+        payload = message.data
+        value = (
+            payload.request.metadata.get(DEADLINE_METADATA_KEY)
+            if isinstance(payload, StagePayload)
+            else None
+        )
+        key = tuple(value) if isinstance(value, (list, tuple)) else (value,)
+        if not key or not all(
+            type(part) in (int, float) and not math.isnan(part) for part in key
+        ):
+            key = (math.inf,)
+        else:
+            pass
+        heapq.heappush(self.queued, (key, next(self.arrivals), message))
 
     def run_native(self, kwargs: dict[str, object]) -> object:
         """Run native generation on a helper thread and wait for it or a worker exit.
@@ -569,6 +612,7 @@ class NativeGenerationScheduler(SimpleScheduler):
                 self.remove_outputs(request)
 
     def generate(self, payload: StagePayload) -> StagePayload:
+        started = time.monotonic() if self.inline_media else 0.0
         params = build_sampling_params(payload, self.output_dir, self.request_fields)
         with self.abort_lock:
             if payload.request_id in self.aborted:
@@ -648,6 +692,7 @@ class NativeGenerationScheduler(SimpleScheduler):
             if self.inline_media:
                 for item in payload.data["media"]:
                     item.update(inline_media(item.pop("path"), request.directory))
+                payload.data["service_s"] = time.monotonic() - started
             else:
                 pass
             succeeded = True

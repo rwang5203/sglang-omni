@@ -6,6 +6,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import time
 from copy import deepcopy
 from pathlib import Path
 from types import SimpleNamespace
@@ -20,6 +21,7 @@ from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3 import stages as cosmos3_stages
 from sglang_omni.models.cosmos3 import umm as cosmos3_umm
 from sglang_omni.models.cosmos3.stages import (
+    DEADLINE_METADATA_KEY,
     INLINE_MEDIA_LIMIT_BYTES,
     NativeGenerationScheduler,
     build_sampling_params,
@@ -41,6 +43,7 @@ from sglang_omni.pipeline.umm import (
 from sglang_omni.preprocessing import resource_connector
 from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.native_chat_scheduler import build_chat_fields
 from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.openai_errors import generation_error_status_code
@@ -49,7 +52,7 @@ from sglang_omni.serve.protocol import ChatCompletionRequest
 PHASES = {"reason": "reasoner", "generate": "generation"}
 
 
-def controller(**bounds: int) -> UMMController:
+def controller(clock=time.monotonic, **bounds: int) -> UMMController:
     limits = {
         "max_dispatches": 17,
         "max_outputs": 17,
@@ -59,10 +62,11 @@ def controller(**bounds: int) -> UMMController:
         **bounds,
     }
     return UMMController(
-        Cosmos3UMMAdapter("checkpoint"),
+        Cosmos3UMMAdapter("checkpoint", clock=clock),
         limits=UMMLimits(**limits),
         phases=PHASES,
         output_stage="output",
+        clock=clock,
     )
 
 
@@ -456,6 +460,16 @@ def test_inline_output_is_owned_hashed_and_released_before_forwarding(
     assert base64.b64decode(item["url"].split(",", 1)[1]) == b"png fixture"
 
 
+def test_inline_generation_serves_the_earliest_deadline_first(tmp_path):
+    scheduler = inline_scheduler(tmp_path)
+    for name, deadline in (("late", 3.0), ("none", None), ("early", 1.0), ("b", 2.0)):
+        metadata = {} if deadline is None else {DEADLINE_METADATA_KEY: deadline}
+        payload = StagePayload(name, OmniRequest("cube", {}, metadata), None)
+        scheduler.inbox.put(IncomingMessage(name, "new_request", payload))
+    order = [scheduler.next_message().request_id for _ in range(4)]
+    assert order == ["early", "b", "late", "none"]
+
+
 @pytest.mark.parametrize("symlink", [False, True])
 def test_inline_generation_rejects_foreign_files_without_removing_them(
     tmp_path, symlink
@@ -502,6 +516,38 @@ def test_umm_variant_wires_the_controller_and_inline_generation():
     assert isinstance(umm.adapter, Cosmos3UMMAdapter)
     assert config.entry_stage_admission_limit() == umm.limits.max_active
     umm.stop()
+
+
+@pytest.mark.parametrize(
+    "service_s, admitted, offered",
+    [(100.0, True, True), (200.0, False, True), (1200.0, False, False)],
+)
+def test_admission_refuses_requests_generation_cannot_finish_in_time(
+    service_s, admitted, offered
+):
+    now = {"t": 0.0}
+    umm = controller(lambda: now["t"])
+    # Before any generation was measured, requests are admitted.
+    first = submit(umm, rid="a")
+    now["t"] = 1.0
+    generation = umm.advance(reply(first, reasoner_reply()))
+    assert generation.request.metadata[DEADLINE_METADATA_KEY] == [3600.0, 0]
+    now["t"] = 1.0 + service_s
+    resumed = umm.advance(reply(generation, {**media(), "service_s": service_s}))
+    # Another generation, a younger one running ahead of it, and two
+    # Reasoner turns of the measured second must end by the deadline 3600.
+    schema = resumed.request.params["response_format"]["json_schema"]["schema"]
+    assert ("anyOf" in schema) is offered
+    # The new request plans 8 generations behind the 7 still planned for the
+    # first, plus one younger generation per own one, and 9 Reasoner turns:
+    # 1 + service_s + service_s * 23 + 9 against its deadline 3601 + service_s.
+    second = submit(umm, rid="b")
+    if admitted:
+        assert route_umm("b", second) == "reasoner"
+    else:
+        assert second is None and "b" not in umm.contexts
+        assert generation_error_status_code(RuntimeError(rejection(umm))) == 503
+    assert "a" in umm.contexts
 
 
 @pytest.mark.parametrize(

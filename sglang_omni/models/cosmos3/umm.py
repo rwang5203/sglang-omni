@@ -6,12 +6,18 @@ from __future__ import annotations
 import base64
 import binascii
 import hashlib
+import itertools
 import json
+import math
 import re
+import time
+from collections import deque
 from copy import deepcopy
 from dataclasses import dataclass, field
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.models.cosmos3.stages import (
+    DEADLINE_METADATA_KEY,
     INLINE_MEDIA_LIMIT_BYTES,
     check_media_source,
     data_url,
@@ -20,6 +26,7 @@ from sglang_omni.models.cosmos3.stages import (
 )
 from sglang_omni.pipeline.umm import (
     CloseReason,
+    MonotonicClock,
     UMMContext,
     UMMOutput,
     UMMRequestError,
@@ -152,6 +159,41 @@ class Cosmos3History:
     media_urls: list[tuple[int, str]] = field(default_factory=list)
     retained_bytes: int = 0
     decision: Decision | None = None
+    dispatched_at: float = 0.0
+    # The deadline and the admission index, which order generation turns.
+    order: tuple[float, int] = (math.inf, 0)
+
+
+class GenerationBacklogError(QueueFullError):
+    """A request that admitted generation work cannot finish in time (HTTP 503)."""
+
+    def __init__(self, detail: str) -> None:
+        RuntimeError.__init__(self, f"{QueueFullError.MESSAGE} {detail}")
+
+
+class RecentMaximum:
+    """The largest value recorded within a trailing time window.
+
+    Keeps only values that no later and larger value dominates, so each
+    record and read takes amortized constant time.
+    """
+
+    def __init__(self) -> None:
+        self.entries: deque[tuple[float, float]] = deque()
+
+    def record(self, now: float, value: object) -> None:
+        if type(value) not in (int, float) or not 0 <= value < math.inf:
+            return
+        else:
+            pass
+        while self.entries and self.entries[-1][1] <= value:
+            self.entries.pop()
+        self.entries.append((now, value))
+
+    def maximum(self, now: float, window_s: float) -> float | None:
+        while self.entries and self.entries[0][0] <= now - window_s:
+            self.entries.popleft()
+        return self.entries[0][1] if self.entries else None
 
 
 def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -504,9 +546,71 @@ class Cosmos3UMMAdapter:
     media returns to the Reasoner in the next turn.
     """
 
-    def __init__(self, model_path: str) -> None:
+    def __init__(
+        self, model_path: str, *, clock: MonotonicClock = time.monotonic
+    ) -> None:
+        """clock must be the controller's clock, which sets each deadline."""
         del model_path
         self.histories: dict[str, Cosmos3History] = {}
+        self.clock = clock
+        # Measured within the last timeout_s, the deadline every request has.
+        self.window_s = math.inf
+        self.generation_times = RecentMaximum()
+        self.reason_times = RecentMaximum()
+        self.admissions = itertools.count()
+
+    def admit(self, context: UMMContext, now: float, generations: int) -> None:
+        """Refuse a request whose planned generations cannot finish in time.
+
+        The generation stage serves one request at a time, earliest deadline
+        first, so this request waits at most for the generations every active
+        request may still run, plus one younger request's running generation
+        per own generation. Each takes the longest service time measured
+        recently, and each own Reasoner turn the longest recent Reasoner turn.
+        Before any generation was measured the request is admitted, and the
+        deadline order keeps overload with the newest requests, which
+        generation_fits stops from generating more than time allows.
+        """
+        service = self.generation_times.maximum(now, self.window_s)
+        if service is None or generations <= 0:
+            return
+        else:
+            pass
+        reasoning = self.reason_times.maximum(now, self.window_s) or 0.0
+        admitted = sum(h.generations_left for h in tuple(self.histories.values()))
+        finish = (
+            now + service * (admitted + 2 * generations) + reasoning * (generations + 1)
+        )
+        if finish > context.deadline:
+            raise GenerationBacklogError(
+                f"Admitted Cosmos3 work needs about {math.ceil(finish - now)} s "
+                f"for this request at {service:.1f} s per generation, beyond "
+                "the request deadline. Retry later"
+            )
+        else:
+            pass
+
+    def generation_fits(
+        self, context: UMMContext, history: Cosmos3History, now: float
+    ) -> bool:
+        """Whether one more generation and the turn that inspects it can end
+        before the deadline, behind the generations older requests may run.
+
+        Applies the admission estimate turn by turn, so a request that an
+        estimate measured later shows short of time answers with what it has.
+        """
+        service = self.generation_times.maximum(now, self.window_s)
+        if service is None:
+            return True
+        else:
+            pass
+        reasoning = self.reason_times.maximum(now, self.window_s) or 0.0
+        older = sum(
+            other.generations_left
+            for other in tuple(self.histories.values())
+            if other.order < history.order
+        )
+        return now + 2 * reasoning + service * (older + 2) <= context.deadline
 
     def start(self, context: UMMContext) -> UMMStep:
         try:
@@ -534,11 +638,15 @@ class Cosmos3UMMAdapter:
         options = generation_options(context.request)
         check_media_policy(options)
         generations = (context.remaining_dispatches - 1) // 2
+        now = self.clock()
+        self.window_s = context.deadline - now
+        self.admit(context, now, generations)
         history = Cosmos3History(
             reasons_left=generations + 1,
             generations_left=generations,
             sampling=decision_sampling(context.request),
             options=options,
+            order=(context.deadline, next(self.admissions)),
         )
         self.histories[context.execution_id] = history
         for message in messages:
@@ -558,8 +666,13 @@ class Cosmos3UMMAdapter:
     ) -> UMMStep:
         # A generation and the Reasoner turn that inspects it need two more
         # dispatches after this one, so with fewer left only final remains.
-        # Every earlier generate decision used one of the planned generations.
-        if context.remaining_dispatches < 3 or history.generations_left <= 0:
+        # Every earlier generate decision used one of the planned generations,
+        # and the generation must also end in time.
+        if (
+            context.remaining_dispatches < 3
+            or history.generations_left <= 0
+            or not self.generation_fits(context, history, self.clock())
+        ):
             schema = deepcopy(FINAL_DECISION)
         else:
             generate = deepcopy(GENERATE_DECISION)
@@ -596,11 +709,14 @@ class Cosmos3UMMAdapter:
         # ones equal to its placeholders too.
         metadata = {EXPLICIT_GENERATION_PARAMS_KEY: sorted(history.sampling)}
         request = OmniRequest({"messages": messages}, params, metadata)
+        history.dispatched_at = self.clock()
         return UMMStep(REASON, request, outputs)
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         history = self.histories[context.execution_id]
+        now = self.clock()
         if phase == REASON:
+            self.reason_times.record(now, now - history.dispatched_at)
             decision = interpret_reasoner(result)
             history.reasons_left -= 1
             outputs = (UMMOutput("text", decision.text),) if decision.text else ()
@@ -625,6 +741,10 @@ class Cosmos3UMMAdapter:
                 return UMMStep(GENERATE, request, outputs)
         elif phase == GENERATE and history.decision is not None:
             decision = history.decision
+            if isinstance(result, dict):
+                self.generation_times.record(now, result.get("service_s"))
+            else:
+                pass
             if isinstance(result, dict) and result.get("media") == []:
                 # A generation native refused, such as a guardrail block, goes
                 # back to the Reasoner, which can explain it or revise.
@@ -682,4 +802,6 @@ class Cosmos3UMMAdapter:
         return OmniRequest(
             {"prompt": decision.generation["prompt"]},
             {"diffusion": options, "stream": False},
+            # The generation stage serves the oldest request first.
+            {DEADLINE_METADATA_KEY: list(history.order)},
         )
