@@ -10,7 +10,6 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Any
 
 import mlx.core as mx
 import numpy as np
@@ -26,7 +25,7 @@ _MLX_DTYPES = {
 }
 
 
-def normalize_dtype_name(value: Any) -> str:
+def normalize_dtype_name(value: object) -> str:
     name = str(value).lower().removeprefix("torch.").removeprefix("mlx.core.")
     if name not in _MLX_DTYPES:
         raise ValueError(
@@ -77,7 +76,7 @@ def map_hift_weight(name: str) -> str:
 
 
 def as_batch(
-    value: Any,
+    value: object,
     *,
     name: str,
     dtype: mx.Dtype,
@@ -229,19 +228,19 @@ class FunCosyVoice3MlxVocoder:
         mx.eval(
             flow.parameters(),
             hift.parameters(),
-            flow.decoder.rand_noise,
-            hift.stft_window,
-            hift.m_source.l_sin_gen.rand_ini,
+            flow.decoder._rand_noise,  # noqa: leading-underscore
+            hift._stft_window,  # noqa: leading-underscore
+            hift.m_source.l_sin_gen._rand_ini,  # noqa: leading-underscore
         )
         return cls(flow=flow, hift=hift, config=config, dtype=dtype)
 
     def decode_mx(
         self,
         *,
-        token: Any,
-        prompt_token: Any,
-        prompt_feat: Any,
-        embedding: Any,
+        token: object,
+        prompt_token: object,
+        prompt_feat: object,
+        embedding: object,
     ) -> mx.array:
         """Decode one request to a rank-one MLX waveform."""
         token = as_batch(token, name="token", dtype=mx.int32)
@@ -296,11 +295,11 @@ class FunCosyVoice3MlxVocoder:
     def decode(
         self,
         *,
-        token: Any,
-        prompt_token: Any,
-        prompt_feat: Any,
-        embedding: Any,
-    ) -> np.ndarray:
+        token: object,
+        prompt_token: object,
+        prompt_feat: object,
+        embedding: object,
+    ) -> np.ndarray[tuple[int, ...], np.dtype[np.float32]]:
         """Decode one request and return a contiguous float32 NumPy waveform."""
         waveform = np.asarray(
             self.decode_mx(

@@ -102,7 +102,7 @@ def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, A
 class NativeGenerationScheduler(SimpleScheduler):
     """Keep scheduler and pipeline execution in the native SGLang runtime."""
 
-    def __init__(self, generator: Any, output_dir: str):
+    def __init__(self, generator: object, output_dir: str):
         self.generator = generator
         self.output_dir = output_dir
         self.native_requests: dict[str, GenerationRequest] = {}

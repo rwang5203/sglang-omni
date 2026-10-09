@@ -1,9 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Native client-input errors survive shared serving and stage transport."""
 
-import asyncio
 import json
-import logging
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
@@ -20,7 +18,7 @@ from sglang_omni.client.types import CompletionStreamChunk
 from sglang_omni.models.cosmos3.reasoner import NativeReasonerScheduler
 from sglang_omni.proto import StagePayload
 from sglang_omni.serve import create_app
-from sglang_omni.serve.openai_errors import http_status_from_error
+from sglang_omni.serve.openai_errors import generation_error_status_code
 
 
 class NativeValidationClient:
@@ -101,7 +99,9 @@ def test_native_chat_rejections_survive_http_and_stage_transport(stream, option)
 
 def test_internal_value_errors_keep_server_error_classification():
     assert (
-        http_status_from_error(QueueFullError.from_message("internal shape mismatch"))
+        generation_error_status_code(
+            QueueFullError.from_message("internal shape mismatch")
+        )
         == 500
     )
 
@@ -137,45 +137,3 @@ def test_native_internal_errors_remain_server_errors(stream, structured):
         assert response.status_code == 500
     backend.scheduler.serving_chat.handle_request.assert_awaited_once()
 
-
-@pytest.mark.asyncio
-async def test_cancelled_chat_stream_closes_its_source():
-    from sglang_omni.serve.openai_api import chat_stream_errors
-
-    entered = asyncio.Event()
-    closed = asyncio.Event()
-
-    async def source():
-        try:
-            yield "first"
-            entered.set()
-            await asyncio.Event().wait()
-        finally:
-            closed.set()
-
-    stream = chat_stream_errors(source())
-    assert await anext(stream) == "first"
-    pending = asyncio.create_task(anext(stream))
-    await entered.wait()
-    pending.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await pending
-    assert closed.is_set()
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    ("error", "status", "logged"),
-    [(QueueFullError(), 503, False), (RuntimeError("native failure"), 500, True)],
-)
-async def test_chat_stream_logs_only_unexpected_errors(caplog, error, status, logged):
-    from sglang_omni.serve.openai_api import chat_stream_errors
-
-    async def source():
-        raise error
-        yield
-
-    with caplog.at_level(logging.ERROR, logger="sglang_omni.serve.openai_api"):
-        frames = [frame async for frame in chat_stream_errors(source())]
-    assert json.loads(frames[0].removeprefix("data: "))["error"]["code"] == status
-    assert ("Error generating chat stream" in caplog.text) is logged

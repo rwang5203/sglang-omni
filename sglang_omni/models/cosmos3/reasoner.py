@@ -124,7 +124,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
     return kwargs
 
 
-def response_dict(response: Any) -> dict:
+def response_dict(response: object) -> dict:
     if isinstance(response, dict):
         return response
     else:
@@ -146,9 +146,9 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
 
     def __init__(
         self,
-        engine: Any,
-        serving_chat: Any,
-        request_type: Any,
+        engine: object,
+        serving_chat: object,
+        request_type: object,
         max_concurrency: int | None = None,
         device: int | None = None,
     ):
