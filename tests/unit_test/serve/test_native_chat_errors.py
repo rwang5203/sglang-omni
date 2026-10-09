@@ -59,13 +59,13 @@ class NativeValidationClient:
     [
         {"stream_options": {"include_usage": "invalid"}},
         {"n": 2},
-        {"stage_params": {"reasoner": {"return_sampling_mask": True}}},
+        {"return_sampling_mask": True},
         {"stream_options": {"include_usage": QueueFullError.MESSAGE}},
     ],
 )
 def test_native_chat_rejections_survive_http_and_stage_transport(stream, option):
     backend = NativeValidationClient()
-    native_validation = "stage_params" in option
+    native_validation = "return_sampling_mask" in option
     if native_validation:
         native = object.__new__(OpenAIServingChat)
         backend.scheduler.serving_chat.handle_request = AsyncMock(
@@ -74,7 +74,7 @@ def test_native_chat_rejections_survive_http_and_stage_transport(stream, option)
     body = {
         "messages": [{"role": "user", "content": "hello"}],
         "stream": stream,
-        **option,
+        "stage_params": {"reasoner": option},
     }
     with TestClient(create_app(backend, model_name="native-model")) as client:
         response = client.post("/v1/chat/completions", json=body)
@@ -136,4 +136,3 @@ def test_native_internal_errors_remain_server_errors(stream, structured):
     else:
         assert response.status_code == 500
     backend.scheduler.serving_chat.handle_request.assert_awaited_once()
-

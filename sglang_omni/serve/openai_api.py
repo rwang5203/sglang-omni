@@ -1181,7 +1181,7 @@ def build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
         explicit_generation_params(req),
     )
 
-    extra_params: dict[str, object] = dict(req.model_extra or {})
+    extra_params: dict[str, int | float] = {}
     for field_name, value in (
         ("talker_temperature", req.talker_temperature),
         ("talker_top_p", req.talker_top_p),

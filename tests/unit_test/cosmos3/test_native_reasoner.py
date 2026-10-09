@@ -34,6 +34,7 @@ class NativeRequest(SimpleNamespace):
         "seed",
         "max_tokens",
         "stream",
+        "stream_options",
         "logprobs",
         "return_meta_info",
         "return_token_ids",
@@ -319,6 +320,7 @@ def test_stream_preserves_unicode_without_duplicate_terminal_text():
             )
 
         assert engine.aborts == []
+        assert chat.calls[0].stream_options == {"include_usage": True}
         assert sum(chunk.finish_reason is not None for chunk in chunks) == 1
         assert chunks[-1].finish_reason == "stop"
         assert all(chunk.text for chunk in chunks[:-1])

@@ -120,6 +120,11 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         kwargs["return_token_ids"] = True
     else:
         pass
+    if kwargs.get("stream"):
+        # The stage result reports the final usage, as other Omni stages do.
+        kwargs.setdefault("stream_options", {"include_usage": True})
+    else:
+        pass
     kwargs.update(model=model, messages=messages, rid=payload.request_id, n=1)
     return kwargs
 
