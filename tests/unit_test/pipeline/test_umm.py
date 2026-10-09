@@ -588,7 +588,10 @@ def test_pipeline_config_accepts_only_the_umm_wiring(changes, message):
     if message is None:
         config = build()
         assert config.entry_stage_admission_limit() == 4
-        assert config.stage_factory_kwargs("orchestrator") == {"output_stage": "output"}
+        assert config.stage_factory_kwargs("orchestrator") == {
+            "output_stage": "output",
+            "stage_name": "orchestrator",
+        }
     else:
         with pytest.raises(ValueError, match=message):
             build()
@@ -791,12 +794,14 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
             return super().start(context)
 
     adapter = Planner()
+    # A controller stage named other than the default, which errors must name.
     controller = make_controller(
-        adapter, limits=limits(timeout_s=1), clock=lambda: clock[0]
+        adapter,
+        limits=limits(timeout_s=1),
+        stage_name="planner",
+        clock=lambda: clock[0],
     )
-    orchestrator = make_stage(
-        name="orchestrator", get_next=route_umm, scheduler=controller
-    )
+    orchestrator = make_stage(name="planner", get_next=route_umm, scheduler=controller)
     orchestrator.send_to_stage = AsyncMock()
     orchestrator.active_requests.add("req")
     await orchestrator.execute(initial())
@@ -824,6 +829,7 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
         "shed": (503, "Retry it later", "shed"),
     }[ending]
     assert generation_error_status_code(error) == status and wording in str(error)
+    assert "stages.planner.factory.timeout_s" in str(error)
     assert adapter.closed == [reason]
     assert list(controller.contexts) == ([] if ending == "deadline" else ["other"])
     with pytest.raises(RuntimeError, match="inactive request"):

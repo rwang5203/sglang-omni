@@ -211,16 +211,6 @@ class UMMDeadlineError(TimeoutError):
     """A UMM request reached its timeout_s deadline. Its close reason is expired."""
 
 
-def budget_error(name: str, limit: int, *, client: bool) -> Exception:
-    # Before the first dispatch only the client's input exists, so a bound it
-    # crosses is a client error. Later breaches come from model output.
-    detail = (
-        f"UMM request exceeds {name}={limit}. "
-        f"Raise stages.<orchestrator>.factory.{name} to allow more"
-    )
-    return UMMRequestError(detail) if client else RuntimeError(detail)
-
-
 def encoded_bytes(output: UMMOutput) -> int:
     if isinstance(output.data, str):
         return len(output.data.encode("utf-8"))
@@ -243,6 +233,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         limits: UMMLimits,
         phases: Mapping[str, str],
         output_stage: str,
+        stage_name: str = "orchestrator",
         clock: MonotonicClock = time.monotonic,
     ) -> None:
         if not phases or not all(
@@ -256,6 +247,8 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         self.limits = limits
         self.phases = dict(phases)
         self.output_stage = output_stage
+        # Errors name the settings of this controller's own stage.
+        self.factory_prefix = f"stages.{stage_name}.factory"
         self.clock = clock
         self.contexts: dict[str, UMMContext] = {}
         self.lock = threading.Lock()
@@ -294,10 +287,19 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         for request_id in request_ids:
             self.release(request_id, "shutdown")
 
+    def budget_error(self, name: str, limit: int, *, client: bool) -> Exception:
+        # Before the first dispatch only the client's input exists, so a bound it
+        # crosses is a client error. Later breaches come from model output.
+        detail = (
+            f"UMM request exceeds {name}={limit}. "
+            f"Raise {self.factory_prefix}.{name} to allow more"
+        )
+        return UMMRequestError(detail) if client else RuntimeError(detail)
+
     def deadline_error(self) -> UMMDeadlineError:
         return UMMDeadlineError(
             f"UMM request deadline exceeded after timeout_s={self.limits.timeout_s}. "
-            "Raise stages.<orchestrator>.factory.timeout_s for longer requests"
+            f"Raise {self.factory_prefix}.timeout_s for longer requests"
         )
 
     def shed_error(self) -> QueueFullError:
@@ -306,7 +308,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             f"{QueueFullError.MESSAGE} The UMM request was ended before its "
             f"timeout_s={self.limits.timeout_s} deadline because this deployment "
             "cannot finish it in time at its current load. Retry it later, or "
-            "raise stages.<orchestrator>.factory.timeout_s or add serving capacity"
+            f"raise {self.factory_prefix}.timeout_s or add serving capacity"
         )
 
     def check_deadline(self, context: UMMContext) -> None:
@@ -487,7 +489,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 "unconsumed. Pass it to the next phase so its owner releases it"
             )
         elif len(context.outputs) + len(step.outputs) > limits.max_outputs:
-            raise budget_error("max_outputs", limits.max_outputs, client=client)
+            raise self.budget_error("max_outputs", limits.max_outputs, client=client)
         else:
             pass
         retained = context.output_bytes + sum(
@@ -497,7 +499,7 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         if type(state_bytes) is not int or state_bytes < 0:
             raise TypeError("UMM adapter usage must return a byte count")
         elif retained + state_bytes > limits.max_retained_bytes:
-            raise budget_error(
+            raise self.budget_error(
                 "max_retained_bytes", limits.max_retained_bytes, client=client
             )
         elif step.phase is None and (
@@ -509,11 +511,13 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         elif step.request is None:
             raise ValueError(f"UMM step for phase {step.phase!r} has no request")
         elif context.remaining_dispatches <= 0:
-            raise budget_error("max_dispatches", limits.max_dispatches, client=False)
+            raise self.budget_error(
+                "max_dispatches", limits.max_dispatches, client=False
+            )
         elif step.phase not in self.phases:
             raise ValueError(
                 f"UMM adapter chose unmapped phase {step.phase!r}. "
-                "Map it in stages.<orchestrator>.factory.phases"
+                f"Map it in {self.factory_prefix}.phases"
             )
         else:
             stage = self.phases[step.phase]
@@ -642,11 +646,13 @@ def create_umm_controller(
     max_active: int,
     max_retained_bytes: int,
     timeout_s: float,
+    stage_name: str = "orchestrator",
 ) -> UMMController:
     """Build the controller around the adapter of the model being served.
 
     adapter is the import path of a callable that takes model_path and
-    returns the model's UMMAdapter.
+    returns the model's UMMAdapter. stage_name is the controller's stage,
+    which UMMPipelineConfig passes so that errors name its settings.
     """
     adapter_factory = import_string(adapter)
     if not callable(adapter_factory):
@@ -669,6 +675,7 @@ def create_umm_controller(
         ),
         phases=phases,
         output_stage=output_stage,
+        stage_name=stage_name,
     )
 
 
@@ -715,7 +722,10 @@ class UMMPipelineConfig(PipelineConfig):
 
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
         if stage_name == type(self).umm_controller_stage:
-            return {"output_stage": type(self).umm_output_stage}
+            return {
+                "output_stage": type(self).umm_output_stage,
+                "stage_name": stage_name,
+            }
         else:
             return super().stage_factory_kwargs(stage_name)
 
