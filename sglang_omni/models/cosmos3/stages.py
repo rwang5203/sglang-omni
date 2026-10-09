@@ -5,13 +5,13 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import queue
 import shutil
 import tempfile
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
@@ -20,6 +20,7 @@ from sglang_omni.preprocessing.resource_connector import (
     get_global_resource_connector,
 )
 from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 logger = logging.getLogger(__name__)
@@ -91,8 +92,8 @@ def model_request_fields(server_args: object) -> frozenset[str]:
 
 
 def resolve_generation_options(
-    request_params: dict[str, Any], inputs: dict[str, Any] | None = None
-) -> dict[str, Any]:
+    request_params: dict[str, object], inputs: dict[str, object] | None = None
+) -> dict[str, object]:
     """Lower common SDK seeds and native overrides with one precedence rule."""
     params = {}
     if request_params.get("seed") is not None:
@@ -144,7 +145,7 @@ def build_sampling_params(
     payload: StagePayload,
     output_dir: str,
     request_fields: frozenset[str] = COMMON_REQUEST_FIELDS,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     """Lower a request to native sampling fields that clients may set."""
     inputs = payload.request.inputs
     if isinstance(inputs, str):
@@ -193,7 +194,7 @@ def build_sampling_params(
 
 
 def police_media_inputs(
-    params: dict[str, Any], request_fields: frozenset[str], directory: Path
+    params: dict[str, object], request_fields: frozenset[str], directory: Path
 ) -> list[Path]:
     """Apply the server media policy to client media paths and URLs.
 
@@ -319,7 +320,12 @@ class NativeGenerationScheduler(SimpleScheduler):
         else:
             pass
 
-    def emit_result(self, request_id, result, outbox) -> None:
+    def emit_result(
+        self,
+        request_id: str,
+        result: object,
+        outbox: queue.Queue[OutgoingMessage],
+    ) -> None:
         directory = None
         with self.abort_lock:
             request = self.native_requests.get(request_id)
@@ -337,8 +343,10 @@ class NativeGenerationScheduler(SimpleScheduler):
         else:
             pass
 
-    def claim_result(self, result: StagePayload, *, terminal: bool) -> bool:
-        if not terminal:
+    def claim_result(self, result: object, *, terminal: bool) -> bool:
+        if not isinstance(result, StagePayload):
+            return False
+        elif not terminal:
             raise ValueError(
                 "Saved native media requires terminal delivery. "
                 "Use inline media for inter-stage routing"
@@ -354,7 +362,11 @@ class NativeGenerationScheduler(SimpleScheduler):
             request.delivering = True
             return True
 
-    def release_result(self, result: StagePayload, *, delivered: bool) -> None:
+    def release_result(self, result: object, *, delivered: bool) -> None:
+        if not isinstance(result, StagePayload):
+            return
+        else:
+            pass
         directory = None
         with self.abort_lock:
             request = self.native_requests.get(result.request_id)
@@ -478,9 +490,9 @@ class GenerationRequest:
 def native_server_kwargs(
     model_path: str,
     gpu_id: int,
-    overrides: dict[str, Any] | None,
+    overrides: dict[str, object] | None,
     runtime_gpu_ids: list[int] | None = None,
-) -> dict[str, Any]:
+) -> dict[str, object]:
     kwargs = dict(overrides or {})
     if kwargs.get("scheduler_rpc_timeout") is not None:
         raise ValueError(
@@ -524,7 +536,7 @@ def create_generation_scheduler(
     gpu_id: int | None = None,
     output_dir: str = "outputs",
     runtime_gpu_ids: list[int] | None = None,
-    server_args_overrides: dict[str, Any] | None = None,
+    server_args_overrides: dict[str, object] | None = None,
 ) -> NativeGenerationScheduler:
     from sglang_omni.utils.device import resolve_concrete_device
 

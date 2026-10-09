@@ -99,6 +99,7 @@ def resolve_coordinator_max_in_flight(
 class StageLaunchKwargs(TypedDict):
     stage_name: str
     factory: str
+    allow_child_processes: bool
     next_stages: str | list[str] | None
     route_fn: str | None
     is_terminal: bool
