@@ -4,13 +4,11 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import gc
 import logging
 import multiprocessing
 import os
 import queue
-import signal
 import sys
 import time
 from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
@@ -325,13 +323,6 @@ class StageGroup:
             self._processes
         )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
 
-    @property
-    def is_ready(self) -> bool:
-        """Every planned process has completed stage startup."""
-        return len(self.ready_events) == self.process_count and all(
-            event.is_set() for event in self.ready_events
-        )
-
     def process_start_attempts(self) -> set[str]:
         """Return process names whose ``Process.start()`` was called."""
         return set(
@@ -500,10 +491,6 @@ class StageGroup:
             self.startup_error_channels.clear()
 
 
-def exit_on_sigterm(signum, frame) -> None:
-    raise SystemExit(128 + signum)
-
-
 def stage_process_main(
     spec: StageWorkerProcessSpec,
     ready_event: Event,
@@ -526,19 +513,8 @@ def stage_process_main(
     else:
         pass
     log = logging.getLogger(f"stage_workers.{spec.process_name}")
-    # Interpreter shutdown otherwise spends its final collections walking
-    # every tracked object of the stage import graph after its children
-    # are already joined. Freezing them right before finalization keeps
-    # every atexit handler unchanged and skips redundant collection passes.
-    atexit.register(gc.freeze)
 
-    previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:
-        if previous_sigterm == signal.SIG_DFL:
-            # Startup rollback must run registered native process finalizers.
-            signal.signal(signal.SIGTERM, exit_on_sigterm)
-        else:
-            pass
         for stage_spec in spec.stage_specs:
             prepare_accelerator_environment(stage_spec, log)
         apply_gpu_compat_env_defaults()
@@ -572,11 +548,6 @@ def stage_process_main(
         else:
             pass
         sys.exit(1)
-    finally:
-        if signal.getsignal(signal.SIGTERM) is exit_on_sigterm:
-            signal.signal(signal.SIGTERM, previous_sigterm)
-        else:
-            pass
 
 
 def run_process(

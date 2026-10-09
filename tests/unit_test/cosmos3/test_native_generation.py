@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -43,8 +44,6 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         "guidance_scale": 0.0,
         "num_frames": 33,
         "seed": 0,
-        "output_path": "/unowned",
-        "output_file_name": "../outside",
     }
     request = payload(original, diffusion={"guidance_scale": 5.0})
     first = build_sampling_params(request, str(tmp_path))
@@ -58,7 +57,6 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
     assert first["output_file_name"] != second["output_file_name"]
     assert "/" not in first["output_file_name"]
     assert original["guidance_scale"] == 0.0
-    assert original["output_file_name"] == "../outside"
 
 
 @pytest.mark.parametrize(
@@ -70,7 +68,9 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         payload({"seed": 1}),
         payload("A lake", diffusion=[]),
         payload("A lake", stream=True),
-        payload({"prompt": "A lake", "prompt_file_path": "prompts.txt"}),
+        payload({"prompt": "A lake", "prompt_path": "prompts.txt"}),
+        payload("A lake", diffusion={"output_path": "/unowned"}),
+        payload("A lake", stage_params={"generation": {"num_outputs_per_prompt": 11}}),
     ],
 )
 def test_invalid_request_is_rejected_before_native_dispatch(invalid_payload, tmp_path):
@@ -117,14 +117,51 @@ def test_native_failure_cannot_become_empty_success(result, tmp_path):
         scheduler.generate(payload())
 
 
-def test_dead_native_worker_fails_the_owning_stage(tmp_path):
-    generator = Generator(None)
-    generator.local_scheduler_process = [
-        SimpleNamespace(pid=1234, exitcode=2, is_alive=lambda: False)
-    ]
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_dead_native_worker_fails_the_owning_stage(tmp_path, in_flight):
+    import multiprocessing
+    import time
+
+    worker = multiprocessing.get_context("spawn").Process(
+        target=time.sleep, args=(60,), daemon=True
+    )
+    worker.start()
+    entered = threading.Event()
+
+    class BlockedGenerator(Generator):
+        def generate(self, **kwargs):
+            # Native generation never returns once its scheduler is gone.
+            entered.set()
+            threading.Event().wait()
+
+    generator = BlockedGenerator(None)
+    generator.local_scheduler_process = [worker]
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    with pytest.raises(RuntimeError, match="1234 exited with code 2"):
+    failures = queue.Queue()
+
+    def run_request():
+        try:
+            scheduler.generate(payload())
+        except RuntimeError as exc:
+            failures.put(exc)
+
+    if in_flight:
+        threading.Thread(target=run_request, daemon=True).start()
+        assert entered.wait(5)
+    else:
+        pass
+    worker.kill()
+    worker.join(5)
+    if in_flight:
+        assert f"{worker.pid} exited" in str(failures.get(timeout=5))
+    else:
+        pass
+    deadline = time.monotonic() + 5
+    while scheduler.worker_failure is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match=f"{worker.pid} exited"):
         scheduler.next_message()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_queued_abort_does_not_dispatch_native_work(tmp_path):
@@ -169,8 +206,11 @@ def test_generate_route_parameters_reach_the_native_request(tmp_path):
     assert params["num_inference_steps"] == 35
 
 
-def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path):
+@pytest.mark.parametrize("mode", ["native", "plugin"])
+def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path, mode):
     from pathlib import Path
+
+    from sglang_omni.native_generation import cancellation
 
     started = threading.Event()
     settled = threading.Event()
@@ -178,18 +218,27 @@ def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path
     keep.write_text("keep")
 
     class CancellableGenerator(Generator):
-        supports_cancellation = True
-
-        def generate(self, *, sampling_params_kwargs, cancellation_event):
-            target = Path(sampling_params_kwargs["output_path"]) / "partial.mp4"
-            target.write_bytes(b"partial")
+        def generate(self, *, sampling_params_kwargs, **kwargs):
+            directory = Path(sampling_params_kwargs["output_path"])
+            (directory / "partial.mp4").write_bytes(b"partial")
             started.set()
-            assert cancellation_event.wait(3)
+            if mode == "native":
+                assert kwargs["cancellation_event"].wait(3)
+            else:
+                # The native worker stops once its stage marks the request.
+                assert (directory / cancellation.ARMED_MARKER).exists()
+                marker = directory / cancellation.CANCELLED_MARKER
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert marker.exists()
             settled.set()
-            raise RuntimeError("native cancellation settled")
+            return None
 
     generator = CancellableGenerator(None)
-    scheduler = NativeGenerationScheduler(generator, str(tmp_path))
+    scheduler = NativeGenerationScheduler(
+        generator, str(tmp_path), cancellation_mode=mode
+    )
     scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload()))
     thread = threading.Thread(target=scheduler.start)
     thread.start()
@@ -232,3 +281,30 @@ def test_abort_between_native_completion_and_omni_emission_releases_media(tmp_pa
     assert scheduler.outbox.empty()
     assert not list(tmp_path.iterdir())
     assert not scheduler.native_requests
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_media_paths_follow_the_server_media_policy(tmp_path, monkeypatch, inside):
+    from sglang_omni.models.cosmos3 import stages
+    from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
+
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    image = (allowed if inside else tmp_path) / "input.png"
+    image.write_bytes(b"image")
+    connector = MultiModalResourceConnector(allowed_local_media_path=allowed)
+    monkeypatch.setattr(stages, "get_global_resource_connector", lambda: connector)
+    output = tmp_path / "outputs"
+    output.mkdir()
+    generator = Generator(None)
+    scheduler = NativeGenerationScheduler(generator, str(output))
+    request = payload({"prompt": "A lake", "image_path": str(image)})
+    with pytest.raises((RuntimeError, ValueError)) as failure:
+        scheduler.generate(request)
+    if inside:
+        assert "without producing an output" in str(failure.value)
+        assert generator.calls[0]["sampling_params_kwargs"]["image_path"] == str(image)
+    else:
+        assert "image_path refused" in str(failure.value)
+        assert generator.calls == []
+    assert list(output.iterdir()) == []

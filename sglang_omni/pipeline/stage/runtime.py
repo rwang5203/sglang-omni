@@ -60,7 +60,11 @@ from sglang_omni.proto import (
 )
 from sglang_omni.proto.session import find_session_operation
 from sglang_omni.relay.base import Relay
-from sglang_omni.scheduling.message import IncomingMessage, StageScheduler
+from sglang_omni.scheduling.message import (
+    IncomingMessage,
+    ResultOwningScheduler,
+    StageScheduler,
+)
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -139,6 +143,10 @@ class Stage:
         self.control_plane = control_plane
         self.input_handler = input_handler or DirectInput()
         self.scheduler = scheduler
+        # Resolved once, so stages whose scheduler owns nothing route as before.
+        self.result_owner = (
+            scheduler if isinstance(scheduler, ResultOwningScheduler) else None
+        )
         self.project_payload = project_payload or {}
         self.stream_targets = stream_targets or []
         self.get_stream_done_targets = get_stream_done_targets
@@ -1324,8 +1332,8 @@ class Stage:
                         await self.send_failure(out.request_id, str(out.data))
                     else:
                         pass
-                elif out.type == "result":
-                    self.release_scheduler_result(out.data, delivered=False)
+                elif out.type == "result" and self.result_owner is not None:
+                    self.result_owner.release_result(out.data, delivered=False)
                 else:
                     pass
 
@@ -1352,7 +1360,10 @@ class Stage:
                 continue
 
             if out.type == "result":
-                self.release_scheduler_result(out.data, delivered=False)
+                if self.result_owner is not None:
+                    self.result_owner.release_result(out.data, delivered=False)
+                else:
+                    pass
                 self.clear_request_state(out.request_id)
             elif out.type == "stream":
                 continue
@@ -1454,16 +1465,13 @@ class Stage:
         else:
             pass
 
-    def release_scheduler_result(self, result: object, *, delivered: bool) -> None:
-        """Settle optional scheduler-owned resources after routing or dropping."""
-        release = getattr(self.scheduler, "release_result", None)
-        if release is not None:
-            release(result, delivered=delivered)
-        else:
-            pass
+    async def route_owned_result(self, request_id: str, result: object) -> None:
+        """Route a scheduler owned result and release it once routing settles.
 
-    async def route_result(self, request_id: str, result: object) -> None:
-        """Route a result and settle its resources even when routing fails."""
+        The release runs after routing fails or is cancelled too, and tells the
+        scheduler whether a transport accepted the result.
+        """
+        owner = self.result_owner
         delivered = False
 
         def on_submitted() -> None:
@@ -1471,21 +1479,33 @@ class Stage:
             delivered = True
 
         try:
-            await self.route_scheduler_result(request_id, result, on_submitted)
+            await self.route_result(request_id, result, on_submitted)
         except BaseException:
             try:
-                self.release_scheduler_result(result, delivered=delivered)
+                owner.release_result(result, delivered=delivered)
             except Exception:
                 logger.exception(
                     "Stage %s failed to release result for %s", self.name, request_id
                 )
             raise
-        self.release_scheduler_result(result, delivered=delivered)
+        owner.release_result(result, delivered=delivered)
 
-    async def route_scheduler_result(
-        self, request_id: str, result: object, on_submitted: Callable[[], None]
+    async def route_result(
+        self,
+        request_id: str,
+        result: object,
+        on_submitted: Callable[[], None] | None = None,
     ) -> None:
-        """Route while recording transport acceptance before local cleanup."""
+        """Route a completed result to next stage(s) or complete at coordinator.
+
+        ``on_submitted`` reports transport acceptance to a result owning
+        scheduler, which route_owned_result supplies.
+        """
+        if on_submitted is None and self.result_owner is not None:
+            await self.route_owned_result(request_id, result)
+            return
+        else:
+            pass
         if not self.owns_external_io:
             self.clear_request_state(request_id)
             return
@@ -1497,14 +1517,19 @@ class Stage:
             else None
         )
         if session_operation is not None and session_operation.operation != "append":
-            await self.control_plane.send_complete(
-                CompleteMessage(
-                    request_id=request_id,
-                    from_stage=self.name,
-                    success=True,
-                    result=result.data,
-                )
+            message = CompleteMessage(
+                request_id=request_id,
+                from_stage=self.name,
+                success=True,
+                result=result.data,
             )
+            if on_submitted is None:
+                await self.control_plane.send_complete(message)
+            else:
+                await self.control_plane.send_complete(
+                    message, on_submitted=on_submitted
+                )
+                on_submitted()
             self.clear_request_state(request_id)
             return
         else:
@@ -1537,14 +1562,17 @@ class Stage:
                 pass
         else:
             pass
-        next_stages = (
-            self.get_next(request_id, result) if session_operation is None else actual
-        )
-        claim_result = getattr(self.scheduler, "claim_result", None)
-        if claim_result is not None and not claim_result(
-            result, terminal=next_stages is None
-        ):
-            return
+        if on_submitted is not None:
+            # Claim before any stream completion, so a refused result sends none.
+            next_stages = (
+                self.get_next(request_id, result)
+                if session_operation is None
+                else actual
+            )
+            if not self.result_owner.claim_result(result, terminal=next_stages is None):
+                return
+            else:
+                pass
         else:
             pass
         # Send stream done to the active stream targets for this request.
@@ -1569,6 +1597,14 @@ class Stage:
                 is_done=True,
             )
 
+        if on_submitted is None:
+            next_stages = (
+                self.get_next(request_id, result)
+                if session_operation is None
+                else actual
+            )
+        else:
+            pass
         if next_stages is None:
             # Terminal: notify coordinator
             _emit_event(
@@ -1583,13 +1619,13 @@ class Stage:
                 success=True,
                 result=result.data if isinstance(result, StagePayload) else result,
             )
-            if getattr(self.scheduler, "release_result", None) is None:
+            if on_submitted is None:
                 await self.control_plane.send_complete(message)
             else:
                 await self.control_plane.send_complete(
                     message, on_submitted=on_submitted
                 )
-            on_submitted()
+                on_submitted()
         else:
             if isinstance(next_stages, str):
                 next_stages = [next_stages]
@@ -1611,7 +1647,10 @@ class Stage:
                     allow_projected_local_object=not is_single_target,
                     stream_targets_for_request=stream_targets_for_request,
                 )
-                on_submitted()
+                if on_submitted is not None:
+                    on_submitted()
+                else:
+                    pass
 
         self.clear_request_state(request_id)
 
