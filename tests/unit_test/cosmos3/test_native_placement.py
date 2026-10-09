@@ -20,7 +20,10 @@ def config(devices=(1, 3)):
 
 
 def test_native_workers_reserve_all_gpus_but_use_one_omni_process(monkeypatch):
+    from sglang_omni.utils import cpu
+
     monkeypatch.setattr(runtime_config, "visible_device_count", lambda: 4)
+    monkeypatch.setattr(cpu, "effective_cpu_count", lambda: 10)
     cfg = config()
     prep = runtime_config.prepare_pipeline_runtime(cfg)
     try:
@@ -37,6 +40,8 @@ def test_native_workers_reserve_all_gpus_but_use_one_omni_process(monkeypatch):
         spec = groups[0].specs[0]
         assert spec.tp_size == 1
         assert spec.factory_kwargs["runtime_gpu_ids"] == [1, 3]
+        # Each of the two native workers gets its own share, not the plan's.
+        assert spec.env_defaults["OMP_NUM_THREADS"] == "5"
     finally:
         prep.runtime_dir.close()
 
