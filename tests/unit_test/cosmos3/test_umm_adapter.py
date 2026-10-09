@@ -185,7 +185,6 @@ def decision_text(kind, text, generation):
     "response",
     [
         {"text": "Here is an image prompt: A blue cube"},
-        {"text": '```json\n{"kind":"final","text":"done","generation":null}\n```'},
         {"text": '{"kind":"final","kind":"final","text":"done","generation":null}'},
         {
             "text": '{"kind":"final","text":"done","generation":null}',
