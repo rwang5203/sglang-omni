@@ -6,8 +6,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 
-from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
-from sglang_omni.serve.native_media import resolve_native_media_frontend
+from sglang_omni.native_generation.media import build_native_media_app
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -34,13 +33,10 @@ def test_native_owner_failure_contract_is_required(monkeypatch, supported):
     monkeypatch.setattr(
         http_server, "create_app", lambda args: initialized.append(args) or app
     )
-    config = Cosmos3PipelineConfig(model_path="checkpoint")
-    frontend = resolve_native_media_frontend(config, host="127.0.0.1", port=19000)
-    assert initialized == []
     if supported:
-        assert frontend() is app
+        assert build_native_media_app({}) is app
         assert len(initialized) == 1
     else:
         with pytest.raises(RuntimeError, match="worker_failure"):
-            frontend()
+            build_native_media_app({})
         assert initialized == []

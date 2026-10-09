@@ -38,7 +38,7 @@ from types import FrameType
 from typing import TypedDict
 
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from sglang_omni.client import Client
@@ -484,22 +484,14 @@ async def run_server(
     # 0. Check port availability before loading models
     port = find_available_port(host, port)
 
-    from sglang_omni.serve.native_media import resolve_native_media_frontend
-
-    frontend = resolve_native_media_frontend(pipeline_config, host=host, port=port)
-    native_media_app = None
-    if frontend is not None:
-        # The native frontend checks its strict ports while it builds, so it
-        # finishes before the stage's native worker binds the same ports.
-        native_media_app = await asyncio.to_thread(frontend)
-        if not isinstance(native_media_app, FastAPI):
-            raise TypeError(
-                "The native media builder must return a FastAPI application"
-            )
-        else:
-            pass
+    native_media_factory = type(pipeline_config).native_media_factory
+    if native_media_factory is not None:
+        # The native routes check their strict ports while they build, so the
+        # build finishes before the generation stage binds the same ports.
+        build = import_string(native_media_factory)(pipeline_config, port=port)
+        native_media_app = await asyncio.to_thread(build)
     else:
-        pass
+        native_media_app = None
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
@@ -574,6 +566,7 @@ async def run_server(
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
         mount_profiler_routes(app, profiler_ctl, profiler_dir)
+
         config = uvicorn.Config(
             app,
             host=host,
@@ -582,24 +575,15 @@ async def run_server(
             timeout_keep_alive=120,
         )
         server = PipelineUvicornServer(config)
-        runtime_failure = asyncio.create_task(mp_runner.wait_failed())
-        try:
-            if native_media_app is not None:
-                from sglang_omni.serve.native_media import mount_native_media_app
+        runtime_failure = mp_runner.wait_failed()
+        if native_media_app is not None:
+            from sglang_omni.native_generation.media import mount_native_media_app
 
-                mount_native_media_app(
-                    app, native_media_app, runtime_failure=runtime_failure
-                )
-            else:
-                pass
-            await serve_with_failure_watch(server, [runtime_failure])
-        finally:
-            if not runtime_failure.done():
-                runtime_failure.cancel()
-            else:
-                pass
-            with suppress(asyncio.CancelledError, Exception):
-                await runtime_failure
+            runtime_failure = asyncio.ensure_future(runtime_failure)
+            mount_native_media_app(app, native_media_app, runtime_failure)
+        else:
+            pass
+        await serve_with_failure_watch(server, [runtime_failure])
     finally:
         logger.info("Shutting down pipeline …")
         await mp_runner.stop()

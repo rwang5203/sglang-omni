@@ -8,8 +8,7 @@ from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
 
 class Cosmos3PipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
-    native_media_stage: ClassVar[str] = "generation"
-    native_media_factory_path: ClassVar[str] = (
+    native_media_factory: ClassVar[str] = (
         "sglang_omni.models.cosmos3.media.prepare_native_media_app"
     )
 
