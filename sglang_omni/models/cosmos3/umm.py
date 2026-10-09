@@ -106,9 +106,17 @@ class Decision:
 
 @dataclass
 class Cosmos3History:
-    """Chat history one request resubmits to the Reasoner, and its bytes."""
+    """Chat history one request resubmits to the Reasoner, and its bytes.
 
+    A receipt refers to its generated media instead of copying it, since the
+    controller already retains that media as an output. media_urls holds the
+    message index of each receipt and the data URL that output carries.
+    """
+
+    reasons_left: int
+    generations_left: int
     messages: list[dict[str, object]] = field(default_factory=list)
+    media_urls: list[tuple[int, str]] = field(default_factory=list)
     retained_bytes: int = 0
     decision: Decision | None = None
 
@@ -210,11 +218,98 @@ def generated_media(result: object) -> dict[str, object]:
     ):
         raise ValueError("Cosmos3 inline media identity does not match its content")
     else:
-        return item
+        return {
+            "kind": kind,
+            "mime_type": mime,
+            "size_bytes": size,
+            "sha256": item["sha256"],
+            "url": url,
+        }
 
 
 def encoded_size(message: dict[str, object]) -> int:
     return len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
+
+
+def decision_message(decision: Decision) -> dict[str, object]:
+    content = json.dumps(
+        {
+            "kind": decision.kind,
+            "text": decision.text,
+            "generation": decision.generation,
+        },
+        ensure_ascii=False,
+    )
+    return {"role": "assistant", "content": content}
+
+
+def receipt(decision: Decision, kind: str) -> dict[str, object]:
+    """The user turn that returns a generation, its media URL left empty."""
+    status = json.dumps(
+        {
+            "status": "completed",
+            "modality": kind,
+            "requested_prompt": decision.generation["prompt"],
+        },
+        ensure_ascii=False,
+    )
+    text = (
+        "Generation execution completed. Result receipt: "
+        + status
+        + "\nThe attached media is the result of your preceding generation "
+        "request. Inspect the received results against the original user's "
+        "task. If the task is complete, choose kind final with generation "
+        "null and your answer in text. Otherwise request the next needed "
+        "generation. Repeat a completed generation only when the user's "
+        "task or your assessment of its result calls for a revision."
+    )
+    part = f"{kind}_url"
+    return {
+        "role": "user",
+        "content": [{"type": "text", "text": text}, {"type": part, part: {"url": ""}}],
+    }
+
+
+def worst_case_bytes() -> tuple[int, int]:
+    """Most bytes one Reasoner turn and one generation turn can add.
+
+    A Reasoner turn adds its text output, counted in UTF-8 at up to four bytes
+    a character, and its decision in the history, where a control character
+    costs the most: seven bytes once the decision and then the message are
+    JSON encoded. A generation turn adds its media output, encoded the way the
+    controller counts outputs, and its receipt.
+    """
+    worst = Decision(
+        "generate",
+        "\x01" * MAX_TEXT_CHARS,
+        {"modality": "video", "prompt": "\x01" * MAX_PROMPT_CHARS},
+    )
+    reason = 4 * MAX_TEXT_CHARS + encoded_size(decision_message(worst))
+    mime = max((m for mimes in MEDIA_TYPES.values() for m in mimes), key=len)
+    item = {
+        "kind": "video",
+        "mime_type": mime,
+        "size_bytes": INLINE_MEDIA_LIMIT_BYTES,
+        "sha256": "0" * 64,
+        "url": data_url(mime, b""),
+    }
+    # Base64 characters need no JSON escaping.
+    media = encoded_size(item) + 4 * ((INLINE_MEDIA_LIMIT_BYTES + 2) // 3)
+    return reason, media + encoded_size(receipt(worst, "video"))
+
+
+WORST_CASE_BYTES = worst_case_bytes()
+
+
+def max_model_bytes(max_dispatches: int) -> int:
+    """Most bytes a request's model turns can retain within max_dispatches.
+
+    The first dispatch is a Reasoner turn, and each generation is followed by
+    a Reasoner turn that inspects it.
+    """
+    generations = (max_dispatches - 1) // 2
+    reason, generation = WORST_CASE_BYTES
+    return (generations + 1) * reason + generations * generation
 
 
 class Cosmos3UMMAdapter:
@@ -249,7 +344,10 @@ class Cosmos3UMMAdapter:
             )
         else:
             messages.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
-        history = Cosmos3History()
+        generations = (context.remaining_dispatches - 1) // 2
+        history = Cosmos3History(
+            reasons_left=generations + 1, generations_left=generations
+        )
         self.histories[context.execution_id] = history
         for message in messages:
             self.remember(history, message)
@@ -307,10 +405,17 @@ class Cosmos3UMMAdapter:
         )
         params.setdefault("temperature", 0.0)
         params.setdefault("max_tokens", 2048)
+        messages = list(history.messages)
+        for index, url in history.media_urls:
+            message = messages[index]
+            text, media = message["content"]
+            part = media["type"]
+            messages[index] = {
+                **message,
+                "content": [text, {"type": part, part: {"url": url}}],
+            }
         request = OmniRequest(
-            {"messages": list(history.messages)},
-            params,
-            deepcopy(context.request.metadata),
+            {"messages": messages}, params, deepcopy(context.request.metadata)
         )
         return UMMStep(REASON, request, outputs)
 
@@ -318,11 +423,13 @@ class Cosmos3UMMAdapter:
         history = self.histories[context.execution_id]
         if phase == REASON:
             decision = interpret_reasoner(result)
+            history.reasons_left -= 1
             outputs = (UMMOutput("text", decision.text),) if decision.text else ()
             if decision.kind == "final":
                 return UMMStep(outputs=outputs)
             else:
                 history.decision = decision
+                self.remember(history, decision_message(decision))
                 request = self.generation_request(context, decision)
                 return UMMStep(GENERATE, request, outputs)
         elif phase == GENERATE and history.decision is not None:
@@ -334,16 +441,31 @@ class Cosmos3UMMAdapter:
                 )
             else:
                 pass
-            self.remember(history, self.decision_message(decision))
-            self.remember(history, self.receipt(decision, item))
+            history.generations_left -= 1
+            history.media_urls.append((len(history.messages), item["url"]))
+            self.remember(history, receipt(decision, item["kind"]))
             history.decision = None
             return self.reason(context, history, (UMMOutput(item["kind"], item),))
         else:
             raise ValueError(f"Cosmos3 adapter received an unexpected phase {phase!r}")
 
     def usage(self, context: UMMContext) -> int:
+        """Retained history bytes plus the most the remaining turns can add.
+
+        The controller checks this against max_retained_bytes at start, where
+        a breach is the client's input, so a request it admits can never
+        exceed the bound through model output.
+        """
         history = self.histories.get(context.execution_id)
-        return 0 if history is None else history.retained_bytes
+        if history is None:
+            return 0
+        else:
+            reason, generation = WORST_CASE_BYTES
+            return (
+                history.retained_bytes
+                + history.reasons_left * reason
+                + history.generations_left * generation
+            )
 
     def close(self, context: UMMContext, reason: CloseReason) -> None:
         self.histories.pop(context.execution_id, None)
@@ -384,44 +506,3 @@ class Cosmos3UMMAdapter:
             {"diffusion": options, "stream": False},
             deepcopy(context.request.metadata),
         )
-
-    @staticmethod
-    def decision_message(decision: Decision) -> dict[str, object]:
-        content = json.dumps(
-            {
-                "kind": decision.kind,
-                "text": decision.text,
-                "generation": decision.generation,
-            },
-            ensure_ascii=False,
-        )
-        return {"role": "assistant", "content": content}
-
-    @staticmethod
-    def receipt(decision: Decision, item: dict[str, object]) -> dict[str, object]:
-        status = json.dumps(
-            {
-                "status": "completed",
-                "modality": item["kind"],
-                "requested_prompt": decision.generation["prompt"],
-            },
-            ensure_ascii=False,
-        )
-        text = (
-            "Generation execution completed. Result receipt: "
-            + status
-            + "\nThe attached media is the result of your preceding generation "
-            "request. Inspect the received results against the original user's "
-            "task. If the task is complete, choose kind final with generation "
-            "null and your answer in text. Otherwise request the next needed "
-            "generation. Repeat a completed generation only when the user's "
-            "task or your assessment of its result calls for a revision."
-        )
-        part = f"{item['kind']}_url"
-        return {
-            "role": "user",
-            "content": [
-                {"type": "text", "text": text},
-                {"type": part, part: {"url": item["url"]}},
-            ],
-        }

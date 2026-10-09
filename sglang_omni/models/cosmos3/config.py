@@ -5,6 +5,7 @@ from collections.abc import Mapping
 from typing import ClassVar
 
 from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
+from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.pipeline.umm import (
     CONTROLLER_FACTORY_PATH,
     OUTPUT_FACTORY_PATH,
@@ -78,7 +79,10 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
                 max_dispatches=17,
                 max_outputs=17,
                 max_active=32,
-                max_retained_bytes=64 * 1024 * 1024,
+                # Holds the most 17 dispatches can retain (about 87 MiB, eight
+                # maximal inline videos and their turns), and leaves the rest
+                # for the client's chat history.
+                max_retained_bytes=128 * 1024 * 1024,
                 timeout_s=3600.0,
             ),
             next=["reasoner", "generation", "output"],
@@ -112,6 +116,39 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
             next="orchestrator",
         ),
     ]
+
+    def model_post_init(self, __context: object = None) -> None:
+        super().model_post_init(__context)
+        # The adapter module imports the native stages, which a configuration
+        # loaded for any model must not import.
+        from sglang_omni.models.cosmos3.umm import max_model_bytes
+
+        factory = resolve_stage_typed_kwargs(self.stage_named("orchestrator"))
+        bounds = {
+            name: factory.get(name)
+            for name in ("max_dispatches", "max_outputs", "max_retained_bytes")
+        }
+        prefix = "stages.orchestrator.factory"
+        for name, value in bounds.items():
+            if type(value) is not int or value <= 0:
+                raise ValueError(f"{prefix}.{name} must be a positive integer")
+            else:
+                pass
+        dispatches = bounds["max_dispatches"]
+        needed = max_model_bytes(dispatches)
+        if bounds["max_outputs"] < dispatches:
+            raise ValueError(
+                f"{prefix}.max_outputs must be at least max_dispatches "
+                f"({dispatches}), since each Cosmos3 turn adds up to one output"
+            )
+        elif bounds["max_retained_bytes"] <= needed:
+            raise ValueError(
+                f"{prefix}.max_retained_bytes must exceed {needed}, the most "
+                f"{dispatches} dispatches of Cosmos3 output can retain. The rest "
+                "bounds the client's chat history"
+            )
+        else:
+            pass
 
     def stage_factory_kwargs(self, stage_name: str) -> Mapping[str, object]:
         if stage_name == "generation":

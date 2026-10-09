@@ -17,6 +17,7 @@ from xgrammar.testing import _is_grammar_accept_string
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3 import stages as cosmos3_stages
+from sglang_omni.models.cosmos3 import umm as cosmos3_umm
 from sglang_omni.models.cosmos3.reasoner import build_chat_fields
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
@@ -24,7 +25,13 @@ from sglang_omni.models.cosmos3.stages import (
     build_sampling_params,
     data_url,
 )
-from sglang_omni.models.cosmos3.umm import Cosmos3UMMAdapter, interpret_reasoner
+from sglang_omni.models.cosmos3.umm import (
+    MAX_PROMPT_CHARS,
+    MAX_TEXT_CHARS,
+    Cosmos3UMMAdapter,
+    interpret_reasoner,
+    worst_case_bytes,
+)
 from sglang_omni.pipeline.umm import (
     CONTINUATION_METADATA_KEY,
     UMMController,
@@ -42,7 +49,7 @@ def controller(**bounds: int) -> UMMController:
         "max_dispatches": 17,
         "max_outputs": 17,
         "max_active": 32,
-        "max_retained_bytes": 64 * 1024 * 1024,
+        "max_retained_bytes": 128 * 1024 * 1024,
         "timeout_s": 3600.0,
         **bounds,
     }
@@ -290,6 +297,53 @@ def test_last_generation_turn_allows_only_a_final_decision():
     assert [segment.kind for segment in parsed.segments] == ["image", "text"]
     assert parsed.text == "A cube."
     assert not umm.contexts and not umm.adapter.histories
+
+
+@pytest.mark.parametrize("spare", [0, -1])
+def test_admitted_requests_never_exceed_retained_bytes_through_model_output(
+    monkeypatch, spare
+):
+    # Maximal outputs at a small inline limit, so the derived bounds stay small.
+    monkeypatch.setattr(cosmos3_stages, "INLINE_MEDIA_LIMIT_BYTES", 1024)
+    monkeypatch.setattr(cosmos3_umm, "INLINE_MEDIA_LIMIT_BYTES", 1024)
+    monkeypatch.setattr(cosmos3_umm, "WORST_CASE_BYTES", worst_case_bytes())
+    probe = controller(max_dispatches=5)
+    submit(probe)
+    (context,) = probe.contexts.values()
+    budget = probe.adapter.usage(context) + spare
+    umm = controller(max_dispatches=5, max_retained_bytes=budget)
+    current = submit(umm)
+    if spare < 0:
+        assert current is None and not umm.contexts
+        assert generation_error_status_code(RuntimeError(rejection(umm))) == 400
+        return
+    else:
+        pass
+    texts = iter(["\x01" * MAX_TEXT_CHARS, "\U0001f600" * MAX_TEXT_CHARS] * 2)
+    held = budget
+    while route_umm("r", current) != "output":
+        # What the request holds and may still add never grows.
+        context = umm.contexts["r"]
+        assert context.output_bytes + umm.adapter.usage(context) <= held
+        held = context.output_bytes + umm.adapter.usage(context)
+        if route_umm("r", current) == "reasoner":
+            final = "anyOf" not in (
+                current.request.params["response_format"]["json_schema"]["schema"]
+            )
+            prompt = "\x01" * MAX_PROMPT_CHARS
+            data = reasoner_reply(
+                "final" if final else "generate", next(texts), "video", prompt
+            )
+        else:
+            data = media(bytes(range(256)) * 4, kind="video")
+        current = umm.advance(reply(current, data))
+    assert [s["kind"] for s in current.data["segments"]] == [
+        "text",
+        "video",
+        "text",
+        "video",
+        "text",
+    ]
 
 
 class SavedGenerator:
