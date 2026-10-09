@@ -5,7 +5,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from queue import Queue
-from typing import Literal, Protocol
+from typing import Literal, Protocol, runtime_checkable
 
 IncomingMessageType = Literal["new_request", "stream_chunk", "stream_done", "abort"]
 
@@ -40,3 +40,19 @@ class StageScheduler(Protocol):
     def stop(self) -> None: ...
 
     def abort(self, request_id: str) -> None: ...
+
+
+@runtime_checkable
+class ResultOwningScheduler(StageScheduler, Protocol):
+    """A scheduler whose results hold resources until routing settles.
+
+    The stage claims each result before it signals stream completion or routes
+    it, and skips a result whose claim fails. Once routing settles, routed,
+    failed, cancelled or dropped, the stage releases the result, with
+    ``delivered`` telling whether a transport accepted it. Schedulers that do
+    not implement both methods own nothing and are routed unchanged.
+    """
+
+    def claim_result(self, result: object, *, terminal: bool) -> bool: ...
+
+    def release_result(self, result: object, *, delivered: bool) -> None: ...

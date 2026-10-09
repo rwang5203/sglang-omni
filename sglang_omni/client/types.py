@@ -248,6 +248,8 @@ class CompletionResult:
     request_id: str
     text: str
     audio: CompletionAudio | None = None
+    # Saved media of a generation stage. Delivered files belong to the
+    # caller, and the server never removes them.
     media: list[dict[str, object]] | None = None
     finish_reason: str = "stop"
     usage: UsageInfo | None = None

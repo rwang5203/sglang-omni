@@ -550,7 +550,7 @@ def test_construct_stage_skips_device_pinning_for_child_process_engines(
         allow_child_processes=True,
     )
 
-    stage = stage_workers.construct_stage(spec, _RecordingLog())
+    stage = stage_workers.construct_stage(spec, RecordingLog())
 
     assert stage.scheduler.gpu_id == 1
     assert stage.allow_child_processes is True

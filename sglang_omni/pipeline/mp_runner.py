@@ -105,6 +105,7 @@ def resolve_coordinator_max_in_flight(
 class StageLaunchKwargs(TypedDict):
     stage_name: str
     factory: str
+    allow_child_processes: bool
     next_stages: str | list[str] | None
     route_fn: str | None
     is_terminal: bool
@@ -1057,29 +1058,6 @@ class MultiProcessPipelineRunner:
     async def cleanup_on_failure(self) -> None:
         """Best-effort cleanup after a failed start()."""
         for group in [g for wave in self.shutdown_waves() for g in wave]:
-            if (
-                group.is_ready and self._coordinator is not None
-            ):  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-                # Routes are registered only after all groups start successfully.
-                # Ready stages must stop their schedulers and process finalizers.
-                for name, endpoint in group.stage_control_endpoints.items():
-                    try:
-                        await asyncio.wait_for(
-                            self._coordinator.control_plane.send_shutdown(  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-                                name, endpoint
-                            ),
-                            timeout=1.0,
-                        )
-                    except Exception as exc:
-                        logger.warning("Startup shutdown for %s failed: %s", name, exc)
-                await group.shutdown(
-                    before_signal=(
-                        self.retire_mps_clients if self.mps is not None else None
-                    )
-                )
-                continue
-            else:
-                pass
             for spec, p in zip(group.process_specs, group.processes):
                 if p.is_alive():
                     if self.mps is not None:

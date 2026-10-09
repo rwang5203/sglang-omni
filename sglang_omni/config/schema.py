@@ -820,8 +820,22 @@ class PipelineConfig(BaseModel):
 
         Stage settings override pipeline defaults; model policies may derive
         missing values here without persisting them in the configuration.
+        A stage whose native engine owns worker processes gets the per worker
+        thread default of native multimodal_gen, since its children inherit
+        the stage process environment instead of an equal share of the plan.
         """
-        return {**self.resolved_env_defaults(), **self.stage_named(stage_name).env}
+        stage = self.stage_named(stage_name)
+        env_defaults = {**self.resolved_env_defaults(), **stage.env}
+        if stage.allow_child_processes and "OMP_NUM_THREADS" not in env_defaults:
+            from sglang_omni.utils.cpu import native_worker_intraop_threads
+
+            workers = len(stage.runtime_gpu_ids) if stage.runtime_gpu_ids else 1
+            env_defaults["OMP_NUM_THREADS"] = str(
+                native_worker_intraop_threads(workers)
+            )
+        else:
+            pass
+        return env_defaults
 
     @classmethod
     def generation_admission_defaults(cls) -> dict[str, int]:

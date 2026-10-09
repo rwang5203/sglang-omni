@@ -14,7 +14,7 @@ from sglang_omni.pipeline.stage_workers import (
 )
 
 
-def _own_child(spec, ready_event, error_channel):
+def own_child(spec, ready_event, error_channel):
     child = multiprocessing.get_context("spawn").Process(target=ready_event.set)
     try:
         child.start()
@@ -36,7 +36,7 @@ def _own_child(spec, ready_event, error_channel):
 
 @pytest.mark.parametrize("allow_children", [False, True])
 def test_stage_process_child_ownership(monkeypatch, allow_children):
-    monkeypatch.setattr(stage_workers, "stage_process_main", _own_child)
+    monkeypatch.setattr(stage_workers, "stage_process_main", own_child)
     spec = StageLaunchConfig(
         stage_name="native",
         allow_child_processes=allow_children,
