@@ -24,7 +24,7 @@ curl http://127.0.0.1:8000/v1/images/generations \
 
 ## Media policy
 
-`--allowed-local-media-path` and `--allowed-media-domain` apply to every media path and URL in a native route request, including native extra parameters and action observations. With `--allowed-local-media-path`, local paths and file URLs must resolve inside that directory. While `--allowed-media-domain` is set, remote URLs are refused on these routes, because native SGLang fetches them itself and follows redirects without checking each one, so send such media as an upload or a data URL. Without either option, media references are read as on other routes. Requests can never set server paths such as `output_path`, `perf_dump_path` or model paths.
+`--allowed-local-media-path` and `--allowed-media-domain` apply to every media path and URL in a native route request, including native extra parameters and action observations. With `--allowed-local-media-path`, local paths and file URLs must resolve inside that directory, including the values native SGLang decodes from JSON encoded strings. Native SGLang opens a file URL as written, as a path relative to the server working directory, so send local media as plain paths. While `--allowed-media-domain` is set, remote URLs are refused on these routes, because native SGLang fetches them itself and follows redirects without checking each one, so send such media as an upload or a data URL. Without either option, media references are read as on other routes. Requests can never set server paths such as `output_path`, `perf_dump_path` or model paths.
 
 ## Retention
 

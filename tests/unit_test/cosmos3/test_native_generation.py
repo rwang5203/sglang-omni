@@ -16,6 +16,7 @@ from sglang_omni.models.cosmos3.stages import (
 )
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.serve.openai_errors import generation_error_status_code
 
 
 def payload(inputs="A quiet lake", **params):
@@ -67,6 +68,8 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         payload([1, 2]),
         payload({"seed": 1}),
         payload("A lake", diffusion=[]),
+        payload("A lake", stage_params=[]),
+        payload("A lake", stage_sampling={"generation": 1}),
         payload("A lake", stream=True),
         payload({"prompt": "A lake", "prompt_path": "prompts.txt"}),
         payload("A lake", diffusion={"output_path": "/unowned"}),
@@ -76,21 +79,33 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
 def test_invalid_request_is_rejected_before_native_dispatch(invalid_payload, tmp_path):
     generator = Generator(None)
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as refused:
         scheduler.generate(invalid_payload)
+    assert generation_error_status_code(refused.value) == 400
     assert not generator.calls
 
 
 def test_saved_result_survives_scheduler_and_client_boundary(tmp_path):
+    from pathlib import Path
+
     result = SimpleNamespace(
-        output_file_path=str(tmp_path / "output.mp4"),
+        output_file_path=None,
         size=(480, 832, 33),
         prompt="A lake",
         generation_time=2.5,
         peak_memory_mb=16000.0,
         metrics={"denoise": 1.8},
     )
-    generator = Generator(result)
+
+    class SavedGenerator(Generator):
+        def generate(self, **kwargs):
+            params = kwargs["sampling_params_kwargs"]
+            target = Path(params["output_path"]) / f"{params['output_file_name']}.mp4"
+            target.write_bytes(b"video")
+            result.output_file_path = str(target)
+            return super().generate(**kwargs)
+
+    generator = SavedGenerator(result)
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
     scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload("A lake")))
     thread = threading.Thread(target=scheduler.start)
@@ -99,7 +114,9 @@ def test_saved_result_survives_scheduler_and_client_boundary(tmp_path):
         message = scheduler.outbox.get(timeout=3)
         assert message.type == "result"
         chunk = Client.default_result_builder("request-1", message.data.data)
-        assert chunk.media[0]["path"] == result.output_file_path
+        # The saved file leaves the request workspace for the output directory.
+        assert list(tmp_path.iterdir()) == [Path(chunk.media[0]["path"])]
+        assert Path(chunk.media[0]["path"]).read_bytes() == b"video"
         assert chunk.media[0]["metrics"] == {"denoise": 1.8}
         assert len(generator.calls) == 1
     finally:
