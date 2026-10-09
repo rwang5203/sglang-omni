@@ -11,6 +11,8 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+import xgrammar as xgr
+from xgrammar.testing import _is_grammar_accept_string
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
@@ -22,7 +24,7 @@ from sglang_omni.models.cosmos3.stages import (
     build_sampling_params,
     data_url,
 )
-from sglang_omni.models.cosmos3.umm import Cosmos3UMMAdapter
+from sglang_omni.models.cosmos3.umm import Cosmos3UMMAdapter, interpret_reasoner
 from sglang_omni.pipeline.umm import (
     CONTINUATION_METADATA_KEY,
     UMMController,
@@ -258,11 +260,30 @@ def test_last_generation_turn_allows_only_a_final_decision():
         payload.request.params["response_format"]["json_schema"]["schema"]
         for payload in (first, last)
     ]
-    assert [schema["properties"]["kind"]["enum"] for schema in schemas] == [
-        ["final", "generate"],
-        ["final"],
+    kinds = [
+        [
+            branch["properties"]["kind"]["enum"]
+            for branch in schema.get("anyOf", [schema])
+        ]
+        for schema in schemas
     ]
-    assert schemas[1]["properties"]["generation"] == {"type": "null"}
+    assert kinds == [[["final"], ["generate"]], [["final"]]]
+    # Every decision the native grammar admits must be one the adapter accepts.
+    for schema in schemas:
+        grammar = xgr.Grammar.from_json_schema(
+            json.dumps(schema), any_whitespace=True, strict_mode=True
+        )
+        for value in ("", " ", "\t\n", "\u3000", "x", " x "):
+            generation = {"modality": "image", "prompt": value}
+            for decision in (
+                {"kind": "final", "text": value, "generation": None},
+                {"kind": "generate", "text": "", "generation": generation},
+            ):
+                text = json.dumps(decision, ensure_ascii=False)
+                if _is_grammar_accept_string(grammar, text):
+                    interpret_reasoner({"text": text, "finish_reason": "stop"})
+                else:
+                    pass
     final = umm.advance(reply(last, reasoner_reply("final", "A cube.")))
     assert route_umm("r", final) == "output"
     parsed = Client.default_result_builder("r", final.data)

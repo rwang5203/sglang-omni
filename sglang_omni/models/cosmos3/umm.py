@@ -7,6 +7,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 
@@ -32,28 +33,46 @@ GENERATE = "generate"
 MAX_TEXT_CHARS = 8192
 MAX_PROMPT_CHARS = 4096
 
-DECISION_SCHEMA = {
+# A string with a character outside JSON insignificant whitespace. Native
+# grammar decoding and parse_decision both read whitespace as ASCII, so every
+# decision the schema admits is one the adapter accepts.
+NONBLANK_PATTERN = "^[\\s\\S]*\\S[\\s\\S]*$"
+NONBLANK = re.compile(r"\S", re.ASCII)
+
+FINAL_DECISION = {
     "type": "object",
     "properties": {
-        "kind": {"type": "string", "enum": ["final", "generate"]},
+        "kind": {"type": "string", "enum": ["final"]},
+        "text": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": MAX_TEXT_CHARS,
+            "pattern": NONBLANK_PATTERN,
+        },
+        "generation": {"type": "null"},
+    },
+    "required": ["kind", "text", "generation"],
+    "additionalProperties": False,
+}
+
+GENERATE_DECISION = {
+    "type": "object",
+    "properties": {
+        "kind": {"type": "string", "enum": ["generate"]},
         "text": {"type": "string", "maxLength": MAX_TEXT_CHARS},
         "generation": {
-            "anyOf": [
-                {
-                    "type": "object",
-                    "properties": {
-                        "modality": {"type": "string", "enum": ["image", "video"]},
-                        "prompt": {
-                            "type": "string",
-                            "minLength": 1,
-                            "maxLength": MAX_PROMPT_CHARS,
-                        },
-                    },
-                    "required": ["modality", "prompt"],
-                    "additionalProperties": False,
+            "type": "object",
+            "properties": {
+                "modality": {"type": "string", "enum": ["image", "video"]},
+                "prompt": {
+                    "type": "string",
+                    "minLength": 1,
+                    "maxLength": MAX_PROMPT_CHARS,
+                    "pattern": NONBLANK_PATTERN,
                 },
-                {"type": "null"},
-            ]
+            },
+            "required": ["modality", "prompt"],
+            "additionalProperties": False,
         },
     },
     "required": ["kind", "text", "generation"],
@@ -114,7 +133,7 @@ def parse_decision(value: object) -> Decision:
     if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
         raise ValueError("Cosmos3 decision text exceeds its string limit")
     elif kind == "final":
-        if generation is not None or not text.strip():
+        if generation is not None or NONBLANK.search(text) is None:
             raise ValueError("Final Cosmos3 decisions require text and no generation")
         else:
             return Decision(kind, text, None)
@@ -128,7 +147,7 @@ def parse_decision(value: object) -> Decision:
         prompt = generation["prompt"]
         if (
             not isinstance(prompt, str)
-            or not prompt.strip()
+            or NONBLANK.search(prompt) is None
             or len(prompt) > MAX_PROMPT_CHARS
         ):
             raise ValueError("Cosmos3 generation requires a bounded nonempty prompt")
@@ -143,8 +162,6 @@ def interpret_reasoner(result: object) -> Decision:
         raise ValueError("Cosmos3 Reasoner did not return a structured text decision")
     elif result.get("finish_reason") not in (None, "stop"):
         raise ValueError("Cosmos3 Reasoner decision was truncated or interrupted")
-    elif len(result["text"]) > 2 * (MAX_TEXT_CHARS + MAX_PROMPT_CHARS):
-        raise ValueError("Cosmos3 decision exceeds its serialized size limit")
     else:
         pass
     try:
@@ -269,14 +286,12 @@ class Cosmos3UMMAdapter:
             raise UMMRequestError("chat_template_kwargs must be a mapping")
         else:
             pass
-        schema = deepcopy(DECISION_SCHEMA)
         # A generation and the Reasoner turn that inspects it need two more
         # dispatches after this one, so with fewer left only final remains.
         if context.remaining_dispatches < 3:
-            schema["properties"]["kind"]["enum"] = ["final"]
-            schema["properties"]["generation"] = {"type": "null"}
+            schema = deepcopy(FINAL_DECISION)
         else:
-            pass
+            schema = {"anyOf": [deepcopy(FINAL_DECISION), deepcopy(GENERATE_DECISION)]}
         params.update(
             stream=False,
             n=1,
