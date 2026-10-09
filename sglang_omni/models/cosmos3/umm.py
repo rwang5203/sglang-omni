@@ -40,7 +40,10 @@ from sglang_omni.proto import (
     OmniRequest,
     StagePayload,
 )
-from sglang_omni.scheduling.native_chat_scheduler import build_chat_fields
+from sglang_omni.scheduling.native_chat_scheduler import (
+    build_chat_fields,
+    set_sampling_fields,
+)
 
 # Adapter phase names, mapped to stages by the orchestrator's factory.phases.
 REASON = "reason"
@@ -364,8 +367,10 @@ def decision_sampling(request: OmniRequest) -> dict[str, object]:
     """Native sampling fields for every decision of one request.
 
     The adapter's defaults apply to fields the client did not set. The client
-    sets fields explicitly at the top level, through stage_sampling.reasoner,
-    or as native fields in stage_params.reasoner.
+    sets fields at the top level, through stage_sampling.reasoner, or as
+    native fields in stage_params.reasoner. A top level field counts as set
+    by the native chat stage's rule: the request lists it, or its value
+    differs from the placeholder, as an SDK request's does.
     """
     params, metadata = request.params, request.metadata
     requested = [name for name in ROLLOUT_FIELDS if params.get(name)]
@@ -376,10 +381,12 @@ def decision_sampling(request: OmniRequest) -> dict[str, object]:
         )
     else:
         pass
-    explicit = set(metadata.get(EXPLICIT_GENERATION_PARAMS_KEY) or ())
     sampling: dict[str, object] = dict(DECISION_SAMPLING)
     sampling.update(
-        {name: params[name] for name in SAMPLING_FIELDS if name in explicit}
+        set_sampling_fields(
+            {name: params[name] for name in SAMPLING_FIELDS if name in params},
+            metadata.get(EXPLICIT_GENERATION_PARAMS_KEY),
+        )
     )
     if params.get("seed") is not None:
         sampling["seed"] = params["seed"]

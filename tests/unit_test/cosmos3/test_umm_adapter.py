@@ -588,13 +588,15 @@ def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
 
 
 @pytest.mark.parametrize("seed", [0, 7])
-def test_umm_generation_preserves_sdk_seed(seed):
+def test_umm_sdk_sampling_reaches_decisions_and_generation(seed):
+    sampling = SamplingParams(seed=seed, temperature=0.9)
     request = Client.build_omni_request(
-        GenerateRequest(prompt="draw a lake", sampling=SamplingParams(seed=seed))
+        GenerateRequest(prompt="draw a lake", sampling=sampling)
     )
-    generation = generate_turn(
-        controller(), params=request.params, inputs=request.inputs
-    )
+    umm = controller()
+    first = submit(umm, request.inputs, request.params, **request.metadata)
+    assert first.request.params["temperature"] == 0.9
+    generation = umm.advance(reply(first, reasoner_reply()))
     native = build_sampling_params(generation, "outputs")
     assert native["seed"] == seed
 
