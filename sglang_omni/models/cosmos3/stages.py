@@ -657,6 +657,7 @@ def create_generation_scheduler(
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
         DiffGenerator,
     )
+    from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
     kwargs = native_server_kwargs(
@@ -664,6 +665,12 @@ def create_generation_scheduler(
     )
     output_dir = str(Path(output_dir).resolve())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    # Native applies plugin hooks once per process, ahead of its server
+    # arguments as DiffGenerator.from_pretrained does. Applying them here,
+    # outside the activation below, keeps this host out of the hooks it arms
+    # for its native workers.
+    apply_plugin_hooks()
+    server_args = ServerArgs.from_kwargs(**kwargs)
     # A later SGLang that cancels natively takes precedence over the plugin.
     native_api = hasattr(DiffGenerator, "supports_cancellation")
     handshake = (
@@ -673,7 +680,7 @@ def create_generation_scheduler(
     )
     try:
         with cancellation.activation_environment(handshake):
-            generator = DiffGenerator.from_server_args(ServerArgs.from_kwargs(**kwargs))
+            generator = DiffGenerator.from_server_args(server_args)
         if native_api:
             mode = "native" if generator.supports_cancellation else None
         elif handshake is not None and os.path.exists(
