@@ -8,6 +8,7 @@ import multiprocessing
 import shutil
 import tempfile
 import threading
+from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
@@ -248,7 +249,20 @@ def police_media_inputs(
 
 
 class NativeGenerationScheduler(SimpleScheduler):
-    """Keep scheduler and pipeline execution in the native SGLang runtime."""
+    """Keep scheduler and pipeline execution in the native SGLang runtime.
+
+    Each request saves its media in its own directory under output_dir.
+    Delivered media belongs to the receiver of the completion, and the stage
+    never removes it. The stage removes a request directory when the request
+    fails, is aborted, or is dropped before the coordinator accepts its
+    completion. An abort observed during or after delivery also removes it,
+    because the coordinator aborts only requests it has not completed, so it
+    drops that completion.
+    """
+
+    # The same retention the scheduler keeps for abort tombstones, which
+    # outlasts any completion the coordinator has yet to read.
+    retained_deliveries = 10000
 
     def __init__(
         self,
@@ -260,6 +274,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         self.output_dir = output_dir
         self.request_fields = request_fields
         self.native_requests: dict[str, GenerationRequest] = {}
+        self.delivered: OrderedDict[str, Path] = OrderedDict()
         super().__init__(
             self.generate,
             abort_callback=self.cancel_native,
@@ -290,6 +305,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         with self.abort_lock:
             request = self.native_requests.get(request_id)
             if request is not None:
+                request.aborted = True
                 request.cancelled.set()
                 if not request.running and not request.delivering:
                     self.native_requests.pop(request_id)
@@ -297,7 +313,7 @@ class NativeGenerationScheduler(SimpleScheduler):
                 else:
                     pass
             else:
-                pass
+                directory = self.delivered.pop(request_id, None)
         if directory is not None:
             self.remove_request_directory(directory)
         else:
@@ -344,10 +360,12 @@ class NativeGenerationScheduler(SimpleScheduler):
             request = self.native_requests.get(result.request_id)
             if request is not None and request.result is result:
                 self.native_requests.pop(result.request_id)
-                if not delivered:
-                    directory = request.directory
+                if delivered and not request.aborted:
+                    self.delivered[result.request_id] = request.directory
+                    while len(self.delivered) > self.retained_deliveries:
+                        self.delivered.popitem(last=False)
                 else:
-                    pass
+                    directory = request.directory
             else:
                 pass
         if directory is not None:
@@ -382,6 +400,8 @@ class NativeGenerationScheduler(SimpleScheduler):
                 threading.Event(),
                 Path(tempfile.mkdtemp(prefix="request_", dir=self.output_dir)),
             )
+            # A reused ID means the coordinator completed its earlier request.
+            self.delivered.pop(payload.request_id, None)
             self.native_requests[payload.request_id] = request
         params["output_path"] = str(request.directory)
         kwargs = {"sampling_params_kwargs": params}
@@ -451,6 +471,7 @@ class GenerationRequest:
     directory: Path
     running: bool = True
     delivering: bool = False
+    aborted: bool = False
     result: StagePayload | None = None
 
 
