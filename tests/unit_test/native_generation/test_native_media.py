@@ -282,6 +282,7 @@ def test_native_requests_follow_the_server_media_policy(
     allowed = tmp_path / "media"
     allowed.mkdir()
     outside = str(tmp_path / "clip.mp4")
+    inside = str(allowed / "clip.mp4")
     connector = MultiModalResourceConnector(
         allowed_local_media_path=allowed if configured else None,
         allowed_media_domains=["media.example"] if configured else None,
@@ -343,6 +344,12 @@ def test_native_requests_follow_the_server_media_policy(
             },
             True,
         ),
+        # Native decodes a JSON encoded list to the allowed paths it names.
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "control_path": json.dumps([inside, inside])}},
+            False,
+        ),
         # Native decodes these JSON encoded values to the outside path.
         (
             "/v1/videos",
@@ -368,8 +375,9 @@ def test_native_requests_follow_the_server_media_policy(
                     "refused" in response.text or "cannot set" in response.text
                 )
                 assert blocked == refused, (cwd, path, body, response.text)
-            inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
-            response = await client.post("/v1/videos", json=inside)
+            response = await client.post(
+                "/v1/videos", json={"prompt": "a", "video_path": inside}
+            )
             assert "refused" not in response.text
         # Native opens a file URL as written, relative to its working directory.
         monkeypatch.chdir(tmp_path)

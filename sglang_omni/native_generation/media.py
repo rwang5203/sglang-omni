@@ -502,20 +502,26 @@ def parse_containers(value: object) -> object:
         return value
 
 
-def media_references(value: object, inline_images: bool = False) -> Iterator[str]:
-    """Each string native SGLang may read a media reference from.
+def media_references(
+    value: object, inline_images: bool = False
+) -> Iterator[tuple[str, bool]]:
+    """Each string native SGLang may read a media reference from, and whether
+    native can open it only as written.
 
     Native decodes JSON encoded request values, multipart fields once and
     model fields such as control_path once more, so a string also stands
-    for every string it decodes to. With inline_images, image payloads that
-    native decodes in memory hold no reference.
+    for every string it decodes to. JSON text never starts with a slash, a
+    tilde or a scheme, so as written it can only be a relative path. With
+    inline_images, image payloads that native decodes in memory hold no
+    reference.
     """
     if isinstance(value, str):
-        yield value
         try:
             decoded = json.loads(value)
         except ValueError:
+            yield value, False
             return
+        yield value, True
         yield from decoded_references(decoded, top=True)
     elif isinstance(value, (list, tuple)):
         for item in value:
@@ -531,7 +537,7 @@ def media_references(value: object, inline_images: bool = False) -> Iterator[str
         pass
 
 
-def decoded_references(value: object, *, top: bool) -> Iterator[str]:
+def decoded_references(value: object, *, top: bool) -> Iterator[tuple[str, bool]]:
     """References in a value native decoded from a string.
 
     Native reads decoded strings as paths and turns any other decoded value,
@@ -542,7 +548,7 @@ def decoded_references(value: object, *, top: bool) -> Iterator[str]:
         yield from media_references(value)
     elif value is not None:
         if not (top and isinstance(value, list)):
-            yield str(value)
+            yield str(value), True
         else:
             pass
         if isinstance(value, (dict, list)):
@@ -568,12 +574,12 @@ def police_media_value(name: str, value: object, inline_images: bool) -> None:
         return
     else:
         pass
-    for source in media_references(value, inline_images):
-        police_media_reference(connector, name, source)
+    for source, as_written in media_references(value, inline_images):
+        police_media_reference(connector, name, source, as_written)
 
 
 def police_media_reference(
-    connector: MultiModalResourceConnector, name: str, source: str
+    connector: MultiModalResourceConnector, name: str, source: str, as_written: bool
 ) -> None:
     """Refuse a media path or URL that the server media policy does not allow.
 
@@ -592,7 +598,7 @@ def police_media_reference(
                 "a data URL."
             )
         elif connector.allowed_local_media_path is not None:
-            for path in local_readings(source, remote, file_url):
+            for path in local_readings(source, as_written or remote, file_url):
                 connector.local_media_path(path)
         else:
             pass
@@ -605,17 +611,19 @@ def police_media_reference(
         ) from exc
 
 
-def local_readings(source: str, remote: bool, file_url: bool) -> list[str]:
+def local_readings(source: str, if_present: bool, file_url: bool) -> list[str]:
     """The local paths native SGLang may open for a media reference.
 
     Native expands the home directory of sampling path fields, while its
     prompt enhancer opens a path as written. Its loaders open a file URL as
     written, a path relative to the working directory, while srt opens the
-    path the URL names. Its image loader opens a URL or data URL that names an
-    existing file as that file. Relative paths resolve against the server
-    working directory, which the stage and native worker processes inherit.
+    path the URL names. A URL, a data URL, or text that native opens only as
+    written (if_present) names a local file only when that file exists, since
+    its image loader tries an existing file first. Relative paths resolve
+    against the server working directory, which the stage and native worker
+    processes inherit.
     """
-    if remote or source.startswith("data:"):
+    if if_present or source.startswith("data:"):
         return [source] if os.path.lexists(source) else []
     else:
         readings = [source]
