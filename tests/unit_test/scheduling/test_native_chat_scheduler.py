@@ -569,8 +569,8 @@ def test_factory_passes_resolved_device_to_native(monkeypatch, devices):
     monkeypatch.setattr(current_platform, "set_device", pinned.append)
 
     def startup(**kwargs):
-        # The host's own native device work runs on the serving GPU.
-        assert pinned == [3]
+        # No host CUDA context may exist while native sizes its KV pool.
+        assert not pinned
         assert kwargs["base_gpu_id"] == 3
         if devices is not None:
             assert kwargs["gpu_id_step"] == 2

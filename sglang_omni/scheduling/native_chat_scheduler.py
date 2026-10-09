@@ -662,17 +662,11 @@ def create_native_chat_scheduler(
         raise RuntimeError("Native SRT requires allow_child_processes=true")
     else:
         pass
-    # The native tokenizer manager runs in this host process and works on the
-    # serving GPU itself: the fast image processor, pinned frame buffers and
-    # the GPU feature transport. The stage host no longer pins a device for
-    # engines that own subprocesses, so pin it here, where the device work
-    # is known, and operations that use the current device stay on it.
-    from sglang_omni.platforms import current_platform
-
-    current_platform.set_device(gpu_id)
     from sglang import Engine
     from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
     from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+
+    from sglang_omni.platforms import current_platform
 
     kwargs = native_chat_server_kwargs(
         model_path,
@@ -683,6 +677,12 @@ def create_native_chat_scheduler(
     )
     engine = Engine(**kwargs)
     try:
+        # The native tokenizer manager runs in this host process and works on
+        # the serving GPU itself: the fast image processor, pinned frame
+        # buffers and the GPU feature transport. Pin the host to that GPU only
+        # now, as sglang serve does: a host CUDA context that exists while the
+        # native scheduler measures free memory shrinks its KV pool.
+        current_platform.set_device(gpu_id)
         service = OpenAIServingChat(engine.tokenizer_manager, engine.template_manager)
         warm_up(engine, service, ChatCompletionRequest)
         return NativeChatScheduler(
