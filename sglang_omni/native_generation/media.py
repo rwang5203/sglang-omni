@@ -6,6 +6,11 @@ A pipeline whose generation stage runs native multimodal_gen declares
 ``prepare_native_media_app`` that names the stage. The Omni server then
 serves the native media routes, which send requests straight to the
 native scheduler that the stage owns.
+
+The routes start on the first request to them, because starting them
+imports native SGLang's route modules into the Omni HTTP process, which
+takes seconds and hundreds of MiB. A deployment that never calls them
+starts and idles as if they were absent.
 """
 
 from __future__ import annotations
@@ -21,7 +26,7 @@ import socket
 import tempfile
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
-from contextlib import asynccontextmanager, suppress
+from contextlib import AsyncExitStack, asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
@@ -95,11 +100,11 @@ def prepare_native_media_app(
     Runs before any stage starts, because the stage process reads the
     overrides written here when it builds its native runtime. The stage
     saves the native server arguments it resolves to the path set here,
-    and the returned builder, called once the stage started, loads them.
-    Building native server arguments in the HTTP process instead would
-    query the GPU and hold a CUDA context there. request_fields names the
-    request fields clients may set for the served model, the same set the
-    generation stage accepts.
+    and the returned loader, called once the stage started, reads them
+    without importing native SGLang. Building native server arguments in
+    the HTTP process instead would query the GPU and hold a CUDA context
+    there. request_fields names the request fields clients may set for the
+    served model, the same set the generation stage accepts.
     """
     stage = config.stage_named(stage_name)
     if not isinstance(stage.gpu, int):
@@ -138,11 +143,11 @@ def prepare_native_media_app(
     # A private directory, removed once loaded or at interpreter exit.
     handoff = tempfile.mkdtemp(prefix="sglang-omni-native-args-")
     stage.factory.server_args_path = os.path.join(handoff, "server_args.pickle")
-    build = partial(
-        NativeMediaFrontend.build, stage.factory.server_args_path, request_fields
+    load = partial(
+        NativeMediaFrontend.load, stage.factory.server_args_path, request_fields
     )
-    weakref.finalize(build, shutil.rmtree, handoff, ignore_errors=True)
-    return build
+    weakref.finalize(load, shutil.rmtree, handoff, ignore_errors=True)
+    return load
 
 
 class NativeMediaFrontend:
@@ -153,21 +158,34 @@ class NativeMediaFrontend:
     nothing in Omni sends offline jobs through one, answers 503 while native
     warmup runs, and turns a warmup failure into a startup failure.
 
+    The routes start once, on the first request to them: native imports run
+    off the event loop, then their lifespan enters, and requests that arrive
+    meanwhile wait for the same start. When the generation stage resolved a
+    native server warmup, which readiness waits for, they start with the
+    server instead. A failed start answers 503 with its cause on these
+    routes until the server restarts, and stops the server when readiness
+    waits for it.
+
     A request in flight fails with 503 as soon as the generation stage fails
     or a native scheduler socket closes, which happens when its process
     exits, because native SGLang before worker_failure support would wait
     for the answer forever.
     """
 
-    def __init__(self, server_args: object, media_fields: frozenset[str]) -> None:
-        from sglang.multimodal_gen.runtime.entrypoints.action import api as action_api
-        from sglang.multimodal_gen.runtime.entrypoints.openai import (
-            image_api,
-            video_api,
-        )
-
-        self.server_args = server_args
-        self.media_fields = media_fields
+    def __init__(
+        self, server_args: bytes, warmup: bool, request_fields: RequestFields
+    ) -> None:
+        # The pickled native server arguments, loaded when the routes start.
+        self.saved_server_args = server_args
+        self.warmup = warmup
+        self.request_fields = request_fields
+        self.server_args: object = None
+        self.media_fields: frozenset[str] = frozenset()
+        self.app: FastAPI | None = None
+        self.runtime_failure: asyncio.Future | None = None
+        self.start_task: asyncio.Future | None = None
+        self.start_failure: str | None = None
+        self.lifespans = AsyncExitStack()
         self.ready = asyncio.Event()
         self.failure: BaseException | None = None
         self.failed = asyncio.Event()
@@ -176,6 +194,43 @@ class NativeMediaFrontend:
         self.scheduler_events: dict[bytes, int] = {}
         self.unavailable_reason: str | None = None
         self.unavailable = asyncio.Event()
+
+    @classmethod
+    def load(
+        cls, server_args_path: str, request_fields: RequestFields
+    ) -> NativeMediaFrontend:
+        """Read what the generation stage saved, without importing native SGLang.
+
+        The stage saves its pickled native server arguments together with
+        whether they select a native server warmup, so this needs no native
+        class to read.
+        """
+        try:
+            with open(server_args_path, "rb") as handle:
+                saved = pickle.load(handle)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "The generation stage did not save its native server arguments "
+                f"to {server_args_path}. Its stage factory must accept "
+                "server_args_path, as the native generation scheduler factory "
+                "does."
+            ) from None
+        finally:
+            shutil.rmtree(os.path.dirname(server_args_path), ignore_errors=True)
+        return cls(saved["server_args"], saved["warmup"], request_fields)
+
+    def build_app(self) -> None:
+        """Load the native server arguments and routes, in a worker thread."""
+        from sglang.multimodal_gen.runtime.entrypoints.action import api as action_api
+        from sglang.multimodal_gen.runtime.entrypoints.openai import (
+            image_api,
+            video_api,
+        )
+        from sglang.multimodal_gen.runtime.server_args import set_global_server_args
+
+        server_args = pickle.loads(self.saved_server_args)
+        set_global_server_args(server_args)
+        fields = self.request_fields(server_args)
         # Native create_app also serves weights, memory, LoRA, rollout, mesh,
         # realtime, server info and stats routes without Omni's admin key, so
         # only the image, video and action routers are included. The action
@@ -196,31 +251,33 @@ class NativeMediaFrontend:
             app.include_router(actions, dependencies=police)
         else:
             pass
+        self.server_args = server_args
+        self.media_fields = frozenset(f for f in fields if f.endswith("_path"))
         self.app = app
 
-    @classmethod
-    def build(
-        cls, server_args_path: str, request_fields: RequestFields
-    ) -> NativeMediaFrontend:
-        """Load the generation stage's native server arguments and build the
-        frontend, off the event loop."""
-        from sglang.multimodal_gen.runtime.server_args import set_global_server_args
+    def begin(self) -> None:
+        """Start the routes, once, whatever asks first."""
+        if self.start_task is None:
+            self.start_task = asyncio.ensure_future(self.start())
+        else:
+            pass
 
+    async def start(self) -> None:
+        """Build the routes off the event loop, then enter their lifespan."""
         try:
-            with open(server_args_path, "rb") as handle:
-                server_args = pickle.load(handle)
-        except FileNotFoundError:
-            raise RuntimeError(
-                "The generation stage did not save its native server arguments "
-                f"to {server_args_path}. Its stage factory must accept "
-                "server_args_path, as the native generation scheduler factory "
-                "does."
-            ) from None
-        finally:
-            shutil.rmtree(os.path.dirname(server_args_path), ignore_errors=True)
-        set_global_server_args(server_args)
-        fields = request_fields(server_args)
-        return cls(server_args, frozenset(f for f in fields if f.endswith("_path")))
+            await asyncio.to_thread(self.build_app)
+            await self.lifespans.enter_async_context(self.lifespan())
+        except Exception as exc:
+            logger.exception("The native media routes could not start")
+            self.start_failure = (
+                f"The native media routes could not start: {exc}. Fix the "
+                "cause in the server log, then restart the server."
+            )
+            if self.warmup:
+                # Readiness waits for the warmup, which now never runs.
+                self.fail(RuntimeError(self.start_failure))
+            else:
+                pass
 
     async def police_request(self, request: Request) -> None:
         """Apply the server media policy before a native route reads a request.
@@ -289,7 +346,8 @@ class NativeMediaFrontend:
 
     @property
     def warming(self) -> bool:
-        return not self.ready.is_set()
+        """Whether readiness still waits for the native server warmup."""
+        return self.warmup and not self.ready.is_set()
 
     def fail(self, error: BaseException) -> None:
         if self.failure is None:
@@ -304,23 +362,42 @@ class NativeMediaFrontend:
         raise self.failure
 
     def mount(self, app: FastAPI, runtime_failure: asyncio.Future) -> None:
-        """Serve the native media routes and run their lifespan inside Omni's."""
+        """Serve the native media routes and end their lifespan inside Omni's."""
+        self.runtime_failure = runtime_failure
         runtime_failure.add_done_callback(self.on_runtime_failure)
         previous_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
         async def lifespan(parent: FastAPI) -> AsyncIterator[None]:
             async with previous_lifespan(parent):
-                async with self.lifespan(runtime_failure):
+                if self.warmup:
+                    # Readiness waits for the warmup, so start with the server.
+                    self.begin()
+                else:
+                    pass
+                try:
                     yield
+                finally:
+                    await self.close()
 
         app.router.lifespan_context = lifespan
         # Readiness reports the native warmup state, see the /health route.
         app.state.native_media = self
         app.router.routes.append(NativeMediaRoutes(self.serve))
 
+    async def close(self) -> None:
+        """Stop a start still running and end the lifespan of started routes."""
+        if self.start_task is not None and not self.start_task.done():
+            # Its import thread runs to the end on its own.
+            self.start_task.cancel()
+            with suppress(asyncio.CancelledError):
+                await self.start_task
+        else:
+            pass
+        await self.lifespans.aclose()
+
     @asynccontextmanager
-    async def lifespan(self, runtime_failure: asyncio.Future) -> AsyncIterator[None]:
+    async def lifespan(self) -> AsyncIterator[None]:
         from sglang.multimodal_gen.runtime.entrypoints.openai.prompt_enhancement import (
             PromptEnhancer,
         )
@@ -330,26 +407,25 @@ class NativeMediaFrontend:
         from sglang.multimodal_gen.runtime.scheduler_client import (
             async_scheduler_client,
         )
-        from sglang.multimodal_gen.runtime.server_warmup import (
-            should_run_synthetic_server_warmup,
-        )
 
         initialize = async_scheduler_client.initialize
         if "worker_failure" in inspect.signature(initialize).parameters:
             # Later native SGLang settles its own requests on stage failure.
-            initialize(self.server_args, worker_failure=runtime_failure)
+            initialize(self.server_args, worker_failure=self.runtime_failure)
         else:
             initialize(self.server_args)
-        watch = asyncio.create_task(self.watch_scheduler())
-        config = self.server_args.prompt_enhancer_config
-        enhancer = None if config is None else PromptEnhancer.from_file(config)
-        self.app.state.prompt_enhancer = enhancer
-        if should_run_synthetic_server_warmup(self.server_args):
-            warmup = asyncio.create_task(self.warm_up())
-        else:
-            warmup = None
-            self.ready.set()
+        warmup = watch = enhancer = None
+        # A failure before serving still releases what started, since the
+        # server keeps running when the routes start on first use.
         try:
+            watch = asyncio.create_task(self.watch_scheduler())
+            config = self.server_args.prompt_enhancer_config
+            enhancer = None if config is None else PromptEnhancer.from_file(config)
+            self.app.state.prompt_enhancer = enhancer
+            if self.warmup:
+                warmup = asyncio.create_task(self.warm_up())
+            else:
+                self.ready.set()
             yield
         finally:
             for task in (warmup, watch):
@@ -438,11 +514,23 @@ class NativeMediaFrontend:
     async def serve(self, scope: Scope, receive: Receive, send: Send) -> None:
         if self.unavailable.is_set():
             await self.refuse(scope, receive, send, self.unavailable_reason)
+        elif self.start_failure is not None:
+            await self.refuse(scope, receive, send, self.start_failure)
         elif self.warming:
             # Nothing waits on warmup, so warmup can never hold up shutdown.
             await self.refuse(scope, receive, send, "Native generation is warming up")
         else:
+            self.begin()
             await self.serve_while_available(scope, receive, send)
+
+    async def serve_started(self, scope: Scope, receive: Receive, send: Send) -> None:
+        # Requests that arrive while the routes start wait for the same start,
+        # shielded, so one that stops waiting never cancels it.
+        await asyncio.shield(self.start_task)
+        if self.start_failure is None:
+            await self.app(scope, receive, send)
+        else:
+            await self.refuse(scope, receive, send, self.start_failure)
 
     @staticmethod
     async def refuse(scope: Scope, receive: Receive, send: Send, reason: str) -> None:
@@ -458,7 +546,9 @@ class NativeMediaFrontend:
             started = started or message["type"] == "http.response.start"
             await send(message)
 
-        request = asyncio.ensure_future(self.app(scope, receive, send_tracked))
+        request = asyncio.ensure_future(
+            self.serve_started(scope, receive, send_tracked)
+        )
         unavailable = asyncio.ensure_future(self.unavailable.wait())
         try:
             await asyncio.wait(

@@ -156,6 +156,7 @@ def test_generation_factory_selects_cooperative_cancellation(
     import logging
     import os
 
+    from sglang.multimodal_gen.runtime import server_warmup
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
         DiffGenerator,
     )
@@ -205,6 +206,11 @@ def test_generation_factory_selects_cooperative_cancellation(
     monkeypatch.setattr(ServerArgs, "from_kwargs", lambda **kwargs: kwargs)
     monkeypatch.setattr(DiffGenerator, "from_server_args", start_workers)
     monkeypatch.setattr(stages, "model_request_fields", lambda server_args: frozenset())
+    monkeypatch.setattr(
+        server_warmup,
+        "should_run_synthetic_server_warmup",
+        lambda server_args: server_args["resolved"] == "native",
+    )
     with caplog.at_level(logging.WARNING, logger="sglang_omni.models.cosmos3.stages"):
         scheduler = stages.create_generation_scheduler(
             "checkpoint",
@@ -224,9 +230,12 @@ def test_generation_factory_selects_cooperative_cancellation(
     assert applied[0] is None
     assert activations[0] is None or not os.path.exists(activations[0])
     assert cancellation.ACTIVATION_ENV not in os.environ
-    # The native media routes load what the stage resolved.
+    # The native media routes load what the stage resolved, and read its
+    # warmup decision without loading the arguments.
     with open(tmp_path / "server_args.pickle", "rb") as handle:
-        assert pickle.load(handle) == {"resolved": case}
+        saved = pickle.load(handle)
+    assert pickle.loads(saved["server_args"]) == {"resolved": case}
+    assert saved["warmup"] is (case == "native")
 
 
 def test_text_variant_serves_the_reasoner_as_an_engine_stage():

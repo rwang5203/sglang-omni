@@ -54,8 +54,10 @@ def native(monkeypatch, tmp_path):
         handoff = tmp_path / "handoff"
         handoff.mkdir()
         path = handoff / "server_args.pickle"
-        path.write_bytes(pickle.dumps(native.args))
-        frontend = media.NativeMediaFrontend.build(str(path), client_fields)
+        warmup = native.warmup is not None
+        saved = {"server_args": pickle.dumps(native.args), "warmup": warmup}
+        path.write_bytes(pickle.dumps(saved))
+        frontend = media.NativeMediaFrontend.load(str(path), client_fields)
         assert not handoff.exists()
         return frontend
 
@@ -71,14 +73,14 @@ def native(monkeypatch, tmp_path):
         raise AssertionError("native server arguments built in the HTTP process")
 
     monkeypatch.setattr(server_args.ServerArgs, "from_kwargs", query_devices)
-    monkeypatch.setattr(server_args, "set_global_server_args", lambda args: None)
+    # Loading the arguments and routes runs once, when the routes start.
+    monkeypatch.setattr(
+        server_args,
+        "set_global_server_args",
+        lambda args: native.events.append("build"),
+    )
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "close", close)
-    monkeypatch.setattr(
-        server_warmup,
-        "should_run_synthetic_server_warmup",
-        lambda args: native.warmup is not None,
-    )
 
     async def warm_up(args, forward, *, fail_open):
         await native.warmup()
@@ -106,7 +108,10 @@ def serve(omni, frontend, check):
     asyncio.run(run())
 
 
-def test_native_routes_and_lifetime_are_composed_without_a_proxy(native):
+@pytest.mark.parametrize("native_requests", [0, 3])
+def test_native_routes_and_lifetime_are_composed_without_a_proxy(
+    native, native_requests
+):
     @asynccontextmanager
     async def omni_lifespan(app):
         native.events.append("omni_start")
@@ -121,17 +126,30 @@ def test_native_routes_and_lifetime_are_composed_without_a_proxy(native):
 
     frontend = native.build()
 
-    @frontend.app.get("/v1/images/owner")
-    def owner():
-        return {"owner": "native"}
-
     async def check(client, runtime_failure):
-        assert native.events == ["omni_start", "initialize"]
         assert (await client.get("/health")).json() == {"owner": "omni"}
-        assert (await client.get("/v1/images/owner")).json() == {"owner": "native"}
+        # Concurrent first requests wait for one start.
+        listed = await asyncio.gather(
+            *(client.get("/v1/videos") for _ in range(native_requests))
+        )
+        assert [response.status_code for response in listed] == [200] * len(listed)
+        if native_requests:
+            assert native.events == ["omni_start", "build", "initialize"]
+
+            @frontend.app.get("/v1/images/owner")
+            def owner():
+                return {"owner": "native"}
+
+            response = await client.get("/v1/images/owner")
+            assert response.json() == {"owner": "native"}
+        else:
+            pass
 
     serve(omni, frontend, check)
-    assert native.events == ["omni_start", "initialize", "close", "omni_stop"]
+    # A server whose clients never call the native routes loads no native
+    # module and starts no native scheduler client.
+    started = ["build", "initialize", "close"] if native_requests else []
+    assert native.events == ["omni_start", *started, "omni_stop"]
 
 
 # Native create_app also serves these, none of them behind Omni's admin key.
@@ -204,6 +222,37 @@ def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
     serve(create_app(RunningClient(), model_name="native"), frontend, check)
 
 
+@pytest.mark.parametrize("warmup", [False, True])
+def test_failed_native_start_answers_503_until_restart(native, tmp_path, warmup):
+    # A prompt enhancer config that cannot be read fails the native lifespan.
+    native.args.prompt_enhancer_config = str(tmp_path / "missing-enhancer.json")
+    if warmup:
+        native.warmup = asyncio.Event().wait
+    else:
+        pass
+    frontend = native.build()
+
+    async def check(client, runtime_failure):
+        if warmup:
+            # Readiness waits for the warmup, so the server stops.
+            with pytest.raises(RuntimeError, match="missing-enhancer"):
+                await asyncio.wait_for(frontend.wait_failed(), 5)
+        else:
+            pass
+        for _ in range(2):
+            response = await client.get("/v1/videos")
+            assert response.status_code == 503
+            assert "missing-enhancer.json" in response.json()["detail"]
+            assert "restart the server" in response.json()["detail"]
+        # One start, whose scheduler client closed again, and other routes
+        # keep serving.
+        assert native.events == ["build", "initialize", "close"]
+        assert (await client.get("/health")).status_code == (503 if warmup else 200)
+
+    serve(create_app(RunningClient(), model_name="native"), frontend, check)
+    assert native.events == ["build", "initialize", "close"]
+
+
 @pytest.mark.parametrize("installed", [False, True])
 def test_native_worker_failure_is_used_when_installed(native, monkeypatch, installed):
     from sglang.multimodal_gen.runtime import scheduler_client
@@ -223,8 +272,8 @@ def test_native_worker_failure_is_used_when_installed(native, monkeypatch, insta
     )
 
     async def check(client, runtime_failure):
-        assert received == [runtime_failure if installed else None]
         assert (await client.get("/v1/videos")).status_code == 200
+        assert received == [runtime_failure if installed else None]
 
     serve(FastAPI(), native.build(), check)
 
@@ -240,13 +289,15 @@ def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
     frontend = native.build()
     entered = asyncio.Event()
 
-    @frontend.app.post("/v1/images/generations-waiting")
     async def waiting():
         # Native SGLang waits like this for a scheduler that never answers.
         entered.set()
         await asyncio.Event().wait()
 
     async def check(client, runtime_failure):
+        assert (await client.get("/v1/videos")).status_code == 200
+        frontend.app.post("/v1/images/generations-waiting")(waiting)
+
         async def connected():
             while list(frontend.scheduler_events.values()) != [zmq.EVENT_CONNECTED]:
                 await asyncio.sleep(0.01)
@@ -395,7 +446,7 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     frontend = object()
     monkeypatch.setattr(
         media.NativeMediaFrontend,
-        "build",
+        "load",
         lambda path, request_fields: built.append(path) or frontend,
     )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
