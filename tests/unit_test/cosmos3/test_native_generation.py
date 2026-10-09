@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import queue
 import threading
+import time
 from types import SimpleNamespace
 
 import pytest
@@ -116,14 +117,51 @@ def test_native_failure_cannot_become_empty_success(result, tmp_path):
         scheduler.generate(payload())
 
 
-def test_dead_native_worker_fails_the_owning_stage(tmp_path):
-    generator = Generator(None)
-    generator.local_scheduler_process = [
-        SimpleNamespace(pid=1234, exitcode=2, is_alive=lambda: False)
-    ]
+@pytest.mark.parametrize("in_flight", [False, True])
+def test_dead_native_worker_fails_the_owning_stage(tmp_path, in_flight):
+    import multiprocessing
+    import time
+
+    worker = multiprocessing.get_context("spawn").Process(
+        target=time.sleep, args=(60,), daemon=True
+    )
+    worker.start()
+    entered = threading.Event()
+
+    class BlockedGenerator(Generator):
+        def generate(self, **kwargs):
+            # Native generation never returns once its scheduler is gone.
+            entered.set()
+            threading.Event().wait()
+
+    generator = BlockedGenerator(None)
+    generator.local_scheduler_process = [worker]
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    with pytest.raises(RuntimeError, match="1234 exited with code 2"):
+    failures = queue.Queue()
+
+    def run_request():
+        try:
+            scheduler.generate(payload())
+        except RuntimeError as exc:
+            failures.put(exc)
+
+    if in_flight:
+        threading.Thread(target=run_request, daemon=True).start()
+        assert entered.wait(5)
+    else:
+        pass
+    worker.kill()
+    worker.join(5)
+    if in_flight:
+        assert f"{worker.pid} exited" in str(failures.get(timeout=5))
+    else:
+        pass
+    deadline = time.monotonic() + 5
+    while scheduler.worker_failure is None and time.monotonic() < deadline:
+        time.sleep(0.01)
+    with pytest.raises(RuntimeError, match=f"{worker.pid} exited"):
         scheduler.next_message()
+    assert list(tmp_path.iterdir()) == []
 
 
 def test_queued_abort_does_not_dispatch_native_work(tmp_path):
@@ -168,8 +206,11 @@ def test_generate_route_parameters_reach_the_native_request(tmp_path):
     assert params["num_inference_steps"] == 35
 
 
-def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path):
+@pytest.mark.parametrize("mode", ["native", "plugin"])
+def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path, mode):
     from pathlib import Path
+
+    from sglang_omni.native_generation import cancellation
 
     started = threading.Event()
     settled = threading.Event()
@@ -177,18 +218,27 @@ def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path
     keep.write_text("keep")
 
     class CancellableGenerator(Generator):
-        supports_cancellation = True
-
-        def generate(self, *, sampling_params_kwargs, cancellation_event):
-            target = Path(sampling_params_kwargs["output_path"]) / "partial.mp4"
-            target.write_bytes(b"partial")
+        def generate(self, *, sampling_params_kwargs, **kwargs):
+            directory = Path(sampling_params_kwargs["output_path"])
+            (directory / "partial.mp4").write_bytes(b"partial")
             started.set()
-            assert cancellation_event.wait(3)
+            if mode == "native":
+                assert kwargs["cancellation_event"].wait(3)
+            else:
+                # The native worker stops once its stage marks the request.
+                assert (directory / cancellation.ARMED_MARKER).exists()
+                marker = directory / cancellation.CANCELLED_MARKER
+                deadline = time.monotonic() + 3
+                while not marker.exists() and time.monotonic() < deadline:
+                    time.sleep(0.01)
+                assert marker.exists()
             settled.set()
-            raise RuntimeError("native cancellation settled")
+            return None
 
     generator = CancellableGenerator(None)
-    scheduler = NativeGenerationScheduler(generator, str(tmp_path))
+    scheduler = NativeGenerationScheduler(
+        generator, str(tmp_path), cancellation_mode=mode
+    )
     scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload()))
     thread = threading.Thread(target=scheduler.start)
     thread.start()

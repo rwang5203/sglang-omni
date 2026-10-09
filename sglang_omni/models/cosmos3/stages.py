@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import logging
 import multiprocessing
+import multiprocessing.connection
+import os
 import queue
 import shutil
 import tempfile
@@ -15,12 +17,13 @@ from pathlib import Path
 from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from sglang_omni.native_generation import cancellation
 from sglang_omni.preprocessing.resource_connector import (
     MediaPolicyError,
     get_global_resource_connector,
 )
 from sglang_omni.proto import StagePayload
-from sglang_omni.scheduling.message import OutgoingMessage
+from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 logger = logging.getLogger(__name__)
@@ -270,29 +273,98 @@ class NativeGenerationScheduler(SimpleScheduler):
         generator: object,
         output_dir: str,
         request_fields: frozenset[str] = COMMON_REQUEST_FIELDS,
+        *,
+        cancellation_mode: str | None = None,
     ):
+        """``cancellation_mode`` is "native" when the native API cancels,
+        "plugin" when the Omni plugin runs in the native worker, else None."""
         self.generator = generator
         self.output_dir = output_dir
         self.request_fields = request_fields
+        self.cancellation_mode = cancellation_mode
         self.native_requests: dict[str, GenerationRequest] = {}
         self.delivered: OrderedDict[str, Path] = OrderedDict()
+        self.workers = list(generator.local_scheduler_process or [])
+        self.worker_failure: RuntimeError | None = None
+        self.closing = False
         super().__init__(
             self.generate,
             abort_callback=self.cancel_native,
             shutdown_callback=generator.shutdown,
         )
         self.requires_tp_work_fanout = False
+        if self.workers:
+            threading.Thread(
+                target=self.watch_workers, name="native-worker-watch", daemon=True
+            ).start()
+        else:
+            pass
 
-    def next_message(self):
-        for process in self.generator.local_scheduler_process or []:
-            if not process.is_alive():
-                raise RuntimeError(
-                    f"Native generation worker {process.pid} exited "
-                    f"with code {process.exitcode}"
-                )
+    @staticmethod
+    def worker_exit(process: multiprocessing.process.BaseProcess) -> RuntimeError:
+        return RuntimeError(
+            f"Native generation worker {process.pid} exited "
+            f"with code {process.exitcode}"
+        )
+
+    def watch_workers(self) -> None:
+        """Record a native worker exit while idle, without polling."""
+        sentinels = {process.sentinel: process for process in self.workers}
+        ready = multiprocessing.connection.wait(list(sentinels))
+        if not self.closing and self.worker_failure is None:
+            self.worker_failure = self.worker_exit(sentinels[ready[0]])
+            logger.error("%s, stopping the generation stage", self.worker_failure)
+        else:
+            pass
+
+    def next_message(self) -> IncomingMessage | None:
+        if self.worker_failure is not None:
+            raise self.worker_failure
+        else:
+            pass
+        return super().next_message()
+
+    def run_native(self, kwargs: dict[str, object]) -> object:
+        """Run native generation on a helper thread and wait for it or a worker exit.
+
+        Native generation blocks until its scheduler answers, which never
+        happens once a worker died, so waiting on the worker sentinels fails the
+        request at once. The stage then stops on its next scheduler iteration.
+        """
+        reader, writer = multiprocessing.Pipe(duplex=False)
+        outcome: dict[str, object] = {}
+
+        def run() -> None:
+            try:
+                outcome["result"] = self.generator.generate(**kwargs)
+            except BaseException as exc:
+                outcome["error"] = exc
+            finally:
+                writer.close()
+
+        threading.Thread(target=run, name="native-generation", daemon=True).start()
+        sentinels = {process.sentinel: process for process in self.workers}
+        try:
+            ready = multiprocessing.connection.wait([reader, *sentinels])
+        finally:
+            reader.close()
+        if reader not in ready:
+            failure = self.worker_exit(sentinels[ready[0]])
+            if self.worker_failure is None:
+                self.worker_failure = failure
             else:
                 pass
-        return super().next_message()
+            raise failure
+        elif "error" in outcome:
+            raise outcome["error"]
+        else:
+            return outcome.get("result")
+
+    def signal_native_cancellation(self, directory: Path) -> None:
+        try:
+            (directory / cancellation.CANCELLED_MARKER).touch()
+        except FileNotFoundError:
+            pass
 
     @staticmethod
     def remove_request_directory(directory: Path) -> None:
@@ -303,6 +375,7 @@ class NativeGenerationScheduler(SimpleScheduler):
 
     def cancel_native(self, request_id: str) -> None:
         directory = None
+        signal = None
         with self.abort_lock:
             request = self.native_requests.get(request_id)
             if request is not None:
@@ -311,10 +384,16 @@ class NativeGenerationScheduler(SimpleScheduler):
                 if not request.running and not request.delivering:
                     self.native_requests.pop(request_id)
                     directory = request.directory
+                elif request.running and self.cancellation_mode == "plugin":
+                    signal = request.directory
                 else:
                     pass
             else:
                 directory = self.delivered.pop(request_id, None)
+        if signal is not None:
+            self.signal_native_cancellation(signal)
+        else:
+            pass
         if directory is not None:
             self.remove_request_directory(directory)
         else:
@@ -387,14 +466,20 @@ class NativeGenerationScheduler(SimpleScheduler):
 
     def stop(self) -> None:
         directories = []
+        signals = []
+        self.closing = True
         with self.abort_lock:
             for request_id, request in list(self.native_requests.items()):
                 request.cancelled.set()
                 if not request.running and not request.delivering:
                     self.native_requests.pop(request_id)
                     directories.append(request.directory)
+                elif request.running and self.cancellation_mode == "plugin":
+                    signals.append(request.directory)
                 else:
                     pass
+        for directory in signals:
+            self.signal_native_cancellation(directory)
         try:
             super().stop()
         finally:
@@ -417,20 +502,30 @@ class NativeGenerationScheduler(SimpleScheduler):
             self.native_requests[payload.request_id] = request
         params["output_path"] = str(request.directory)
         kwargs = {"sampling_params_kwargs": params}
+        markers = []
         if (
-            getattr(self.generator, "supports_cancellation", False)
+            self.cancellation_mode == "native"
             and params.get("num_outputs_per_prompt", 1) == 1
         ):
             kwargs["cancellation_event"] = request.cancelled
+        elif self.cancellation_mode == "plugin":
+            markers = [
+                request.directory / cancellation.ARMED_MARKER,
+                request.directory / cancellation.CANCELLED_MARKER,
+            ]
         else:
             pass
         succeeded = False
         try:
+            if markers:
+                markers[0].touch()
+            else:
+                pass
             fetched = police_media_inputs(
                 params, self.request_fields, request.directory
             )
-            results = self.generator.generate(**kwargs)
-            for path in fetched:
+            results = self.run_native(kwargs)
+            for path in [*fetched, *markers]:
                 path.unlink(missing_ok=True)
             if results is None:
                 raise RuntimeError(
@@ -555,35 +650,39 @@ def create_generation_scheduler(
     )
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
-    # Only the cancellable native path watches worker liveness. Without it a
-    # worker death leaves the request waiting forever, so refuse builds that
-    # lack the capability. Configs whose instance reports False and requests
-    # with more than one output per prompt still take the plain path.
-    # note (Richard Wang): some supported configs report False, so check the class.
-    if not hasattr(DiffGenerator, "supports_cancellation"):
-        raise RuntimeError(
-            "Cosmos3 generation requires SGLang cooperative generation "
-            "cancellation (DiffGenerator.supports_cancellation), which the "
-            "installed SGLang does not provide. Without it, an aborted request "
-            "cannot stop its native generation, and a request in flight when "
-            "the generation worker dies waits indefinitely. Install an SGLang "
-            "build with this capability, then restart."
-        )
-    else:
-        pass
     kwargs = native_server_kwargs(
         model_path, gpu_id, server_args_overrides, runtime_gpu_ids
     )
     output_dir = str(Path(output_dir).resolve())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
-    generator = DiffGenerator.from_server_args(ServerArgs.from_kwargs(**kwargs))
-    if not generator.supports_cancellation:
+    # A later SGLang that cancels natively takes precedence over the plugin.
+    native_api = hasattr(DiffGenerator, "supports_cancellation")
+    handshake = (
+        tempfile.mkdtemp(prefix="sglang-omni-native-")
+        if not native_api and kwargs["num_gpus"] == 1
+        else None
+    )
+    try:
+        with cancellation.activation_environment(handshake):
+            generator = DiffGenerator.from_server_args(ServerArgs.from_kwargs(**kwargs))
+        if native_api:
+            mode = "native" if generator.supports_cancellation else None
+        elif handshake is not None and os.path.exists(
+            cancellation.handshake_path(handshake, 0)
+        ):
+            mode = "plugin"
+        else:
+            mode = None
+    finally:
+        if handshake is not None:
+            shutil.rmtree(handshake, ignore_errors=True)
+        else:
+            pass
+    if mode is None:
         logger.warning(
-            "Cooperative generation cancellation is unavailable for this native "
-            "configuration, for example with more than one native GPU. An "
-            "aborted request keeps the generation stage busy until its native "
-            "generation finishes, and a request in flight when the generation "
-            "worker dies waits indefinitely."
+            "%s An aborted request keeps the generation stage busy until its "
+            "native generation finishes.",
+            degraded_cancellation_reason(native_api, kwargs["num_gpus"]),
         )
     else:
         pass
@@ -592,7 +691,25 @@ def create_generation_scheduler(
             generator,
             output_dir,
             COMMON_REQUEST_FIELDS | model_request_fields(generator.server_args),
+            cancellation_mode=mode,
         )
     except BaseException:
         generator.shutdown()
         raise
+
+
+def degraded_cancellation_reason(native_api: bool, num_gpus: object) -> str:
+    if native_api:
+        return "This native configuration reports no cooperative cancellation."
+    elif num_gpus != 1:
+        return (
+            "Cooperative generation cancellation covers one native GPU, and "
+            f"this stage runs {num_gpus}."
+        )
+    else:
+        return (
+            "Cooperative generation cancellation did not start in the native "
+            "worker. Install sglang-omni as a package so native SGLang finds "
+            "its sglang.multimodal_gen.plugins entry point, and list "
+            f"{cancellation.PLUGIN_NAME} in SGLANG_PLUGINS when that variable is set."
+        )
