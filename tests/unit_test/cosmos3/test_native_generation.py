@@ -43,8 +43,6 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         "guidance_scale": 0.0,
         "num_frames": 33,
         "seed": 0,
-        "output_path": "/unowned",
-        "output_file_name": "../outside",
     }
     request = payload(original, diffusion={"guidance_scale": 5.0})
     first = build_sampling_params(request, str(tmp_path))
@@ -58,7 +56,6 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
     assert first["output_file_name"] != second["output_file_name"]
     assert "/" not in first["output_file_name"]
     assert original["guidance_scale"] == 0.0
-    assert original["output_file_name"] == "../outside"
 
 
 @pytest.mark.parametrize(
@@ -70,7 +67,9 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         payload({"seed": 1}),
         payload("A lake", diffusion=[]),
         payload("A lake", stream=True),
-        payload({"prompt": "A lake", "prompt_file_path": "prompts.txt"}),
+        payload({"prompt": "A lake", "prompt_path": "prompts.txt"}),
+        payload("A lake", diffusion={"output_path": "/unowned"}),
+        payload("A lake", stage_params={"generation": {"num_outputs_per_prompt": 11}}),
     ],
 )
 def test_invalid_request_is_rejected_before_native_dispatch(invalid_payload, tmp_path):
@@ -232,3 +231,30 @@ def test_abort_between_native_completion_and_omni_emission_releases_media(tmp_pa
     assert scheduler.outbox.empty()
     assert not list(tmp_path.iterdir())
     assert not scheduler.native_requests
+
+
+@pytest.mark.parametrize("inside", [True, False])
+def test_media_paths_follow_the_server_media_policy(tmp_path, monkeypatch, inside):
+    from sglang_omni.models.cosmos3 import stages
+    from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
+
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    image = (allowed if inside else tmp_path) / "input.png"
+    image.write_bytes(b"image")
+    connector = MultiModalResourceConnector(allowed_local_media_path=allowed)
+    monkeypatch.setattr(stages, "get_global_resource_connector", lambda: connector)
+    output = tmp_path / "outputs"
+    output.mkdir()
+    generator = Generator(None)
+    scheduler = NativeGenerationScheduler(generator, str(output))
+    request = payload({"prompt": "A lake", "image_path": str(image)})
+    with pytest.raises((RuntimeError, ValueError)) as failure:
+        scheduler.generate(request)
+    if inside:
+        assert "without producing an output" in str(failure.value)
+        assert generator.calls[0]["sampling_params_kwargs"]["image_path"] == str(image)
+    else:
+        assert "image_path refused" in str(failure.value)
+        assert generator.calls == []
+    assert list(output.iterdir()) == []

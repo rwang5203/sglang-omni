@@ -11,12 +11,82 @@ import threading
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
+from sglang_omni.preprocessing.resource_connector import (
+    MediaPolicyError,
+    get_global_resource_connector,
+)
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 logger = logging.getLogger(__name__)
+
+REQUEST_ERROR = "Native generation request"
+
+# SamplingParams fields that native SGLang's image and video routes accept from
+# clients (ImageGenerationsRequest and VideoGenerationsRequest in the
+# multimodal_gen OpenAI protocol). Server paths such as output_path,
+# prompt_path, perf_dump_path and model paths, profiling switches and raw
+# diffusers kwargs stay with the server. Each model adds the fields it declares
+# for those routes, see model_request_fields.
+COMMON_REQUEST_FIELDS = frozenset(
+    {
+        "attention_backend_override",
+        "cache_dit_params",
+        "cfg_gate_step",
+        "enable_cache_dit",
+        "enable_frame_interpolation",
+        "enable_teacache",
+        "enable_upscaling",
+        "flow_shift",
+        "fps",
+        "frame_interpolation_exp",
+        "frame_interpolation_scale",
+        "generator_device",
+        "guidance_scale",
+        "guidance_scale_2",
+        "height",
+        "image_path",
+        "max_sequence_length",
+        "negative_prompt",
+        "num_frames",
+        "num_inference_steps",
+        "num_outputs_per_prompt",
+        "output_compression",
+        "output_quality",
+        "progressive_delta",
+        "progressive_levels",
+        "progressive_mode",
+        "prompt",
+        "quality",
+        "seed",
+        "skip_softmax_params",
+        "task_type",
+        "true_cfg_scale",
+        "upscaling_scale",
+        "video_path",
+        "width",
+    }
+)
+
+# Native image and video routes clamp n to this many outputs per prompt.
+# Native SGLang keeps the bound inline, so it is restated here.
+NATIVE_MAX_OUTPUTS_PER_PROMPT = 10
+
+
+def model_request_fields(server_args: object) -> frozenset[str]:
+    """Fields the served model declares for native image and video requests."""
+    from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+        get_sampling_request_extra_fields,
+        resolve_sampling_params_cls,
+    )
+
+    sampling_params_cls = resolve_sampling_params_cls(server_args)
+    return get_sampling_request_extra_fields(
+        sampling_params_cls, "image"
+    ) | get_sampling_request_extra_fields(sampling_params_cls, "video")
 
 
 def resolve_generation_options(
@@ -69,7 +139,12 @@ def resolve_generation_options(
     return params
 
 
-def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, Any]:
+def build_sampling_params(
+    payload: StagePayload,
+    output_dir: str,
+    request_fields: frozenset[str] = COMMON_REQUEST_FIELDS,
+) -> dict[str, Any]:
+    """Lower a request to native sampling fields that clients may set."""
     inputs = payload.request.inputs
     if isinstance(inputs, str):
         inputs = {"prompt": inputs}
@@ -78,6 +153,15 @@ def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, A
     else:
         pass
     params = resolve_generation_options(payload.request.params, inputs)
+    refused = sorted(set(params) - request_fields)
+    if refused:
+        raise ValueError(
+            f"{REQUEST_ERROR} cannot set {', '.join(refused)}. Clients may set "
+            "the fields that the native image and video routes accept for this "
+            "model, and the server owns paths it writes or reads on its own."
+        )
+    else:
+        pass
     if not isinstance(params.get("prompt"), str) or not params["prompt"].strip():
         raise ValueError("Generation requires a nonempty prompt")
     else:
@@ -86,8 +170,16 @@ def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, A
         raise ValueError("Use the native realtime video API for streaming generation")
     else:
         pass
-    if params.get("prompt_file_path"):
-        raise ValueError("Submit prompts individually through the Omni client")
+    outputs = params.get("num_outputs_per_prompt", 1)
+    if (
+        not isinstance(outputs, int)
+        or isinstance(outputs, bool)
+        or not 1 <= outputs <= NATIVE_MAX_OUTPUTS_PER_PROMPT
+    ):
+        raise ValueError(
+            f"{REQUEST_ERROR} num_outputs_per_prompt must be an integer from 1 "
+            f"to {NATIVE_MAX_OUTPUTS_PER_PROMPT}, as on the native routes"
+        )
     else:
         pass
     params.update(
@@ -99,12 +191,74 @@ def build_sampling_params(payload: StagePayload, output_dir: str) -> dict[str, A
     return params
 
 
+def police_media_inputs(
+    params: dict[str, Any], request_fields: frozenset[str], directory: Path
+) -> list[Path]:
+    """Apply the server media policy to client media paths and URLs.
+
+    Without a configured policy the native loaders read them as before. With
+    one, local paths and file URLs must sit in the allowed directory, and
+    http(s) URLs are fetched through the connector, which checks the domain on
+    every redirect, into the request directory. Returns the fetched files.
+    """
+    connector = get_global_resource_connector()
+    if (
+        connector.allowed_local_media_path is None
+        and not connector.allowed_media_domains
+    ):
+        return []
+    else:
+        pass
+    fetched: list[Path] = []
+
+    def police(name: str, source: object) -> str:
+        if not isinstance(source, str):
+            raise ValueError(f"{REQUEST_ERROR} {name} must be a path or URL")
+        elif source.startswith("data:"):
+            return source
+        elif source.startswith(("http://", "https://")):
+            data, _ = connector.load_http_bytes(
+                source, timeout=connector.connection.timeout, max_bytes=None
+            )
+            target = (
+                directory / f"input_{uuid4().hex}{Path(urlparse(source).path).suffix}"
+            )
+            target.write_bytes(data)
+            fetched.append(target)
+            return str(target)
+        elif source.startswith("file://"):
+            return str(connector.local_media_path(unquote(urlparse(source).path)))
+        else:
+            return str(connector.local_media_path(source))
+
+    for name in sorted(params):
+        if name not in request_fields or not name.endswith("_path"):
+            continue
+        else:
+            pass
+        value = params[name]
+        try:
+            if isinstance(value, list):
+                params[name] = [police(name, item) for item in value]
+            else:
+                params[name] = police(name, value)
+        except MediaPolicyError as exc:
+            raise ValueError(f"{REQUEST_ERROR} {name} refused: {exc}") from exc
+    return fetched
+
+
 class NativeGenerationScheduler(SimpleScheduler):
     """Keep scheduler and pipeline execution in the native SGLang runtime."""
 
-    def __init__(self, generator: object, output_dir: str):
+    def __init__(
+        self,
+        generator: object,
+        output_dir: str,
+        request_fields: frozenset[str] = COMMON_REQUEST_FIELDS,
+    ):
         self.generator = generator
         self.output_dir = output_dir
+        self.request_fields = request_fields
         self.native_requests: dict[str, GenerationRequest] = {}
         super().__init__(
             self.generate,
@@ -218,7 +372,7 @@ class NativeGenerationScheduler(SimpleScheduler):
                 self.remove_request_directory(directory)
 
     def generate(self, payload: StagePayload) -> StagePayload:
-        params = build_sampling_params(payload, self.output_dir)
+        params = build_sampling_params(payload, self.output_dir, self.request_fields)
         with self.abort_lock:
             if payload.request_id in self.aborted:
                 return payload
@@ -240,7 +394,12 @@ class NativeGenerationScheduler(SimpleScheduler):
             pass
         succeeded = False
         try:
+            fetched = police_media_inputs(
+                params, self.request_fields, request.directory
+            )
             results = self.generator.generate(**kwargs)
+            for path in fetched:
+                path.unlink(missing_ok=True)
             if results is None:
                 raise RuntimeError(
                     "Native generation failed without producing an output"
@@ -396,7 +555,11 @@ def create_generation_scheduler(
     else:
         pass
     try:
-        return NativeGenerationScheduler(generator, output_dir)
+        return NativeGenerationScheduler(
+            generator,
+            output_dir,
+            COMMON_REQUEST_FIELDS | model_request_fields(generator.server_args),
+        )
     except BaseException:
         generator.shutdown()
         raise

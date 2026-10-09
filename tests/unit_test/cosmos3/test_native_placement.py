@@ -183,6 +183,7 @@ def test_generation_factory_warns_when_the_config_cannot_cancel(
     )
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
+    from sglang_omni.models.cosmos3 import stages
     from sglang_omni.models.cosmos3.stages import create_generation_scheduler
     from sglang_omni.utils import device as device_utils
 
@@ -195,10 +196,12 @@ def test_generation_factory_warns_when_the_config_cannot_cancel(
     generator = SimpleNamespace(
         shutdown=lambda: None,
         local_scheduler_process=[],
+        server_args=None,
         supports_cancellation=instance_supported,
     )
     monkeypatch.setattr(ServerArgs, "from_kwargs", lambda **kwargs: kwargs)
     monkeypatch.setattr(DiffGenerator, "from_server_args", lambda args: generator)
+    monkeypatch.setattr(stages, "model_request_fields", lambda server_args: frozenset())
     with caplog.at_level(logging.WARNING, logger="sglang_omni.models.cosmos3.stages"):
         create_generation_scheduler("checkpoint", output_dir=str(tmp_path))
     assert ("cancellation is unavailable" in caplog.text) is not instance_supported
