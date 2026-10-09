@@ -142,6 +142,17 @@ class StageLaunchConfig:
         return self.role in {"single", "leader"}
 
     @property
+    def owned_gpu_ids(self) -> list[int]:
+        """The placed GPUs, including those a native engine reserves."""
+        runtime_gpu_ids = self.factory_kwargs.get("runtime_gpu_ids")
+        if runtime_gpu_ids is not None:
+            return list(runtime_gpu_ids)
+        elif self.gpu_id is not None:
+            return [int(self.gpu_id)]
+        else:
+            return []
+
+    @property
     def is_leader(self) -> bool:
         return self.role == "leader"
 
@@ -168,14 +179,17 @@ def get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
     Hard invariant: a TP stage (``tp_size > 1``) must own its OS process
     exclusively. Its CUDA env remap and NCCL settings depend on being the sole
     tenant, so mixing a TP stage with any other stage in the same process group
-    is a placement bug.
+    is a placement bug. A stage that owns native child processes also owns its
+    process, which the platform may narrow to that stage's GPUs.
     """
-    if len(spec.stage_specs) > 1 and any(
-        s.allow_child_processes for s in spec.stage_specs
-    ):
+    native = [s for s in spec.stage_specs if s.allow_child_processes]
+    if native and len(spec.stage_specs) > 1:
         raise ValueError(
             "A stage that owns native child processes must own its OS process"
         )
+    elif native:
+        env = current_platform.get_stage_process_env(native[0])
+        return {**env, NATIVE_GPUS_NARROWED_ENV: "true"} if env else {}
     else:
         pass
     tp_stages = [s for s in spec.stage_specs if s.tp_size > 1]
@@ -489,6 +503,11 @@ class StageGroup:
             self._processes.clear()  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
             self.ready_events.clear()
             self.startup_error_channels.clear()
+
+
+# Set by the parent when it narrows a stage that owns native child processes
+# to its GPUs, so the child maps placement to local device ids.
+NATIVE_GPUS_NARROWED_ENV = "SGLANG_OMNI_NATIVE_GPUS_NARROWED"
 
 
 def stage_process_main(
@@ -1054,7 +1073,20 @@ def prepare_accelerator_environment(
     returns, and normalizes gpu_id only when the platform narrowed the process to a
     single visible device.
     """
-    if (
+    if spec.allow_child_processes:
+        # The parent narrows this process before it starts, so local ids
+        # follow the declared GPU order.
+        if os.environ.get(NATIVE_GPUS_NARROWED_ENV) == "true":
+            normalize_spec_gpu_id_to_local_device(spec)
+            log.info(
+                "Stage %s sees only its GPUs, CUDA_VISIBLE_DEVICES=%s",
+                spec.stage_name,
+                os.environ.get("CUDA_VISIBLE_DEVICES"),
+            )
+        else:
+            pass
+        return
+    elif (
         current_platform.is_cuda_alike()
         and os.environ.get("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS") == "true"
     ):
@@ -1121,6 +1153,11 @@ def normalize_spec_gpu_id_to_local_device(spec: StageLaunchConfig) -> None:
             kwargs["gpu_id"] = 0
         else:
             pass
+    runtime_gpu_ids = spec.factory_kwargs.get("runtime_gpu_ids")
+    if runtime_gpu_ids is not None:
+        spec.factory_kwargs["runtime_gpu_ids"] = list(range(len(runtime_gpu_ids)))
+    else:
+        pass
 
 
 def process_name(spec: StageWorkerProcessSpec) -> str:

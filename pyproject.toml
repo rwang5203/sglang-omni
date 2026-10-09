@@ -130,9 +130,6 @@ sgl-omni-router-py = "sglang_omni_router.python.serve:main"
 [project.entry-points."sglang.serve_backends"]
 omni = "sglang_omni.cli.sglang_backend:create_backend"
 
-[project.entry-points."sglang.multimodal_gen.plugins"]
-omni_generation_cancellation = "sglang_omni.native_generation.cancellation:register"
-
 [project.urls]
 Documentation = "https://sgl-project.github.io/sglang-omni/"
 Issues = "https://github.com/sgl-project/sglang-omni/issues"

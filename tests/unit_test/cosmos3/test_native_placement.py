@@ -159,6 +159,7 @@ def test_generation_factory_selects_cooperative_cancellation(
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
         DiffGenerator,
     )
+    from sglang.multimodal_gen.runtime.platforms import plugins
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
     from sglang_omni.models.cosmos3 import stages
@@ -176,9 +177,17 @@ def test_generation_factory_selects_cooperative_cancellation(
         monkeypatch.delattr(DiffGenerator, "supports_cancellation", raising=False)
     monkeypatch.delenv(cancellation.ACTIVATION_ENV, raising=False)
     activations = []
+    applied = []
+    monkeypatch.setattr(
+        plugins,
+        "apply_plugin_hooks",
+        lambda: applied.append(os.environ.get(cancellation.ACTIVATION_ENV)),
+    )
 
     def start_workers(args):
-        # Stands in for a native worker that ran the plugin's handshake.
+        # Native applies plugin hooks here too, then starts a worker that ran
+        # the plugin's handshake.
+        plugins.apply_plugin_hooks()
         directory = os.environ.get(cancellation.ACTIVATION_ENV)
         activations.append(directory)
         if case == "plugin":
@@ -210,6 +219,9 @@ def test_generation_factory_selects_cooperative_cancellation(
     # and the handshake directory and the variable do not outlive startup.
     armed = case in ("plugin", "plugin_missing")
     assert (activations[0] is not None) is armed
+    # Native applies hooks once per process, so the host's first application
+    # must not see the activation it sets for its workers.
+    assert applied[0] is None
     assert activations[0] is None or not os.path.exists(activations[0])
     assert cancellation.ACTIVATION_ENV not in os.environ
     # The native media routes load what the stage resolved.

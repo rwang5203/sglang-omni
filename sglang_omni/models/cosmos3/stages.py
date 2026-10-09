@@ -15,8 +15,7 @@ import shutil
 import stat
 import tempfile
 import threading
-from collections import OrderedDict
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.parse import unquote, urlparse, urlunparse
 from uuid import uuid4
@@ -161,12 +160,14 @@ def resolve_generation_options(
     stage_sampling = request_params.get("stage_sampling")
     if stage_sampling is not None:
         if not isinstance(stage_sampling, dict):
-            raise ValueError("stage_sampling must be a mapping")
+            raise ValueError(f"{REQUEST_ERROR} stage_sampling must be a mapping")
         else:
             pass
         generation = stage_sampling.get("generation", {})
         if not isinstance(generation, dict):
-            raise ValueError("Generation stage sampling must be a mapping")
+            raise ValueError(
+                f"{REQUEST_ERROR} stage_sampling generation must be a mapping"
+            )
         else:
             pass
         if generation.get("seed") is not None:
@@ -177,19 +178,21 @@ def resolve_generation_options(
         pass
     overrides = request_params.get("diffusion", {})
     if not isinstance(overrides, dict):
-        raise ValueError("diffusion parameters must be a mapping")
+        raise ValueError(f"{REQUEST_ERROR} diffusion must be a mapping")
     else:
         pass
     params.update(overrides)
     stage_params = request_params.get("stage_params")
     if stage_params is not None:
         if not isinstance(stage_params, dict):
-            raise ValueError("stage_params must be a mapping")
+            raise ValueError(f"{REQUEST_ERROR} stage_params must be a mapping")
         else:
             pass
         generation = stage_params.get("generation", {})
         if not isinstance(generation, dict):
-            raise ValueError("Generation stage parameters must be a mapping")
+            raise ValueError(
+                f"{REQUEST_ERROR} stage_params generation must be a mapping"
+            )
         else:
             pass
         params.update(generation)
@@ -208,7 +211,9 @@ def build_sampling_params(
     if isinstance(inputs, str):
         inputs = {"prompt": inputs}
     elif not isinstance(inputs, dict):
-        raise ValueError("Generation inputs must be a prompt or native sampling fields")
+        raise ValueError(
+            f"{REQUEST_ERROR} inputs must be a prompt or native sampling fields"
+        )
     else:
         pass
     params = resolve_generation_options(payload.request.params, inputs)
@@ -222,11 +227,14 @@ def build_sampling_params(
     else:
         pass
     if not isinstance(params.get("prompt"), str) or not params["prompt"].strip():
-        raise ValueError("Generation requires a nonempty prompt")
+        raise ValueError(f"{REQUEST_ERROR} requires a nonempty prompt")
     else:
         pass
     if payload.request.params.get("stream"):
-        raise ValueError("Use the native realtime video API for streaming generation")
+        raise ValueError(
+            f"{REQUEST_ERROR} cannot stream. Use the native realtime video API "
+            "for streaming generation"
+        )
     else:
         pass
     outputs = params.get("num_outputs_per_prompt", 1)
@@ -328,20 +336,17 @@ def police_media_inputs(
 class NativeGenerationScheduler(SimpleScheduler):
     """Keep scheduler and pipeline execution in the native SGLang runtime.
 
-    Each request saves its media in its own directory under output_dir.
-    Delivered media belongs to the receiver of the completion, and the stage
-    never removes it. With inline_media the stage instead returns each output
-    as bytes and removes the directory at once, for a receiver that is another
-    stage. The stage removes a request directory when the request
-    fails, is aborted, or is dropped before the coordinator accepts its
-    completion. An abort observed during or after delivery also removes it,
-    because the coordinator aborts only requests it has not completed, so it
-    drops that completion.
+    Native generation of each request runs in its own workspace directory
+    under output_dir, which the stage removes once generation settles, and
+    the saved media then sit in output_dir. Saved media belong to whoever
+    holds the result. The stage removes them while it still holds them: when
+    the request fails, is aborted before routing hands the completion to the
+    transport, or that hand off fails. After the transport accepted the
+    completion, the coordinator owns the media and removes them if it drops
+    the completion. With inline_media the stage instead returns each output
+    as bytes read from the workspace, for a receiver that is another stage,
+    so no saved media leave the workspace.
     """
-
-    # The same retention the scheduler keeps for abort tombstones, which
-    # outlasts any completion the coordinator has yet to read.
-    retained_deliveries = 10000
 
     def __init__(
         self,
@@ -360,7 +365,6 @@ class NativeGenerationScheduler(SimpleScheduler):
         self.cancellation_mode = cancellation_mode
         self.inline_media = inline_media
         self.native_requests: dict[str, GenerationRequest] = {}
-        self.delivered: OrderedDict[str, Path] = OrderedDict()
         self.workers = list(generator.local_scheduler_process or [])
         self.worker_failure: RuntimeError | None = None
         self.closing = False
@@ -437,9 +441,11 @@ class NativeGenerationScheduler(SimpleScheduler):
         else:
             return outcome.get("result")
 
-    def signal_native_cancellation(self, directory: Path) -> None:
+    def signal_native_cancellation(self, request: GenerationRequest) -> None:
+        """Mark a running request cancelled. Call with abort_lock held, so the
+        marker lands before generate removes the request workspace."""
         try:
-            (directory / cancellation.CANCELLED_MARKER).touch()
+            (request.directory / cancellation.CANCELLED_MARKER).touch()
         except FileNotFoundError:
             pass
 
@@ -450,29 +456,31 @@ class NativeGenerationScheduler(SimpleScheduler):
         except FileNotFoundError:
             pass
 
+    @staticmethod
+    def remove_outputs(request: GenerationRequest) -> None:
+        for path in request.outputs:
+            path.unlink(missing_ok=True)
+
     def cancel_native(self, request_id: str) -> None:
-        directory = None
-        signal = None
+        discarded = None
         with self.abort_lock:
             request = self.native_requests.get(request_id)
-            if request is not None:
-                request.aborted = True
-                request.cancelled.set()
-                if not request.running and not request.delivering:
-                    self.native_requests.pop(request_id)
-                    directory = request.directory
-                elif request.running and self.cancellation_mode == "plugin":
-                    signal = request.directory
-                else:
-                    pass
+            if request is None:
+                # Nothing held, or the transport accepted the completion and
+                # the coordinator owns its media.
+                return
             else:
-                directory = self.delivered.pop(request_id, None)
-        if signal is not None:
-            self.signal_native_cancellation(signal)
-        else:
-            pass
-        if directory is not None:
-            self.remove_request_directory(directory)
+                pass
+            request.cancelled.set()
+            if not request.running and not request.delivering:
+                self.native_requests.pop(request_id)
+                discarded = request
+            elif request.running and self.cancellation_mode == "plugin":
+                self.signal_native_cancellation(request)
+            else:
+                pass
+        if discarded is not None:
+            self.remove_outputs(discarded)
         else:
             pass
 
@@ -482,20 +490,20 @@ class NativeGenerationScheduler(SimpleScheduler):
         result: object,
         outbox: queue.Queue[OutgoingMessage],
     ) -> None:
-        directory = None
+        discarded = None
         with self.abort_lock:
             request = self.native_requests.get(request_id)
             if request_id in self.aborted:
                 self.aborted.discard(request_id)
                 if request is not None and request.result is result:
                     self.native_requests.pop(request_id)
-                    directory = request.directory
+                    discarded = request
                 else:
                     pass
             else:
                 super().emit_result(request_id, result, outbox)
-        if directory is not None:
-            self.remove_request_directory(directory)
+        if discarded is not None:
+            self.remove_outputs(discarded)
         else:
             pass
 
@@ -526,45 +534,39 @@ class NativeGenerationScheduler(SimpleScheduler):
             return
         else:
             pass
-        directory = None
+        discarded = None
         with self.abort_lock:
             request = self.native_requests.get(result.request_id)
             if request is not None and request.result is result:
                 self.native_requests.pop(result.request_id)
-                if delivered and not request.aborted:
-                    self.delivered[result.request_id] = request.directory
-                    while len(self.delivered) > self.retained_deliveries:
-                        self.delivered.popitem(last=False)
-                else:
-                    directory = request.directory
+                # An accepted completion may already be with a caller, even
+                # after an abort, so its media leave the stage's hands.
+                discarded = None if delivered else request
             else:
                 pass
-        if directory is not None:
-            self.remove_request_directory(directory)
+        if discarded is not None:
+            self.remove_outputs(discarded)
         else:
             pass
 
     def stop(self) -> None:
-        directories = []
-        signals = []
+        discarded = []
         self.closing = True
         with self.abort_lock:
             for request_id, request in list(self.native_requests.items()):
                 request.cancelled.set()
                 if not request.running and not request.delivering:
                     self.native_requests.pop(request_id)
-                    directories.append(request.directory)
+                    discarded.append(request)
                 elif request.running and self.cancellation_mode == "plugin":
-                    signals.append(request.directory)
+                    self.signal_native_cancellation(request)
                 else:
                     pass
-        for directory in signals:
-            self.signal_native_cancellation(directory)
         try:
             super().stop()
         finally:
-            for directory in directories:
-                self.remove_request_directory(directory)
+            for request in discarded:
+                self.remove_outputs(request)
 
     def generate(self, payload: StagePayload) -> StagePayload:
         params = build_sampling_params(payload, self.output_dir, self.request_fields)
@@ -577,36 +579,27 @@ class NativeGenerationScheduler(SimpleScheduler):
                 threading.Event(),
                 Path(tempfile.mkdtemp(prefix="request_", dir=self.output_dir)),
             )
-            # A reused ID means the coordinator completed its earlier request.
-            self.delivered.pop(payload.request_id, None)
             self.native_requests[payload.request_id] = request
         params["output_path"] = str(request.directory)
         kwargs = {"sampling_params_kwargs": params}
-        markers = []
+        armed = None
         if (
             self.cancellation_mode == "native"
             and params.get("num_outputs_per_prompt", 1) == 1
         ):
             kwargs["cancellation_event"] = request.cancelled
         elif self.cancellation_mode == "plugin":
-            markers = [
-                request.directory / cancellation.ARMED_MARKER,
-                request.directory / cancellation.CANCELLED_MARKER,
-            ]
+            armed = request.directory / cancellation.ARMED_MARKER
         else:
             pass
         succeeded = False
         try:
-            if markers:
-                markers[0].touch()
+            if armed is not None:
+                armed.touch()
             else:
                 pass
-            fetched = police_media_inputs(
-                params, self.request_fields, request.directory
-            )
+            police_media_inputs(params, self.request_fields, request.directory)
             results = self.run_native(kwargs)
-            for path in [*fetched, *markers]:
-                path.unlink(missing_ok=True)
             if results is None:
                 raise RuntimeError(
                     "Native generation failed without producing an output"
@@ -621,17 +614,27 @@ class NativeGenerationScheduler(SimpleScheduler):
                 raise RuntimeError("Native generation returned no saved media")
             else:
                 pass
+            paths = [Path(result.output_file_path) for result in results]
+            if not self.inline_media:
+                for index, source in enumerate(paths):
+                    # Native names each output after the request's unique
+                    # output_file_name, so the name is free in output_dir.
+                    paths[index] = Path(self.output_dir) / source.name
+                    os.replace(source, paths[index])
+                    request.outputs.append(paths[index])
+            else:
+                pass
             payload.data = {
                 "media": [
                     {
-                        "path": result.output_file_path,
+                        "path": str(path),
                         "size": result.size,
                         "prompt": result.prompt,
                         "generation_time": result.generation_time,
                         "peak_memory_mb": result.peak_memory_mb,
                         "metrics": result.metrics,
                     }
-                    for result in results
+                    for result, path in zip(results, paths, strict=True)
                 ],
                 "finish_reason": "stop",
             }
@@ -653,8 +656,9 @@ class NativeGenerationScheduler(SimpleScheduler):
                     self.native_requests.pop(payload.request_id)
                 else:
                     pass
+            self.remove_request_directory(request.directory)
             if cleanup:
-                self.remove_request_directory(request.directory)
+                self.remove_outputs(request)
             else:
                 pass
 
@@ -665,8 +669,8 @@ class GenerationRequest:
     directory: Path
     running: bool = True
     delivering: bool = False
-    aborted: bool = False
     result: StagePayload | None = None
+    outputs: list[Path] = field(default_factory=list)
 
 
 def native_server_kwargs(
@@ -739,6 +743,7 @@ def create_generation_scheduler(
     from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
         DiffGenerator,
     )
+    from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
     kwargs = native_server_kwargs(
@@ -746,6 +751,12 @@ def create_generation_scheduler(
     )
     output_dir = str(Path(output_dir).resolve())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    # Native applies plugin hooks once per process, ahead of its server
+    # arguments as DiffGenerator.from_pretrained does. Applying them here,
+    # outside the activation below, keeps this host out of the hooks it arms
+    # for its native workers.
+    apply_plugin_hooks()
+    server_args = ServerArgs.from_kwargs(**kwargs)
     # A later SGLang that cancels natively takes precedence over the plugin.
     native_api = hasattr(DiffGenerator, "supports_cancellation")
     handshake = (
@@ -755,7 +766,7 @@ def create_generation_scheduler(
     )
     try:
         with cancellation.activation_environment(handshake):
-            generator = DiffGenerator.from_server_args(ServerArgs.from_kwargs(**kwargs))
+            generator = DiffGenerator.from_server_args(server_args)
         if native_api:
             mode = "native" if generator.supports_cancellation else None
         elif handshake is not None and os.path.exists(
@@ -809,7 +820,6 @@ def degraded_cancellation_reason(native_api: bool, num_gpus: object) -> str:
     else:
         return (
             "Cooperative generation cancellation did not start in the native "
-            "worker. Install sglang-omni as a package so native SGLang finds "
-            "its sglang.multimodal_gen.plugins entry point, and list "
+            "worker, whose log names the reason. List "
             f"{cancellation.PLUGIN_NAME} in SGLANG_PLUGINS when that variable is set."
         )
