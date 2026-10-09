@@ -12,7 +12,7 @@ from types import SimpleNamespace
 import pytest
 
 from sglang_omni.client.client import Client
-from sglang_omni.client.types import GenerateRequest
+from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3.config import Cosmos3ReasonerPipelineConfig, Variants
 from sglang_omni.models.cosmos3.reasoner import (
     NativeReasonerScheduler,
@@ -22,6 +22,8 @@ from sglang_omni.models.cosmos3.reasoner import (
 )
 from sglang_omni.proto import OmniRequest, StagePayload, StreamMessage
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.serve.openai_api import build_chat_generate_request
+from sglang_omni.serve.protocol import ChatCompletionRequest
 
 
 class NativeRequest(SimpleNamespace):
@@ -242,6 +244,35 @@ def test_native_text_and_vision_parameters_preserved():
     assert (fields["temperature"], fields["seed"], fields["max_tokens"]) == (0.0, 0, 7)
     assert fields["return_meta_info"] and fields["return_token_ids"]
     assert fields["rid"] == "r1"
+
+
+@pytest.mark.parametrize(
+    "request_",
+    [
+        ChatCompletionRequest(messages=[{"role": "user", "content": "hi"}], top_k=5),
+        GenerateRequest(prompt="hi", sampling=SamplingParams(top_k=5)),
+    ],
+    ids=["chat", "sdk"],
+)
+def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
+    from sglang.srt.entrypoints.openai.protocol import (
+        ChatCompletionRequest as NativeChatRequest,
+    )
+
+    if isinstance(request_, ChatCompletionRequest):
+        request_ = build_chat_generate_request(request_)
+    else:
+        pass
+    item = StagePayload("r1", Client.build_omni_request(request_), None)
+    fields = build_chat_fields(item, "cosmos3", set(NativeChatRequest.model_fields))
+    sampling = NativeChatRequest(**fields).to_sampling_params(
+        stop=[], model_generation_config={"temperature": 0.7, "top_p": 0.8}
+    )
+    assert (sampling["temperature"], sampling["top_p"], sampling["top_k"]) == (
+        0.7,
+        0.8,
+        5,
+    )
 
 
 @pytest.mark.parametrize(

@@ -12,9 +12,35 @@ from copy import deepcopy
 from typing import Any
 
 from sglang_omni.admission import InvalidRequestError
-from sglang_omni.proto import StagePayload
+from sglang_omni.client.types import SamplingParams
+from sglang_omni.proto import (
+    EXPLICIT_GENERATION_PARAMS_KEY,
+    EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
+    StagePayload,
+)
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+
+# Omni fills every sampling field a caller omits with these placeholders.
+SAMPLING_PLACEHOLDERS = SamplingParams().to_dict()
+
+
+def set_sampling_fields(values: dict, explicit: object) -> dict:
+    """Drop the sampling placeholders that the caller did not set.
+
+    Native SGLang resolves an omitted field from the checkpoint generation
+    config, so a placeholder must not reach it. A field counts as set when the
+    request metadata lists it or its value differs from the placeholder, which
+    also covers SDK requests that carry no list.
+    """
+    listed = set(explicit) if isinstance(explicit, (list, tuple, set)) else set()
+    return {
+        key: value
+        for key, value in values.items()
+        if key not in SAMPLING_PLACEHOLDERS
+        or key in listed
+        or value != SAMPLING_PLACEHOLDERS[key]
+    }
 
 
 def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> dict:
@@ -73,7 +99,10 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         raise ValueError("Reasoner requests require at least one message")
     else:
         pass
-    params = dict(payload.request.params)
+    metadata = payload.request.metadata or {}
+    params = set_sampling_fields(
+        dict(payload.request.params), metadata.get(EXPLICIT_GENERATION_PARAMS_KEY)
+    )
     for name in ("stage_sampling", "stage_params"):
         stage_params = params.pop(name, None)
         if stage_params is None:
@@ -91,6 +120,11 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
             pass
         if not isinstance(reasoner_params, dict):
             raise ValueError("Reasoner stage parameters must be a mapping")
+        elif name == "stage_sampling":
+            explicit = metadata.get(EXPLICIT_STAGE_SAMPLING_PARAMS_KEY) or {}
+            reasoner_params = set_sampling_fields(
+                reasoner_params, explicit.get("reasoner")
+            )
         else:
             pass
         params.update(reasoner_params)
