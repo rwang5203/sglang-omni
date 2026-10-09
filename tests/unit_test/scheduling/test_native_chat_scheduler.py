@@ -31,6 +31,7 @@ from sglang_omni.scheduling.native_chat_scheduler import (
     warm_up,
 )
 from sglang_omni.serve.openai_api import build_chat_generate_request
+from sglang_omni.serve.openai_errors import generation_error_status_code
 from sglang_omni.serve.protocol import ChatCompletionRequest
 
 
@@ -315,6 +316,7 @@ def test_unsupported_contracts_reject_before_dispatch(item):
         (False, "file:///srv/a.png", "refused"),
         (True, "https://other.org/a.png", "refused"),
         (True, "https://example.com/a.png", "fetched"),
+        (True, "https://example.com/unavailable.png", "server error"),
         (True, "file://{allowed}/a.png", "{allowed}/a.png"),
         (True, "{outside}/a.png", "refused"),
     ],
@@ -331,7 +333,9 @@ def test_chat_media_follows_the_server_media_policy(
     connection.async_client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
-                200, content=b"png", headers={"content-type": "image/png"}
+                503 if request.url.path == "/unavailable.png" else 200,
+                content=b"png",
+                headers={"content-type": "image/png"},
             )
         )
     )
@@ -351,6 +355,12 @@ def test_chat_media_follows_the_server_media_policy(
     if outcome == "refused":
         assert message.type == "error"
         assert str(message.data).startswith(native_chat_scheduler.REQUEST_ERROR)
+        assert not chat.calls
+    elif outcome == "server error":
+        # The shared classifier decides fetch failures, and an upstream
+        # failure is not the caller's error.
+        assert message.type == "error"
+        assert generation_error_status_code(message.data) == 500
         assert not chat.calls
     else:
         assert message.type == "result"

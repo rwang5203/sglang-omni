@@ -80,7 +80,9 @@ async def police_media_reference(
     that directory once it is set. Native SGLang applies no path policy and
     matches exact hosts only, so with an allowlist the stage fetches remote
     media itself into a temporary file, listed in fetched for the caller to
-    remove, and hands native that file.
+    remove, and hands native that file. A refused URL is the caller's error,
+    and the shared error classifier decides other fetch failures, as it does
+    for every other model.
     """
     connector = get_global_resource_connector()
     url = urlparse(source)
@@ -90,9 +92,14 @@ async def police_media_reference(
         connector.assert_url_allowed(source)
         return source
     elif url.scheme in ("http", "https"):
-        data, _ = await connector.load_http_bytes_async(
-            source, timeout=connector.connection.timeout, max_bytes=max_bytes
-        )
+        try:
+            data, _ = await connector.load_http_bytes_async(
+                source, timeout=connector.connection.timeout, max_bytes=max_bytes
+            )
+        except MediaPolicyError:
+            raise
+        except ValueError as exc:
+            raise RuntimeError(str(exc)) from exc
         handle, name = tempfile.mkstemp(prefix="sglang-omni-chat-media-")
         os.close(handle)
         fetched.append(Path(name))
