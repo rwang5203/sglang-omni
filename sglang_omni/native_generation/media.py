@@ -562,29 +562,54 @@ def police_media_reference(
     """Refuse a media path or URL that the server media policy does not allow.
 
     Follows the rules main applies to request media: a bare path or file URL
-    must sit in the allowed directory. Inline media should use data URLs.
+    must sit in the allowed directory, here in every reading native SGLang
+    may open it in. Inline media should use data URLs.
     """
-    if source.startswith("data:"):
-        return
+    remote = source.lower().startswith(("http://", "https://"))
+    file_url = source[:7].lower() == "file://"
+    try:
+        if remote and connector.allowed_media_domains:
+            raise MediaPolicyError(
+                "remote media is refused on native media routes while "
+                "--allowed-media-domain is set, since native SGLang fetches "
+                "it without checking each redirect. Send it as an upload or "
+                "a data URL."
+            )
+        elif connector.allowed_local_media_path is not None:
+            for path in local_readings(source, remote, file_url):
+                connector.local_media_path(path)
+        else:
+            pass
+    except MediaPolicyError as exc:
+        hint = " Send local media as a path." if file_url else ""
+        raise HTTPException(
+            status_code=400, detail=f"{name} refused: {exc}{hint}"
+        ) from exc
+
+
+def local_readings(source: str, remote: bool, file_url: bool) -> list[str]:
+    """The local paths native SGLang may open for a media reference.
+
+    Native expands the home directory of sampling path fields, while its
+    prompt enhancer opens a path as written. Its loaders open a file URL as
+    written, a path relative to the working directory, while srt opens the
+    path the URL names. Its image loader opens a URL or data URL that names an
+    existing file as that file. Relative paths resolve against the server
+    working directory, which the stage and native worker processes inherit.
+    """
+    if remote or source.startswith("data:"):
+        return [source] if os.path.lexists(source) else []
+    else:
+        readings = [source]
+    if source.startswith("~"):
+        readings.append(os.path.join(os.getcwd(), source))
     else:
         pass
-    try:
-        if source.startswith(("http://", "https://")):
-            if connector.allowed_media_domains:
-                raise MediaPolicyError(
-                    "remote media is refused on native media routes while "
-                    "--allowed-media-domain is set, since native SGLang fetches "
-                    "it without checking each redirect. Send it as an upload or "
-                    "a data URL."
-                )
-            else:
-                pass
-        elif source.startswith("file://"):
-            connector.local_media_path(unquote(urlparse(source).path))
-        else:
-            connector.local_media_path(source)
-    except MediaPolicyError as exc:
-        raise HTTPException(status_code=400, detail=f"{name} refused: {exc}") from exc
+    if file_url:
+        readings.append(unquote(urlparse(source).path))
+    else:
+        pass
+    return readings
 
 
 class NativeMediaRoutes(BaseRoute):

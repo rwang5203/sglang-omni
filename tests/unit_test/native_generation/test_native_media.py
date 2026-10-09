@@ -295,6 +295,11 @@ def test_native_requests_follow_the_server_media_policy(
         ("/v1/videos", {"json": {"prompt": "a", "reference_url": remote}}, configured),
         (
             "/v1/videos",
+            {"json": {"prompt": "a", "reference_url": remote.upper()}},
+            configured,
+        ),
+        (
+            "/v1/videos",
             {
                 "json": {
                     "prompt": "a",
@@ -346,6 +351,11 @@ def test_native_requests_follow_the_server_media_policy(
             inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
             response = await client.post("/v1/videos", json=inside)
             assert "refused" not in response.text
+        # Native opens a file URL as written, relative to its working directory.
+        monkeypatch.chdir(tmp_path)
+        url = {"prompt": "a", "video_path": f"file://{allowed / 'clip.mp4'}"}
+        response = await client.post("/v1/videos", json=url)
+        assert ("refused" in response.text) is configured
 
     serve(FastAPI(), native.build(), check)
 
