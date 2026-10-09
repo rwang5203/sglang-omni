@@ -27,7 +27,7 @@ import logging
 import time
 import uuid
 from contextlib import aclosing, suppress
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import AsyncGenerator, AsyncIterator, Literal
 
 from fastapi import (
@@ -60,7 +60,6 @@ from sglang_omni.client import (
 from sglang_omni.client.audio import (
     DEFAULT_SAMPLE_RATE,
     apply_speed,
-    audio_to_base64,
     encode_pcm,
     select_audio_delta,
 )
@@ -228,6 +227,7 @@ def create_app(
     tts_batch_max_items: int = DEFAULT_TTS_BATCH_MAX_ITEMS,
     architectures: list[str] | None = None,
     audio_chunking: ResolvedAudioChunking | None = None,
+    interleaved_output: bool = False,
 ) -> FastAPI:
     """Create a FastAPI application with OpenAI-compatible endpoints.
 
@@ -266,6 +266,9 @@ def create_app(
             ``/v1/audio/speech/batch``.
         audio_chunking: Long-audio chunking policy for ``/v1/audio/transcriptions``,
             declared by the pipeline config. None keeps chunking off.
+        interleaved_output: Whether results are ordered interleaved (UMM)
+            segments, which ``/generate`` streams. Other pipelines refuse
+            ``stream=true`` on ``/generate``.
 
     Returns:
         Configured FastAPI application.
@@ -290,6 +293,7 @@ def create_app(
     app.state.architectures = [a for a in (architectures or []) if a]
     app.state.supports_audio_translation = supports_audio_translation
     app.state.audio_chunking = audio_chunking or ResolvedAudioChunking.disabled()
+    app.state.interleaved_output = interleaved_output
     app.state.long_audio_admission = LongAudioAdmission(
         app.state.audio_chunking.max_concurrent_long_audio_requests
     )
@@ -1265,6 +1269,8 @@ def build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
 
 
 def register_generate(app: FastAPI) -> None:
+    interleaved = app.state.interleaved_output
+
     @app.post("/generate")
     async def generate(req: RolloutGenerateRequest, request: Request) -> Response:
         client: Client = app.state.client
@@ -1279,7 +1285,12 @@ def register_generate(app: FastAPI) -> None:
             )
         else:
             pass
-        if req.stream and (
+        if req.stream and not interleaved:
+            raise HTTPException(
+                status_code=400,
+                detail="stream=true is not supported by /generate yet",
+            )
+        elif req.stream and (
             req.return_logprob
             or req.return_omni_rollout
             or req.return_routed_experts
@@ -1333,42 +1344,31 @@ def register_generate(app: FastAPI) -> None:
 async def generate_stream(
     client: Client, request: GenerateRequest, request_id: str
 ) -> AsyncIterator[str]:
-    """Yield ordered segments and an explicit terminal snapshot as SSE."""
+    """Stream an interleaved request as SSE.
+
+    Each accepted segment is one segment event with its data. The complete
+    event lists every segment by reference and carries the finish reason.
+    """
     stream = client.generate(request, request_id=request_id)
     try:
         async with aclosing(stream):
             async for chunk in stream:
-                if isinstance(chunk, UMMGenerateChunk) and chunk.segment is not None:
+                if not isinstance(chunk, UMMGenerateChunk):
+                    raise TypeError("Streaming /generate serves interleaved results")
+                elif chunk.segment is not None:
                     event, data = "segment", chunk.segment.to_dict()
+                elif chunk.finish_reason is not None:
+                    # Segment events already carried each segment's data.
+                    refs = [
+                        replace(segment, data=None) for segment in chunk.segments or []
+                    ]
+                    event = "complete"
+                    data = {
+                        "finish_reason": chunk.finish_reason,
+                        "segments": [segment.to_dict() for segment in refs],
+                    }
                 else:
-                    event = "complete" if chunk.finish_reason is not None else "chunk"
-                    data = chunk.to_dict()
-                    data.pop("audio_data", None)
-                    if isinstance(chunk, UMMGenerateChunk):
-                        # Segment events already carried each segment's data.
-                        data.pop("media")
-                        data["segments"] = [
-                            {
-                                "segment_index": segment.segment_index,
-                                "kind": segment.kind,
-                            }
-                            for segment in chunk.segments or []
-                        ]
-                    else:
-                        pass
-                    if chunk.audio_data is not None:
-                        sample_rate = chunk.sample_rate or DEFAULT_SAMPLE_RATE
-                        data["audio"] = GenerateAudio(
-                            data=audio_to_base64(
-                                chunk.audio_data,
-                                sample_rate=sample_rate,
-                                output_format="wav",
-                            ),
-                            format="wav",
-                            sample_rate=sample_rate,
-                        ).model_dump(exclude_none=True)
-                    else:
-                        pass
+                    continue
                 yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
     except Exception as exc:
         status = generation_error_status_code(exc)

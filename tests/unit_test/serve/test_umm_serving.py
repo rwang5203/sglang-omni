@@ -59,14 +59,17 @@ def final_result(streamed: bool) -> dict[str, object]:
 class Coordinator:
     def __init__(self):
         self.closed = False
+        self.submitted = []
 
     def health(self):
         return {"running": True}
 
     async def submit(self, request_id, request):
+        self.submitted.append(request_id)
         return final_result(streamed=False)
 
     async def stream(self, request_id, request):
+        self.submitted.append(request_id)
         try:
             for segment in SEGMENTS:
                 yield StreamMessage(
@@ -83,8 +86,17 @@ class Coordinator:
             self.closed = True
 
 
+def umm_app(coordinator=None, *, interleaved=True):
+    app = create_app(
+        Client(coordinator or Coordinator()),
+        model_name="cosmos3",
+        interleaved_output=interleaved,
+    )
+    return TestClient(app)
+
+
 def test_generate_and_chat_keep_ordered_terminal_manifest():
-    client = TestClient(create_app(Client(Coordinator()), model_name="cosmos3"))
+    client = umm_app()
     generated = client.post(
         "/generate", json={"prompt": "Draw then describe", "return_logprob": False}
     )
@@ -105,7 +117,7 @@ def test_generate_and_chat_keep_ordered_terminal_manifest():
 
 
 def test_generate_sse_preserves_segment_order_and_explicit_final_snapshot():
-    client = TestClient(create_app(Client(Coordinator()), model_name="cosmos3"))
+    client = umm_app()
     response = client.post(
         "/generate",
         json={"prompt": "Draw then describe", "stream": True, "return_logprob": False},
@@ -122,17 +134,34 @@ def test_generate_sse_preserves_segment_order_and_explicit_final_snapshot():
         s.to_dict() for s in SEGMENTS
     ]
     final = json.loads(events[3].splitlines()[1][6:])
-    assert final["segments"] == [
-        {"segment_index": s.segment_index, "kind": s.kind} for s in SEGMENTS
-    ]
-    assert "media" not in final
+    assert final == {
+        "finish_reason": "stop",
+        "segments": [
+            {key: value for key, value in s.to_dict().items() if key != "data"}
+            for s in SEGMENTS
+        ],
+    }
     assert response.text.count(SEGMENTS[1].data["url"]) == 1
-    assert final["finish_reason"] == "stop"
     assert events[-1] == "data: [DONE]"
 
 
+@pytest.mark.parametrize("interleaved", [True, False])
+def test_only_interleaved_pipelines_stream_generate(interleaved):
+    coordinator = Coordinator()
+    response = umm_app(coordinator, interleaved=interleaved).post(
+        "/generate", json={"prompt": "hello", "stream": True, "return_logprob": False}
+    )
+    if interleaved:
+        assert response.status_code == 200
+        assert response.text.endswith("data: [DONE]\n\n")
+    else:
+        assert response.status_code == 400
+        assert "stream=true is not supported by /generate" in response.text
+        assert coordinator.submitted == []
+
+
 def test_chat_sse_exposes_media_segment_without_duplicate_text():
-    client = TestClient(create_app(Client(Coordinator()), model_name="cosmos3"))
+    client = umm_app()
     response = client.post(
         "/v1/chat/completions",
         json={
@@ -202,7 +231,7 @@ async def test_generate_stream_error_reports_status_and_closes_the_stream(
 
 
 def test_streaming_generate_rejects_unsupported_rollout_artifacts_before_dispatch():
-    client = TestClient(create_app(Client(Coordinator()), model_name="cosmos3"))
+    client = umm_app()
     response = client.post("/generate", json={"prompt": "hello", "stream": True})
     assert response.status_code == 400
     assert "rollout artifacts" in response.text

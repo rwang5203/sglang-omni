@@ -314,6 +314,24 @@ def test_generate_rejects_ambiguous_prompt_inputs() -> None:
     assert resp.status_code == 400
 
 
+def test_generate_rejects_streaming_rollout_until_supported() -> None:
+    client = RolloutClient(text_result())
+    tc = TestClient(create_app(client, model_name="qwen3-omni"))
+
+    resp = tc.post(
+        "/generate",
+        json={
+            "prompt": "hi",
+            "sampling_params": {},
+            "stream": True,
+        },
+    )
+
+    assert resp.status_code == 400
+    assert "stream=true" in resp.text
+    assert client.requests == []
+
+
 def test_generate_rejects_unknown_sampling_param() -> None:
     client = RolloutClient(text_result())
     tc = TestClient(create_app(client, model_name="qwen3-omni"))
