@@ -393,6 +393,40 @@ def test_rocm_spawn_env_maps_rank_through_hip_visible_devices(monkeypatch) -> No
     assert "CUDA_VISIBLE_DEVICES" not in os.environ
 
 
+@pytest.mark.parametrize("platform", [cuda_platform, ROCMOmniPlatform()])
+def test_native_child_owner_sees_only_its_gpus(monkeypatch, platform) -> None:
+    """A stage that owns native children starts narrowed to the GPUs its
+    engine owns and hands that engine local ids in their declared order."""
+    variable = (
+        "HIP_VISIBLE_DEVICES"
+        if isinstance(platform, ROCMOmniPlatform)
+        else "CUDA_VISIBLE_DEVICES"
+    )
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.delenv("HIP_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setenv(variable, "4,5,6,7")
+    monkeypatch.setattr(stage_workers, "current_platform", platform)
+    spec = StageLaunchConfig(
+        stage_name="generation",
+        gpu_id=1,
+        allow_child_processes=True,
+        factory_kwargs={"runtime_gpu_ids": [1, 3]},
+        factory_arg_defaults={"gpu_id": 1},
+        comm_config={"gpu_id": 1},
+    )
+
+    with patched_spawn_env(worker_spec(spec)):
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "5,7"
+        assert os.environ[variable] == "5,7"
+        # The child starts with this environment.
+        stage_workers.prepare_accelerator_environment(spec, RecordingLog())
+
+    assert (spec.gpu_id, spec.placement_gpu_id) == (0, 1)
+    assert spec.factory_kwargs["runtime_gpu_ids"] == [0, 1]
+    assert spec.factory_arg_defaults["gpu_id"] == spec.comm_config["gpu_id"] == 0
+    assert os.environ[variable] == "4,5,6,7"
+
+
 class RecordingLog:
     def __init__(self) -> None:
         self.messages: list[str] = []
