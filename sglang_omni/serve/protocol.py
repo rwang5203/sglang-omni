@@ -329,7 +329,6 @@ class GenerateResponse(BaseModel):
 
     text: str = ""
     audio: GenerateAudio | None = None
-    media: list[dict[str, object]] | None = None
     meta_info: GenerateMetaInfo
 
 

@@ -1422,9 +1422,7 @@ def build_generate_response(
         ),
         omni_rollout=result.omni_rollout if req.return_omni_rollout else None,
     )
-    return GenerateResponse(
-        text=result.text, audio=audio, media=result.media, meta_info=meta_info
-    )
+    return GenerateResponse(text=result.text, audio=audio, meta_info=meta_info)
 
 
 def realtime_unavailable_response(message: str) -> JSONResponse:
