@@ -41,25 +41,23 @@ GENERATE = "generate"
 # stage_params.
 REASONER_STAGE = "reasoner"
 
-# The optional message of a generate decision is bounded by the schema. A
-# final answer and a generation prompt must not be blank, and native SGLang
-# accepts no length limit beside a pattern, so their length is unbounded. The
-# retained byte reservation plans for answers and prompts of these sizes, and
-# a longer one counts against max_retained_bytes like any other output.
+# Server limits on the decision text and the generation prompt. The retained
+# byte reservation plans for them, so longer model output fails the request
+# as a server error. The schema leaves free text strings without pattern or
+# length keywords, because native grammar decoding then admits no JSON escape
+# in them, which would cut answers at their first newline or quote.
 MAX_TEXT_CHARS = 8192
 MAX_PROMPT_CHARS = 4096
 
-# A string with a character outside JSON insignificant whitespace. Native
-# grammar decoding and parse_decision both read whitespace as ASCII, so every
-# decision the schema admits is one the adapter accepts.
-NONBLANK_PATTERN = "^[\\s\\S]*\\S[\\s\\S]*$"
+# Native generation refuses a prompt without a character outside ASCII
+# whitespace, so such a prompt returns to the Reasoner as a receipt.
 NONBLANK = re.compile(r"\S", re.ASCII)
 
 FINAL_DECISION = {
     "type": "object",
     "properties": {
         "kind": {"type": "string", "enum": ["final"]},
-        "text": {"type": "string", "pattern": NONBLANK_PATTERN},
+        "text": {"type": "string"},
         "generation": {"type": "null"},
     },
     "required": ["kind", "text", "generation"],
@@ -70,12 +68,12 @@ GENERATE_DECISION = {
     "type": "object",
     "properties": {
         "kind": {"type": "string", "enum": ["generate"]},
-        "text": {"type": "string", "maxLength": MAX_TEXT_CHARS},
+        "text": {"type": "string"},
         "generation": {
             "type": "object",
             "properties": {
                 "modality": {"type": "string", "enum": ["image", "video"]},
-                "prompt": {"type": "string", "pattern": NONBLANK_PATTERN},
+                "prompt": {"type": "string"},
             },
             "required": ["modality", "prompt"],
             "additionalProperties": False,
@@ -175,27 +173,35 @@ def parse_decision(value: object) -> Decision:
     kind, text, generation = value["kind"], value["text"], value["generation"]
     if not isinstance(text, str):
         raise ValueError("Cosmos3 decision text must be a string")
+    elif len(text) > MAX_TEXT_CHARS:
+        raise ValueError(
+            f"Cosmos3 decision text exceeds the server limit of {MAX_TEXT_CHARS} "
+            "characters"
+        )
     elif kind == "final":
-        if generation is not None or NONBLANK.search(text) is None:
-            raise ValueError("Final Cosmos3 decisions require text and no generation")
+        if generation is not None:
+            raise ValueError("Final Cosmos3 decisions carry no generation")
         else:
             return Decision(kind, text, None)
     elif kind != "generate":
         raise ValueError("Unknown Cosmos3 decision kind")
-    elif len(text) > MAX_TEXT_CHARS:
-        raise ValueError("Cosmos3 decision text exceeds its string limit")
     elif not isinstance(generation, dict) or set(generation) != {"modality", "prompt"}:
         raise ValueError("Cosmos3 generation requires only modality and prompt")
     elif generation["modality"] not in MEDIA_TYPES:
         raise ValueError("Cosmos3 interleaving currently supports images and videos")
+    elif not isinstance(generation["prompt"], str):
+        raise ValueError("Cosmos3 generation prompt must be a string")
+    elif len(generation["prompt"]) > MAX_PROMPT_CHARS:
+        raise ValueError(
+            "Cosmos3 generation prompt exceeds the server limit of "
+            f"{MAX_PROMPT_CHARS} characters"
+        )
     else:
-        prompt = generation["prompt"]
-        if not isinstance(prompt, str) or NONBLANK.search(prompt) is None:
-            raise ValueError("Cosmos3 generation requires a nonblank prompt")
-        else:
-            return Decision(
-                kind, text, {"modality": generation["modality"], "prompt": prompt}
-            )
+        return Decision(
+            kind,
+            text,
+            {"modality": generation["modality"], "prompt": generation["prompt"]},
+        )
 
 
 def interpret_reasoner(result: object) -> Decision:
@@ -396,31 +402,49 @@ def decision_message(decision: Decision) -> dict[str, object]:
     return {"role": "assistant", "content": content}
 
 
-def receipt(decision: Decision, kind: str) -> dict[str, object]:
-    """The user turn that returns a generation, its media URL left empty."""
-    status = json.dumps(
+# The Reasoner's next turn learns how its generation request ended. Only a
+# completed generation attaches media.
+RECEIPTS = {
+    "completed": (
+        "Generation execution completed",
+        "The attached media is the result of your preceding generation "
+        "request. Inspect the received results against the original user's "
+        "task. If the task is complete, choose kind final with generation "
+        "null and your answer in text. Otherwise request the next needed "
+        "generation. Repeat a completed generation only when the user's "
+        "task or your assessment of its result calls for a revision.",
+    ),
+    "not_executed": (
+        "Generation was not executed because its prompt was blank",
+        "No media is attached. Request the generation again with a precise "
+        "nonblank prompt, or choose kind final with generation null and your "
+        "answer in text.",
+    ),
+}
+
+
+def receipt(decision: Decision, status: str) -> dict[str, object]:
+    """The user turn that returns a generation outcome. A completed one
+    attaches its media with the URL left empty."""
+    summary, guidance = RECEIPTS[status]
+    kind = decision.generation["modality"]
+    record = json.dumps(
         {
-            "status": "completed",
+            "status": status,
             "modality": kind,
             "requested_prompt": decision.generation["prompt"],
         },
         ensure_ascii=False,
     )
-    text = (
-        "Generation execution completed. Result receipt: "
-        + status
-        + "\nThe attached media is the result of your preceding generation "
-        "request. Inspect the received results against the original user's "
-        "task. If the task is complete, choose kind final with generation "
-        "null and your answer in text. Otherwise request the next needed "
-        "generation. Repeat a completed generation only when the user's "
-        "task or your assessment of its result calls for a revision."
-    )
-    part = f"{kind}_url"
-    return {
-        "role": "user",
-        "content": [{"type": "text", "text": text}, {"type": part, part: {"url": ""}}],
-    }
+    content: list[dict[str, object]] = [
+        {"type": "text", "text": f"{summary}. Result receipt: {record}\n{guidance}"}
+    ]
+    if status == "completed":
+        part = f"{kind}_url"
+        content.append({"type": part, part: {"url": ""}})
+    else:
+        pass
+    return {"role": "user", "content": content}
 
 
 def worst_case_bytes() -> tuple[int, int]:
@@ -449,7 +473,7 @@ def worst_case_bytes() -> tuple[int, int]:
     }
     # Base64 characters need no JSON escaping.
     media = encoded_size(item) + 4 * ((INLINE_MEDIA_LIMIT_BYTES + 2) // 3)
-    return reason, media + encoded_size(receipt(worst, "video"))
+    return reason, media + max(encoded_size(receipt(worst, s)) for s in RECEIPTS)
 
 
 WORST_CASE_BYTES = worst_case_bytes()
@@ -528,7 +552,8 @@ class Cosmos3UMMAdapter:
     ) -> UMMStep:
         # A generation and the Reasoner turn that inspects it need two more
         # dispatches after this one, so with fewer left only final remains.
-        if context.remaining_dispatches < 3:
+        # Every earlier generate decision used one of the planned generations.
+        if context.remaining_dispatches < 3 or history.generations_left <= 0:
             schema = deepcopy(FINAL_DECISION)
         else:
             generate = deepcopy(GENERATE_DECISION)
@@ -580,6 +605,13 @@ class Cosmos3UMMAdapter:
                 and decision.generation["modality"] != "video"
             ):
                 raise ValueError("Cosmos3 forward_dynamics requires a video decision")
+            elif NONBLANK.search(decision.generation["prompt"]) is None:
+                # Native generation refuses a blank prompt, so the Reasoner
+                # learns that nothing ran and decides again.
+                history.generations_left -= 1
+                self.remember(history, decision_message(decision))
+                self.remember(history, receipt(decision, "not_executed"))
+                return self.reason(context, history, outputs)
             else:
                 history.decision = decision
                 self.remember(history, decision_message(decision))
@@ -596,7 +628,7 @@ class Cosmos3UMMAdapter:
                 pass
             history.generations_left -= 1
             history.media_urls.append((len(history.messages), item["url"]))
-            self.remember(history, receipt(decision, item["kind"]))
+            self.remember(history, receipt(decision, "completed"))
             history.decision = None
             return self.reason(context, history, (UMMOutput(item["kind"], item),))
         else:

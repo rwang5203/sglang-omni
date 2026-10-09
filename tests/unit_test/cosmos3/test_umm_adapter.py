@@ -198,6 +198,13 @@ def decision_text(kind, text, generation):
         decision_text("final", "x", {}),
         decision_text("generate", "", {"modality": "audio", "prompt": "x"}),
         decision_text("generate", "", {"modality": "image", "prompt": "x", "y": 1}),
+        # Model output beyond the server limits the byte reservation plans for.
+        decision_text("final", "x" * (MAX_TEXT_CHARS + 1), None),
+        decision_text(
+            "generate",
+            "",
+            {"modality": "image", "prompt": "x" * (MAX_PROMPT_CHARS + 1)},
+        ),
     ],
 )
 def test_unstructured_or_malformed_decisions_fail_as_server_errors(response):
@@ -290,22 +297,22 @@ def test_last_generation_turn_allows_only_a_final_decision():
         for schema in schemas
     ]
     assert kinds == [[["final"], ["generate"]], [["final"]]]
-    # Native SGLang must accept each schema, and every decision its grammar
-    # admits must be one the adapter accepts.
-    for schema in schemas:
+    # Native SGLang must accept each schema, its grammar must admit text and
+    # prompts with JSON escapes and blanks, and the adapter must accept them.
+    for schema, offered in zip(schemas, kinds, strict=True):
         validate_xgrammar_json_schema(schema)
         grammar = xgr.Grammar.from_json_schema(
             json.dumps(schema), any_whitespace=True, strict_mode=True
         )
-        long_value = "x" * (MAX_TEXT_CHARS + MAX_PROMPT_CHARS)
-        for value in ("", " ", "\t\n", "\u3000", "x", " x ", long_value):
+        for value in ("", " \t\n", "\u3000", 'Red\nGreen "Blue" \\ \x01 é'):
             generation = {"modality": "image", "prompt": value}
             for decision in (
                 {"kind": "final", "text": value, "generation": None},
-                {"kind": "generate", "text": "", "generation": generation},
+                {"kind": "generate", "text": value, "generation": generation},
             ):
-                text = json.dumps(decision, ensure_ascii=False)
-                if _is_grammar_accept_string(grammar, text):
+                if [decision["kind"]] in offered:
+                    text = json.dumps(decision, ensure_ascii=False)
+                    assert _is_grammar_accept_string(grammar, text), text
                     interpret_reasoner({"text": text, "finish_reason": "stop"})
                 else:
                     pass
@@ -483,28 +490,35 @@ def test_umm_variant_wires_the_controller_and_inline_generation():
     umm.stop()
 
 
-@pytest.mark.parametrize("kind", ["image", "video"])
-def test_completed_receipt_binds_model_prompt_and_resubmits_history(kind):
+@pytest.mark.parametrize(
+    "kind, prompt, status",
+    [
+        ("image", 'A sign reading "你好" on a cube.\nUse the lighting.', "completed"),
+        ("video", 'A sign reading "你好" on a cube.\nUse the lighting.', "completed"),
+        # Native generation refuses a blank prompt, so none is dispatched.
+        ("image", " \n", "not_executed"),
+    ],
+)
+def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
     umm = controller()
-    prompt = 'A sign reading "你好" on a cube.\nUse the requested lighting.'
-    generation = generate_turn(umm, reasoner_reply(modality=kind, prompt=prompt))
+    resumed = generate_turn(umm, reasoner_reply(modality=kind, prompt=prompt))
     generated = media(b"completed result", kind=kind)
     original = deepcopy(generated)
-    resumed = umm.advance(reply(generation, generated))
+    if status == "completed":
+        resumed = umm.advance(reply(resumed, generated))
+    else:
+        pass
     assert route_umm("r", resumed) == "reasoner"
     messages = resumed.request.inputs["messages"]
     receipt = messages[-1]
     text = receipt["content"][0]["text"]
-    status = json.loads(text.split("Result receipt: ", 1)[1].split("\n", 1)[0])
-    assert status == {
-        "status": "completed",
-        "modality": kind,
-        "requested_prompt": prompt,
-    }
-    assert receipt["content"][1] == {
-        "type": f"{kind}_url",
-        f"{kind}_url": {"url": generated["media"][0]["url"]},
-    }
+    record = json.loads(text.split("Result receipt: ", 1)[1].split("\n", 1)[0])
+    assert record == {"status": status, "modality": kind, "requested_prompt": prompt}
+    assert receipt["content"][1:] == (
+        [{"type": f"{kind}_url", f"{kind}_url": {"url": generated["media"][0]["url"]}}]
+        if status == "completed"
+        else []
+    )
     assert json.loads(messages[-2]["content"])["generation"]["prompt"] == prompt
     assert generated == original
 
