@@ -16,20 +16,19 @@ from fastapi.responses import JSONResponse
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
-from sglang_omni.models.cosmos3 import reasoner
-from sglang_omni.models.cosmos3.config import Cosmos3ReasonerPipelineConfig, Variants
-from sglang_omni.models.cosmos3.reasoner import (
-    NativeReasonerScheduler,
-    build_chat_fields,
-    create_reasoner_scheduler,
-    native_reasoner_kwargs,
-)
 from sglang_omni.preprocessing.resource_connector import (
     MultiModalResourceConnector,
     ResourceHTTPConnection,
 )
 from sglang_omni.proto import OmniRequest, StagePayload, StreamMessage
+from sglang_omni.scheduling import native_chat_scheduler
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.scheduling.native_chat_scheduler import (
+    NativeChatScheduler,
+    build_chat_fields,
+    create_native_chat_scheduler,
+    native_chat_server_kwargs,
+)
 from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.protocol import ChatCompletionRequest
 
@@ -165,7 +164,7 @@ class Chat:
 def running(*, request_type=NativeRequest):
     engine = Engine()
     chat = Chat(engine)
-    scheduler = NativeReasonerScheduler(engine, chat, request_type)
+    scheduler = NativeChatScheduler(engine, chat, request_type, "chat")
     thread = threading.Thread(target=scheduler.start)
     thread.start()
     try:
@@ -190,11 +189,13 @@ def test_native_loop_thread_selects_the_serving_device(monkeypatch):
         lambda device: selected.append((threading.current_thread().name, device)),
     )
     engine = Engine()
-    scheduler = NativeReasonerScheduler(engine, Chat(engine), NativeRequest, device=5)
+    scheduler = NativeChatScheduler(
+        engine, Chat(engine), NativeRequest, "chat", device=5
+    )
     thread = threading.Thread(target=scheduler.start)
     thread.start()
     try:
-        assert selected == [("cosmos3-native-tokenizer", 5)]
+        assert selected == [("native-chat-tokenizer", 5)]
     finally:
         scheduler.stop()
         thread.join(timeout=3)
@@ -258,6 +259,7 @@ def test_native_text_and_vision_parameters_preserved():
         ),
         "cosmos3",
         NativeRequest.model_fields,
+        "chat",
     )
     assert (
         fields["messages"][0]["content"][1]["image_url"]["url"] == original["images"][0]
@@ -290,7 +292,9 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
     else:
         pass
     item = StagePayload("r1", Client.build_omni_request(request_), None)
-    fields = build_chat_fields(item, "cosmos3", set(NativeChatRequest.model_fields))
+    fields = build_chat_fields(
+        item, "cosmos3", set(NativeChatRequest.model_fields), "chat"
+    )
     sampling = NativeChatRequest(**fields).to_sampling_params(
         stop=[], model_generation_config={"temperature": 0.7, "top_p": 0.8}
     )
@@ -314,7 +318,7 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
         StagePayload("r1", OmniRequest("x", {}, {"video_fps": 2.0}), None),
         payload(stage_params=[]),
         payload(stage_sampling=[]),
-        payload(stage_params={"reasoner": ["bad"]}),
+        payload(stage_params={"chat": ["bad"]}),
         payload(n=2),
         payload(stream=True, return_logprob=True),
         payload(tools=[{"function": {"name": "search"}}]),
@@ -322,7 +326,7 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
 )
 def test_unsupported_contracts_reject_before_dispatch(item):
     with pytest.raises(ValueError):
-        build_chat_fields(item, "cosmos3", NativeRequest.model_fields)
+        build_chat_fields(item, "cosmos3", NativeRequest.model_fields, "chat")
 
 
 @pytest.mark.parametrize(
@@ -359,7 +363,9 @@ def test_chat_media_follows_the_server_media_policy(
         allowed_local_media_path=allowed if configured else None,
         allowed_media_domains=["example.com"] if configured else None,
     )
-    monkeypatch.setattr(reasoner, "get_global_resource_connector", lambda: connector)
+    monkeypatch.setattr(
+        native_chat_scheduler, "get_global_resource_connector", lambda: connector
+    )
     item = payload(inputs={"messages": [{"role": "user", "content": "x"}]})
     item.request.inputs["images"] = [reference]
     with running() as (scheduler, _, chat):
@@ -367,7 +373,7 @@ def test_chat_media_follows_the_server_media_policy(
         message = scheduler.outbox.get(timeout=3)
     if outcome == "refused":
         assert message.type == "error"
-        assert str(message.data).startswith(reasoner.REQUEST_ERROR)
+        assert str(message.data).startswith(native_chat_scheduler.REQUEST_ERROR)
         assert not chat.calls
     else:
         assert message.type == "result"
@@ -395,21 +401,16 @@ def test_chat_media_follows_the_server_media_policy(
 )
 def test_native_engine_cannot_escape_declared_placement(overrides):
     with pytest.raises(ValueError):
-        native_reasoner_kwargs("checkpoint", 0, overrides)
+        native_chat_server_kwargs("checkpoint", 0, overrides)
 
 
-def test_native_sizes_the_reasoner_unless_the_stage_config_does():
-    from sglang_omni.cli.serve import engine_stage_names
-
-    assert engine_stage_names(Cosmos3ReasonerPipelineConfig(model_path="m")) == [
-        "reasoner"
-    ]
+def test_native_sizes_the_stage_unless_its_config_does():
     for overrides, budget, expected in [
         (None, None, None),
         (None, 0.4, 0.4),
         ({"mem_fraction_static": 0.5}, 0.4, 0.5),
     ]:
-        kwargs = native_reasoner_kwargs("checkpoint", 0, overrides, None, budget)
+        kwargs = native_chat_server_kwargs("checkpoint", 0, overrides, None, budget)
         assert "context_length" not in kwargs
         assert kwargs.get("mem_fraction_static") == expected
 
@@ -443,7 +444,7 @@ def test_stream_preserves_unicode_without_duplicate_terminal_text():
                     "r1",
                     StreamMessage(
                         request_id="r1",
-                        from_stage="reasoner",
+                        from_stage="chat",
                         chunk=msg.data,
                     ),
                 )
@@ -558,30 +559,23 @@ def test_shutdown_cancels_active_native_work_and_joins_threads():
         assert not scheduler.loop_thread.is_alive()
 
 
-def test_reasoner_variant_uses_native_child_process_ownership():
-    config = Cosmos3ReasonerPipelineConfig(model_path="checkpoint")
-    assert config.native_media_stage is None
-    assert config.stages[0].allow_child_processes
-    assert config.stages[0].name == "reasoner"
-    assert Variants["text"] is Cosmos3ReasonerPipelineConfig
-
-
 def test_stage_sampling_is_preserved_and_stage_params_take_precedence():
     fields = build_chat_fields(
         payload(
             temperature=1.0,
-            stage_sampling={"reasoner": {"temperature": 0.2}},
-            stage_params={"reasoner": {"max_new_tokens": 9}},
+            stage_sampling={"chat": {"temperature": 0.2}},
+            stage_params={"chat": {"max_new_tokens": 9}},
         ),
         "cosmos3",
         NativeRequest.model_fields,
+        "chat",
     )
     assert fields["temperature"] == 0.2
     assert fields["max_completion_tokens"] == 9
 
 
 @pytest.mark.parametrize("devices", [None, [3, 5]])
-def test_reasoner_factory_passes_resolved_device_to_native(monkeypatch, devices):
+def test_factory_passes_resolved_device_to_native(monkeypatch, devices):
     import sglang
 
     from sglang_omni.platforms import current_platform
@@ -603,12 +597,16 @@ def test_reasoner_factory_passes_resolved_device_to_native(monkeypatch, devices)
 
     monkeypatch.setattr(sglang, "Engine", startup)
     with pytest.raises(RuntimeError, match="native startup reached"):
-        create_reasoner_scheduler(
-            "checkpoint", device=None, gpu_id=None, runtime_gpu_ids=devices
+        create_native_chat_scheduler(
+            "checkpoint",
+            stage_name="chat",
+            device=None,
+            gpu_id=None,
+            runtime_gpu_ids=devices,
         )
 
 
-def test_reasoner_factory_pins_the_host_to_the_serving_device(monkeypatch):
+def test_factory_pins_the_host_to_the_serving_device(monkeypatch):
     import sglang
 
     from sglang_omni.platforms import current_platform
@@ -628,11 +626,11 @@ def test_reasoner_factory_pins_the_host_to_the_serving_device(monkeypatch):
 
     monkeypatch.setattr(sglang, "Engine", startup)
     with pytest.raises(RuntimeError, match="native startup reached"):
-        create_reasoner_scheduler("checkpoint", gpu_id=6)
+        create_native_chat_scheduler("checkpoint", stage_name="chat", gpu_id=6)
     assert pinned == [6]
 
 
-def test_reasoner_factory_rejects_cpu_before_native_startup(monkeypatch):
+def test_factory_rejects_cpu_before_native_startup(monkeypatch):
     from sglang_omni.utils import device as device_utils
 
     monkeypatch.setattr(
@@ -641,4 +639,4 @@ def test_reasoner_factory_rejects_cpu_before_native_startup(monkeypatch):
         lambda device, index: SimpleNamespace(index=None),
     )
     with pytest.raises(ValueError, match="indexed accelerator"):
-        create_reasoner_scheduler("checkpoint", device="cpu")
+        create_native_chat_scheduler("checkpoint", stage_name="chat", device="cpu")

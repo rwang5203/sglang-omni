@@ -15,15 +15,16 @@ from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 from sglang_omni.admission import QueueFullError
 from sglang_omni.client import Client
 from sglang_omni.client.types import CompletionStreamChunk
-from sglang_omni.models.cosmos3.reasoner import NativeReasonerScheduler
 from sglang_omni.proto import StagePayload
+from sglang_omni.scheduling.native_chat_scheduler import NativeChatScheduler
 from sglang_omni.serve import create_app
 
 
 class NativeValidationClient:
     def __init__(self):
         self.closed = 0
-        self.scheduler = object.__new__(NativeReasonerScheduler)
+        self.scheduler = object.__new__(NativeChatScheduler)
+        self.scheduler.stage_name = "reasoner"
         self.scheduler.engine = SimpleNamespace(
             tokenizer_manager=SimpleNamespace(
                 served_model_name="native-model", abort_request=lambda rid: None

@@ -45,9 +45,12 @@ class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
         EngineStageConfig(
             name="reasoner",
             process="reasoner",
-            factory_path="sglang_omni.models.cosmos3.reasoner.create_reasoner_scheduler",
+            factory_path=(
+                "sglang_omni.scheduling.native_chat_scheduler."
+                "create_native_chat_scheduler"
+            ),
             allow_child_processes=True,
-            factory=FactoryArgs(),
+            factory=FactoryArgs(stage_name="reasoner"),
             gpu=0,
             terminal=True,
         )

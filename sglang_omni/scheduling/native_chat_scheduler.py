@@ -1,5 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
-"""Serve Cosmos3 understanding through the native SRT Engine and chat service."""
+"""Serve a chat stage through the native SGLang SRT Engine and chat service."""
 
 from __future__ import annotations
 
@@ -140,7 +140,14 @@ async def police_chat_media(
                 raise ValueError(f"{kind} needs a url")
 
 
-def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> dict:
+def build_chat_fields(
+    payload: StagePayload, model: str, fields: set[str], stage_name: str
+) -> dict:
+    """Translate an Omni request into native chat request fields.
+
+    stage_params and stage_sampling entries under stage_name hold native
+    options for this stage.
+    """
     inputs = payload.request.inputs
     metadata = payload.request.metadata or {}
     if any(key.startswith("video_") or key == "use_audio_in_video" for key in metadata):
@@ -154,7 +161,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
     elif isinstance(inputs, dict) and isinstance(inputs.get("messages"), list):
         messages = deepcopy(inputs["messages"])
         if not all(isinstance(message, dict) for message in messages):
-            raise ValueError("Reasoner messages must be mappings")
+            raise ValueError("Chat messages must be mappings")
         else:
             pass
         media = {key: inputs.get(key) for key in ("images", "videos", "audios")}
@@ -196,9 +203,9 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
                 {"type": kind, kind: {"url": v}} for v in values
             ]
     else:
-        raise ValueError("Reasoner inputs must be text or chat messages")
+        raise ValueError("Chat inputs must be text or chat messages")
     if not messages:
-        raise ValueError("Reasoner requests require at least one message")
+        raise ValueError("Chat requests require at least one message")
     else:
         pass
     params = set_sampling_fields(
@@ -214,21 +221,19 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
             raise ValueError(f"{name} must be a mapping")
         else:
             pass
-        reasoner_params = stage_params.get("reasoner")
-        if reasoner_params is None:
+        stage_options = stage_params.get(stage_name)
+        if stage_options is None:
             continue
         else:
             pass
-        if not isinstance(reasoner_params, dict):
-            raise ValueError("Reasoner stage parameters must be a mapping")
+        if not isinstance(stage_options, dict):
+            raise ValueError(f"{name}.{stage_name} must be a mapping")
         elif name == "stage_sampling":
             explicit = metadata.get(EXPLICIT_STAGE_SAMPLING_PARAMS_KEY) or {}
-            reasoner_params = set_sampling_fields(
-                reasoner_params, explicit.get("reasoner")
-            )
+            stage_options = set_sampling_fields(stage_options, explicit.get(stage_name))
         else:
             pass
-        params.update(reasoner_params)
+        params.update(stage_options)
     if params.get("tools") or params.get("tool_choice"):
         raise ValueError("The Omni text result does not carry native tool calls")
     else:
@@ -243,7 +248,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         pass
     kwargs = {key: value for key, value in params.items() if key in fields}
     if kwargs.get("n", 1) != 1:
-        raise ValueError("The Omni Reasoner returns one completion per request")
+        raise ValueError("The native chat stage returns one completion per request")
     else:
         pass
     if kwargs.get("logprobs"):
@@ -295,7 +300,7 @@ def collect_response(response: ChatCompletionResponse | Response) -> dict:
     }
 
 
-class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
+class NativeChatScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
     """Submit every request to the native engine loop and let SRT own admission.
 
     Each request becomes one coroutine on the Engine event loop. No worker
@@ -308,10 +313,12 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload
         engine: Engine,
         serving_chat: OpenAIServingChat,
         request_type: type[ChatCompletionRequest],
+        stage_name: str,
         max_concurrency: int | None = None,
         device: int | None = None,
     ):
         self.engine = engine
+        self.stage_name = stage_name
         self.device = device
         self.serving_chat = serving_chat
         self.request_type = request_type
@@ -322,7 +329,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload
         self.closed = False
         self.ready = threading.Event()
         if engine.loop.is_running():
-            raise ValueError("The Reasoner stage must own its native Engine event loop")
+            raise ValueError("The native chat stage must own its Engine event loop")
         else:
             pass
         super().__init__(
@@ -330,7 +337,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload
         )
         self.requires_tp_work_fanout = False
         self.loop_thread = threading.Thread(
-            target=self.run_native_loop, name="cosmos3-native-tokenizer"
+            target=self.run_native_loop, name="native-chat-tokenizer"
         )
         try:
             self.loop_thread.start()
@@ -392,6 +399,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload
                 payload,
                 self.engine.tokenizer_manager.served_model_name,
                 set(self.request_type.model_fields),
+                self.stage_name,
             )
             await police_chat_media(fields["messages"], self.max_media_bytes, fetched)
             request = self.request_type(**fields)
@@ -510,7 +518,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload
                 self.engine.loop.close()
 
 
-def native_reasoner_kwargs(
+def native_chat_server_kwargs(
     model_path: str,
     gpu_id: int,
     overrides: dict | None,
@@ -520,7 +528,7 @@ def native_reasoner_kwargs(
     kwargs = dict(overrides or {})
     devices = list(runtime_gpu_ids) if runtime_gpu_ids is not None else [gpu_id]
     if not devices or devices[0] != gpu_id or min(devices) < 0:
-        raise ValueError("Reasoner placement must start with the stage GPU")
+        raise ValueError("Native chat placement must start with the stage GPU")
     else:
         pass
     step = devices[1] - devices[0] if len(devices) > 1 else 1
@@ -529,7 +537,7 @@ def native_reasoner_kwargs(
     else:
         pass
     if kwargs.get("tp_size", len(devices)) != len(devices):
-        raise ValueError("Reasoner tensor parallel size must match Omni placement")
+        raise ValueError("Native chat tensor parallel size must match Omni placement")
     else:
         pass
     for key in ("pp_size", "dp_size", "nnodes"):
@@ -541,7 +549,7 @@ def native_reasoner_kwargs(
         key in kwargs
         for key in ("base_gpu_id", "gpu_id_step", "node_rank", "model_path")
     ):
-        raise ValueError("Set the Reasoner model and GPU through Omni placement")
+        raise ValueError("Set the native chat model and GPU through Omni placement")
     else:
         pass
     if kwargs.get("reasoning_parser") or kwargs.get("tool_call_parser"):
@@ -576,21 +584,22 @@ def native_reasoner_kwargs(
     return kwargs
 
 
-def create_reasoner_scheduler(
+def create_native_chat_scheduler(
     model_path: str,
     *,
+    stage_name: str,
     device: str | None = None,
     gpu_id: int | None = None,
     max_concurrency: int | None = None,
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, object] | None = None,
     total_gpu_memory_fraction: float | None = None,
-) -> NativeReasonerScheduler:
+) -> NativeChatScheduler:
     from sglang_omni.utils.device import resolve_concrete_device
 
     concrete_device = resolve_concrete_device(device, gpu_id)
     if concrete_device.index is None:
-        raise ValueError("Native Cosmos3 execution requires an indexed accelerator")
+        raise ValueError("The native chat stage requires an indexed accelerator")
     else:
         pass
     gpu_id = concrete_device.index
@@ -610,7 +619,7 @@ def create_reasoner_scheduler(
     from sglang.srt.entrypoints.openai.protocol import ChatCompletionRequest
     from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 
-    kwargs = native_reasoner_kwargs(
+    kwargs = native_chat_server_kwargs(
         model_path,
         gpu_id,
         server_args_overrides,
@@ -620,8 +629,13 @@ def create_reasoner_scheduler(
     engine = Engine(**kwargs)
     try:
         service = OpenAIServingChat(engine.tokenizer_manager, engine.template_manager)
-        return NativeReasonerScheduler(
-            engine, service, ChatCompletionRequest, max_concurrency, device=gpu_id
+        return NativeChatScheduler(
+            engine,
+            service,
+            ChatCompletionRequest,
+            stage_name,
+            max_concurrency,
+            device=gpu_id,
         )
     except BaseException:
         engine.shutdown()

@@ -5,12 +5,16 @@ import pytest
 
 from sglang_omni.config import StageConfig
 from sglang_omni.config.placement import build_stage_placement_plan
-from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
-from sglang_omni.models.cosmos3.reasoner import native_reasoner_kwargs
+from sglang_omni.models.cosmos3.config import (
+    Cosmos3PipelineConfig,
+    Cosmos3ReasonerPipelineConfig,
+    Variants,
+)
 from sglang_omni.models.cosmos3.stages import native_server_kwargs
 from sglang_omni.pipeline import runtime_config
 from sglang_omni.pipeline.mp_runner import build_stage_groups
 from sglang_omni.pipeline.replicas import validate_device_assignment
+from sglang_omni.scheduling.native_chat_scheduler import native_chat_server_kwargs
 
 
 def config(devices=(1, 3)):
@@ -72,7 +76,7 @@ def test_native_parallel_options_use_the_declared_gpu_group():
     gen = native_server_kwargs("checkpoint", 1, {"tp_size": 2}, [1, 3])
     assert gen["gpu_ids"] == [1, 3]
     assert gen["num_gpus"] == gen["tp_size"] == 2
-    reasoner = native_reasoner_kwargs("checkpoint", 1, None, [1, 3])
+    reasoner = native_chat_server_kwargs("checkpoint", 1, None, [1, 3])
     assert reasoner["base_gpu_id"] == 1
     assert reasoner["gpu_id_step"] == 2
     assert reasoner["tp_size"] == 2
@@ -215,3 +219,19 @@ def test_generation_factory_selects_cooperative_cancellation(
     assert (activations[0] is not None) is armed
     assert activations[0] is None or not os.path.exists(activations[0])
     assert cancellation.ACTIVATION_ENV not in os.environ
+
+
+def test_reasoner_variant_uses_native_child_process_ownership():
+    config = Cosmos3ReasonerPipelineConfig(model_path="checkpoint")
+    assert config.native_media_stage is None
+    assert config.stages[0].allow_child_processes
+    assert config.stages[0].name == "reasoner"
+    assert Variants["text"] is Cosmos3ReasonerPipelineConfig
+
+
+def test_reasoner_is_an_engine_stage():
+    from sglang_omni.cli.serve import engine_stage_names
+
+    assert engine_stage_names(Cosmos3ReasonerPipelineConfig(model_path="m")) == [
+        "reasoner"
+    ]
