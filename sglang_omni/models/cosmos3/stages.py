@@ -725,7 +725,6 @@ def degraded_cancellation_reason(native_api: bool, num_gpus: object) -> str:
     else:
         return (
             "Cooperative generation cancellation did not start in the native "
-            "worker. Install sglang-omni as a package so native SGLang finds "
-            "its sglang.multimodal_gen.plugins entry point, and list "
+            "worker, whose log names the reason. List "
             f"{cancellation.PLUGIN_NAME} in SGLANG_PLUGINS when that variable is set."
         )

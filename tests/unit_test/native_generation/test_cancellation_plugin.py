@@ -9,24 +9,37 @@ import subprocess
 import sys
 from pathlib import Path
 
+from sglang_omni.native_generation import cancellation
+
 # Runs in a fresh interpreter, because applied hooks patch native classes for
 # the rest of the process.
 NATIVE_WORKER = r"""
 import json, os, sys, tempfile
+from importlib.metadata import entry_points
 from types import SimpleNamespace
 
-from sglang.multimodal_gen.runtime.platforms.plugins import HookRegistry
+from sglang.multimodal_gen.runtime.platforms import initialize_current_platform
+
+initialize_current_platform()
+from sglang.multimodal_gen.runtime.platforms import plugins
 from sglang_omni.native_generation import cancellation
 
-cancellation.register()
-inactive = sorted(target for target in HookRegistry._hooks)
+
+def discovered():
+    return [entry.name for entry in entry_points(group=plugins.GENERAL_PLUGINS_GROUP)]
+
+
+inactive = discovered()
 directory = tempfile.mkdtemp(dir=sys.argv[1])
-os.environ[cancellation.ACTIVATION_ENV] = directory
-cancellation.register()
-HookRegistry.apply_hooks()
-cancellation.announce_worker(
-    local_rank=0, rank=0, server_args=SimpleNamespace(num_gpus=1), pipe_writer=None
-)
+# A native worker spawned inside the activation inherits its import path and
+# environment, then discovers and loads plugins at bootstrap as below.
+with cancellation.activation_environment(directory):
+    plugins.load_plugins()
+    plugins.apply_plugin_hooks()
+    cancellation.announce_worker(
+        local_rank=0, rank=0, server_args=SimpleNamespace(num_gpus=1), pipe_writer=None
+    )
+after = discovered()
 
 from sglang.multimodal_gen.runtime.pipelines_core.stages.base import PipelineStage
 
@@ -70,6 +83,7 @@ for iterate in (True, False):
         outcomes[f"{iterate}-{armed}"] = batch.steps
 print(json.dumps({
     "inactive": inactive,
+    "after": after,
     "handshake": os.path.exists(cancellation.handshake_path(directory, 0)),
     "outcomes": outcomes,
 }))
@@ -95,7 +109,8 @@ def test_hooks_stop_only_armed_cancelled_requests(tmp_path):
         check=True,
     )
     report = json.loads(completed.stdout.strip().splitlines()[-1])
-    assert report["inactive"] == []
+    # Only processes started inside the activation find the plugin.
+    assert cancellation.PLUGIN_NAME not in report["inactive"] + report["after"]
     assert report["handshake"]
     for loop in ("True", "False"):
         assert report["outcomes"][f"{loop}-True"] == [0, 1, 2, "cancelled"]
