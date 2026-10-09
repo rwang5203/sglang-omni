@@ -1258,6 +1258,14 @@ def build_chat_generate_request(req: ChatCompletionRequest) -> GenerateRequest:
     )
 
 
+ROLLOUT_ARTIFACT_FIELDS = (
+    "return_logprob",
+    "return_omni_rollout",
+    "return_routed_experts",
+    "return_indexer_topk",
+)
+
+
 def register_generate(app: FastAPI) -> None:
     interleaved = app.state.interleaved_output
 
@@ -1275,20 +1283,28 @@ def register_generate(app: FastAPI) -> None:
             )
         else:
             pass
-        if req.stream and not interleaved:
+        if interleaved:
+            # Interleaved results carry no rollout artifacts, so the default
+            # return_logprob=true is dropped and an explicit request refused.
+            requested = [
+                name
+                for name in ROLLOUT_ARTIFACT_FIELDS
+                if name in req.model_fields_set and getattr(req, name)
+            ]
+            if requested:
+                raise HTTPException(
+                    status_code=400,
+                    detail=(
+                        "Interleaved /generate returns no logprobs or rollout "
+                        f"artifacts. Leave {', '.join(requested)} unset or false"
+                    ),
+                )
+            else:
+                req = req.model_copy(update={"return_logprob": False})
+        elif req.stream:
             raise HTTPException(
                 status_code=400,
                 detail="stream=true is not supported by /generate yet",
-            )
-        elif req.stream and (
-            req.return_logprob
-            or req.return_omni_rollout
-            or req.return_routed_experts
-            or req.return_indexer_topk
-        ):
-            raise HTTPException(
-                status_code=400,
-                detail="Streaming /generate does not support rollout artifacts",
             )
         else:
             pass

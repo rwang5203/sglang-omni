@@ -96,9 +96,7 @@ def umm_app(coordinator=None, *, interleaved=True):
 
 def test_generate_and_chat_keep_ordered_terminal_manifest():
     client = umm_app()
-    generated = client.post(
-        "/generate", json={"prompt": "Draw then describe", "return_logprob": False}
-    )
+    generated = client.post("/generate", json={"prompt": "Draw then describe"})
     assert generated.status_code == 200
     assert generated.json()["segments"] == [s.to_dict() for s in SEGMENTS]
     assert generated.json()["text"] == "Drawing.Finished."
@@ -118,8 +116,7 @@ def test_generate_and_chat_keep_ordered_terminal_manifest():
 def test_generate_sse_preserves_segment_order_and_explicit_final_snapshot():
     client = umm_app()
     response = client.post(
-        "/generate",
-        json={"prompt": "Draw then describe", "stream": True, "return_logprob": False},
+        "/generate", json={"prompt": "Draw then describe", "stream": True}
     )
     assert response.status_code == 200
     events = response.text.strip().split("\n\n")
@@ -229,11 +226,14 @@ async def test_generate_stream_error_reports_status_and_closes_the_stream(
     assert not any("[DONE]" in event for event in output)
 
 
-def test_streaming_generate_rejects_unsupported_rollout_artifacts_before_dispatch():
-    client = umm_app()
-    response = client.post("/generate", json={"prompt": "hello", "stream": True})
+def test_interleaved_generate_refuses_requested_rollout_artifacts():
+    coordinator = Coordinator()
+    response = umm_app(coordinator).post(
+        "/generate", json={"prompt": "hello", "return_logprob": True}
+    )
     assert response.status_code == 400
-    assert "rollout artifacts" in response.text
+    assert "return_logprob" in response.json()["detail"]
+    assert coordinator.submitted == []
 
 
 @pytest.mark.parametrize("stream", [False, True])

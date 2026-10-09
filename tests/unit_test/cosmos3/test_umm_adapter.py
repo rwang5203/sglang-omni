@@ -39,7 +39,9 @@ from sglang_omni.pipeline.umm import (
     route_umm,
 )
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.openai_errors import generation_error_status_code
+from sglang_omni.serve.protocol import ChatCompletionRequest
 
 PHASES = {"reason": "reasoner", "generate": "generation"}
 
@@ -61,8 +63,8 @@ def controller(**bounds: int) -> UMMController:
     )
 
 
-def submit(umm: UMMController, inputs="Draw a cube.", params=None, rid="r"):
-    request = OmniRequest(inputs, params or {})
+def submit(umm: UMMController, inputs="Draw a cube.", params=None, rid="r", **meta):
+    request = OmniRequest(inputs, params or {}, meta)
     return umm.advance(StagePayload(rid, request, request.inputs))
 
 
@@ -117,25 +119,36 @@ def test_invalid_chat_history_is_a_client_error_before_any_dispatch(inputs):
     assert route_umm("healthy", dispatched) == "reasoner"
 
 
-def test_native_chat_contract_and_user_options_survive_internal_decision():
-    umm = controller()
-    params = {
-        "stream": True,
-        "stage_params": {
-            "reasoner": {
-                "stream": True,
-                "response_format": {"type": "text"},
-                "temperature": 0.25,
-                "max_new_tokens": 4096,
-            }
-        },
-    }
-    inputs = {
-        "messages": [{"role": "user", "content": "Make a blue cube"}],
-        "images": [data_url("image/png", bytes(3))],
-    }
-    original = deepcopy(params)
-    internal = submit(umm, inputs, params)
+@pytest.mark.parametrize(
+    "body, temperature",
+    [
+        (
+            {
+                "max_tokens": 64,
+                "stage_params": {
+                    "reasoner": {
+                        "stream": True,
+                        "response_format": {"type": "text"},
+                        "max_new_tokens": 4096,
+                        "top_k": 5,
+                    }
+                },
+            },
+            0.0,
+        ),
+        ({"temperature": 0.25}, 0.25),
+    ],
+)
+def test_decisions_keep_their_contract_and_only_explicit_client_sampling(
+    body, temperature
+):
+    chat = ChatCompletionRequest(
+        messages=[{"role": "user", "content": "Make a blue cube"}],
+        images=[data_url("image/png", bytes(3))],
+        **body,
+    )
+    request = Client.build_omni_request(build_chat_generate_request(chat))
+    internal = submit(controller(), request.inputs, request.params, **request.metadata)
     fields = build_chat_fields(
         internal,
         "cosmos3",
@@ -143,18 +156,23 @@ def test_native_chat_contract_and_user_options_survive_internal_decision():
             "stream",
             "response_format",
             "temperature",
+            "top_k",
             "max_tokens",
             "chat_template_kwargs",
             "n",
+            "logprobs",
         },
     )
     assert fields["stream"] is False
     assert fields["response_format"]["json_schema"]["strict"]
     assert fields["chat_template_kwargs"]["enable_thinking"] is False
-    assert fields["temperature"] == 0.25
-    assert fields["max_tokens"] == 4096
+    assert fields["temperature"] == temperature
+    assert fields.get("top_k") == body.get("stage_params", {}).get("reasoner", {}).get(
+        "top_k"
+    )
+    # The decision schema alone bounds a decision, and none returns logprobs.
+    assert "max_tokens" not in fields and "logprobs" not in fields
     assert fields["messages"][1]["content"][1]["image_url"]["url"].endswith("AAAA")
-    assert params == original
 
 
 def decision_text(kind, text, generation):
@@ -512,6 +530,7 @@ def test_forward_dynamics_video_keeps_the_known_actions():
     [
         {"stage_params": {"reasoner": []}},
         {"chat_template_kwargs": "invalid"},
+        {"return_logprob": True},
         {"diffusion": []},
     ],
 )

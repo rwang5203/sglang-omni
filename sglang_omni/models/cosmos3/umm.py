@@ -24,11 +24,18 @@ from sglang_omni.pipeline.umm import (
     UMMRequestError,
     UMMStep,
 )
-from sglang_omni.proto import OmniRequest
+from sglang_omni.proto import (
+    EXPLICIT_GENERATION_PARAMS_KEY,
+    EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
+    OmniRequest,
+)
 
 # Adapter phase names, mapped to stages by the orchestrator's factory.phases.
 REASON = "reason"
 GENERATE = "generate"
+# The stage name clients use for Reasoner overrides in stage_sampling and
+# stage_params.
+REASONER_STAGE = "reasoner"
 
 MAX_TEXT_CHARS = 8192
 MAX_PROMPT_CHARS = 4096
@@ -91,6 +98,33 @@ SYSTEM_INSTRUCTION = (
     "before receiving the generation result."
 )
 
+# Decisions sample greedily unless the client sets a sampling field, and only
+# the decision schema bounds their length: a client length or stop setting
+# would truncate the JSON and fail the request.
+DECISION_SAMPLING = {"temperature": 0.0}
+SAMPLING_FIELDS = ("temperature", "top_p", "top_k", "min_p", "repetition_penalty")
+DECISION_OWNED_FIELDS = frozenset(
+    {
+        "chat_template_kwargs",
+        "ignore_eos",
+        "max_completion_tokens",
+        "max_new_tokens",
+        "max_tokens",
+        "n",
+        "response_format",
+        "stop",
+        "stop_token_ids",
+        "stream",
+    }
+)
+# Interleaved results carry no logprobs or rollout artifacts.
+ROLLOUT_FIELDS = (
+    "return_logprob",
+    "return_omni_rollout",
+    "return_routed_experts",
+    "return_indexer_topk",
+)
+
 MEDIA_TYPES = {
     "image": ("image/png", "image/jpeg", "image/webp"),
     "video": ("video/mp4",),
@@ -115,6 +149,7 @@ class Cosmos3History:
 
     reasons_left: int
     generations_left: int
+    sampling: dict[str, object]
     messages: list[dict[str, object]] = field(default_factory=list)
     media_urls: list[tuple[int, str]] = field(default_factory=list)
     retained_bytes: int = 0
@@ -225,6 +260,74 @@ def generated_media(result: object) -> dict[str, object]:
             "sha256": item["sha256"],
             "url": url,
         }
+
+
+def stage_mapping(params: dict[str, object], key: str) -> dict[str, object]:
+    """The Reasoner entry of a per-stage mapping, which must be a mapping."""
+    value = params.get(key)
+    if value is None:
+        return {}
+    elif not isinstance(value, dict):
+        raise UMMRequestError(f"{key} must be a mapping")
+    else:
+        reasoner = value.get("reasoner", {})
+        if not isinstance(reasoner, dict):
+            raise UMMRequestError(f"{key}.reasoner must be a mapping")
+        else:
+            return reasoner
+
+
+def decision_sampling(request: OmniRequest) -> dict[str, object]:
+    """Native sampling fields for every decision of one request.
+
+    The adapter's defaults apply to fields the client did not set. The client
+    sets fields explicitly at the top level, through stage_sampling.reasoner,
+    or as native fields in stage_params.reasoner.
+    """
+    params, metadata = request.params, request.metadata
+    requested = [name for name in ROLLOUT_FIELDS if params.get(name)]
+    if requested:
+        raise UMMRequestError(
+            "Cosmos3 interleaving returns no logprobs or rollout artifacts. "
+            f"Leave {', '.join(requested)} unset or false"
+        )
+    else:
+        pass
+    explicit = set(metadata.get(EXPLICIT_GENERATION_PARAMS_KEY) or ())
+    sampling: dict[str, object] = dict(DECISION_SAMPLING)
+    sampling.update(
+        {name: params[name] for name in SAMPLING_FIELDS if name in explicit}
+    )
+    if params.get("seed") is not None:
+        sampling["seed"] = params["seed"]
+    else:
+        pass
+    stage_sampling = stage_mapping(params, "stage_sampling")
+    explicit_stage = (metadata.get(EXPLICIT_STAGE_SAMPLING_PARAMS_KEY) or {}).get(
+        REASONER_STAGE
+    )
+    for name, value in stage_sampling.items():
+        if name in DECISION_OWNED_FIELDS or (
+            explicit_stage is not None and name not in explicit_stage
+        ):
+            continue
+        else:
+            sampling[name] = value
+    reasoner = stage_mapping(params, "stage_params")
+    for name, value in reasoner.items():
+        if name not in DECISION_OWNED_FIELDS:
+            sampling[name] = value
+        else:
+            pass
+    template = reasoner.get("chat_template_kwargs", params.get("chat_template_kwargs"))
+    if template is not None and not isinstance(template, dict):
+        raise UMMRequestError("chat_template_kwargs must be a mapping")
+    else:
+        sampling["chat_template_kwargs"] = {
+            **(template or {}),
+            "enable_thinking": False,
+        }
+    return sampling
 
 
 def encoded_size(message: dict[str, object]) -> int:
@@ -346,7 +449,9 @@ class Cosmos3UMMAdapter:
             messages.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
         generations = (context.remaining_dispatches - 1) // 2
         history = Cosmos3History(
-            reasons_left=generations + 1, generations_left=generations
+            reasons_left=generations + 1,
+            generations_left=generations,
+            sampling=decision_sampling(context.request),
         )
         self.histories[context.execution_id] = history
         for message in messages:
@@ -364,36 +469,17 @@ class Cosmos3UMMAdapter:
         history: Cosmos3History,
         outputs: tuple[UMMOutput, ...],
     ) -> UMMStep:
-        params = deepcopy(context.request.params)
-        # Flatten native reasoner overrides first so the internal decision
-        # contract cannot be replaced by a stage-specific stream or schema.
-        for key in ("stage_sampling", "stage_params"):
-            value = params.pop(key, {})
-            if not isinstance(value, dict):
-                raise UMMRequestError(f"{key} must be a mapping")
-            else:
-                pass
-            reasoner = value.get("reasoner", {})
-            if not isinstance(reasoner, dict):
-                raise UMMRequestError("Reasoner stage parameters must be a mapping")
-            else:
-                pass
-            params.update(reasoner)
-        template = params.get("chat_template_kwargs") or {}
-        if not isinstance(template, dict):
-            raise UMMRequestError("chat_template_kwargs must be a mapping")
-        else:
-            pass
         # A generation and the Reasoner turn that inspects it need two more
         # dispatches after this one, so with fewer left only final remains.
         if context.remaining_dispatches < 3:
             schema = deepcopy(FINAL_DECISION)
         else:
             schema = {"anyOf": [deepcopy(FINAL_DECISION), deepcopy(GENERATE_DECISION)]}
-        params.update(
-            stream=False,
-            n=1,
-            response_format={
+        params = {
+            **deepcopy(history.sampling),
+            "stream": False,
+            "n": 1,
+            "response_format": {
                 "type": "json_schema",
                 "json_schema": {
                     "name": "cosmos3_umm_decision",
@@ -401,10 +487,7 @@ class Cosmos3UMMAdapter:
                     "schema": schema,
                 },
             },
-            chat_template_kwargs={**template, "enable_thinking": False},
-        )
-        params.setdefault("temperature", 0.0)
-        params.setdefault("max_tokens", 2048)
+        }
         messages = list(history.messages)
         for index, url in history.media_urls:
             message = messages[index]
@@ -414,10 +497,7 @@ class Cosmos3UMMAdapter:
                 **message,
                 "content": [text, {"type": part, part: {"url": url}}],
             }
-        request = OmniRequest(
-            {"messages": messages}, params, deepcopy(context.request.metadata)
-        )
-        return UMMStep(REASON, request, outputs)
+        return UMMStep(REASON, OmniRequest({"messages": messages}, params), outputs)
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         history = self.histories[context.execution_id]
@@ -504,5 +584,4 @@ class Cosmos3UMMAdapter:
         return OmniRequest(
             {"prompt": decision.generation["prompt"]},
             {"diffusion": options, "stream": False},
-            deepcopy(context.request.metadata),
         )
