@@ -428,14 +428,28 @@ def inline_scheduler(tmp_path, generator=None):
     )
 
 
-def test_inline_output_is_owned_hashed_and_released_before_forwarding(tmp_path):
+@pytest.mark.parametrize("refused", [False, True])
+def test_inline_output_is_owned_hashed_and_released_before_forwarding(
+    tmp_path, refused
+):
     keep = tmp_path / "keep"
     keep.write_text("keep")
-    scheduler = inline_scheduler(tmp_path)
+    generator = SavedGenerator()
+    if refused:
+        # Native returns no output for a generation it refused.
+        generator.generate = lambda **_: None
+    else:
+        pass
+    scheduler = inline_scheduler(tmp_path, generator)
     result = scheduler.generate(StagePayload("r", OmniRequest("cube"), None))
     assert list(tmp_path.iterdir()) == [keep]
     assert not scheduler.native_requests
     assert scheduler.claim_result(result, terminal=False)
+    if refused:
+        assert result.data["media"] == []
+        return
+    else:
+        pass
     item = result.data["media"][0]
     assert "path" not in item
     assert item["sha256"] == hashlib.sha256(b"png fixture").hexdigest()
@@ -497,6 +511,8 @@ def test_umm_variant_wires_the_controller_and_inline_generation():
         ("video", 'A sign reading "你好" on a cube.\nUse the lighting.', "completed"),
         # Native generation refuses a blank prompt, so none is dispatched.
         ("image", " \n", "not_executed"),
+        # A generation native refused, such as a guardrail block.
+        ("video", "A cube", "no_media"),
     ],
 )
 def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
@@ -506,6 +522,8 @@ def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
     original = deepcopy(generated)
     if status == "completed":
         resumed = umm.advance(reply(resumed, generated))
+    elif status == "no_media":
+        resumed = umm.advance(reply(resumed, {"media": [], "finish_reason": "stop"}))
     else:
         pass
     assert route_umm("r", resumed) == "reasoner"

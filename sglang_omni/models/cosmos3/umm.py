@@ -420,6 +420,12 @@ RECEIPTS = {
         "nonblank prompt, or choose kind final with generation null and your "
         "answer in text.",
     ),
+    "no_media": (
+        "Generation finished without media",
+        "Native generation returned no media for this prompt, for example "
+        "because a safety guardrail blocked it. Explain this to the user with "
+        "kind final and generation null, or request a revised generation.",
+    ),
 }
 
 
@@ -619,6 +625,15 @@ class Cosmos3UMMAdapter:
                 return UMMStep(GENERATE, request, outputs)
         elif phase == GENERATE and history.decision is not None:
             decision = history.decision
+            if isinstance(result, dict) and result.get("media") == []:
+                # A generation native refused, such as a guardrail block, goes
+                # back to the Reasoner, which can explain it or revise.
+                history.generations_left -= 1
+                self.remember(history, receipt(decision, "no_media"))
+                history.decision = None
+                return self.reason(context, history, ())
+            else:
+                pass
             item = generated_media(result)
             if item["kind"] != decision.generation["modality"]:
                 raise ValueError(
