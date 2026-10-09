@@ -43,11 +43,11 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         self.speech_pad_id = int(speech["codec_config"]["codebook_size"])
         self.warmup_rows = None
 
-    def device(self):
+    def fusion_device(self) -> torch.device:
         return self.model.fusion_buffer.device
 
     def char_batch(self, token_ids: list[int]):
-        device = self.device()
+        device = self.fusion_device()
         sequences = [
             [
                 self.char_vocab[c]
@@ -86,7 +86,7 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             ids, chars, lengths = self.char_batch(
                 [self.text_pad_id] * (frames - 1) + [self.text_eos_id]
             )
-            mask = torch.zeros(frames, dtype=torch.bool, device=self.device())
+            mask = torch.zeros(frames, dtype=torch.bool, device=self.fusion_device())
             mask[frames - 2 :] = True
             text = talker.embed_subword(ids, chars, lengths, mask)
             self.warmup_rows = talker.gated_fusion_audio_text(audio, text)
@@ -99,7 +99,7 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
             (1, self.model.talker.num_quantizers),
             self.speech_pad_id,
             dtype=torch.long,
-            device=self.device(),
+            device=self.fusion_device(),
         )
 
     def step_row(self, prev_codes: torch.Tensor, token: int) -> torch.Tensor:
@@ -143,7 +143,7 @@ class NemotronVoiceChatTalkerModelRunner(ModelRunner):
         # slot and its KV. Holding the batch back until a text token arrives
         # would strand a request whose thinker has already stopped.
         return all(
-            len(req._omni_data.pending_text_queue) > 0
+            len(req.omni_data.pending_text_queue) > 0
             or self.is_terminating(
                 req
             )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
