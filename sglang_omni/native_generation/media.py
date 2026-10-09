@@ -14,7 +14,12 @@ import asyncio
 import inspect
 import json
 import logging
+import os
+import pickle
+import shutil
 import socket
+import tempfile
+import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, suppress
 from functools import partial
@@ -59,9 +64,6 @@ MEDIA_REFERENCE_FIELDS = frozenset(
 # Containers native SGLang merges into a request, as JSON objects or strings.
 EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
-NativeServerKwargs = Callable[
-    [str, int, dict[str, object], list[int] | None], dict[str, object]
-]
 RequestFields = Callable[[object], frozenset[str]]
 
 
@@ -82,16 +84,18 @@ def prepare_native_media_app(
     *,
     port: int,
     stage_name: str,
-    server_kwargs: NativeServerKwargs,
     request_fields: RequestFields,
 ) -> Callable[[], NativeMediaFrontend]:
-    """Settle the native server arguments the stage and the routes share.
+    """Settle the native server settings before the generation stage starts.
 
     Runs before any stage starts, because the stage process reads the
-    overrides written here when it builds its native runtime. Returns the
-    builder of the frontend, which imports native SGLang. request_fields
-    names the request fields clients may set for the served model, the same
-    set the generation stage accepts.
+    overrides written here when it builds its native runtime. The stage
+    saves the native server arguments it resolves to the path set here,
+    and the returned builder, called once the stage started, loads them.
+    Building native server arguments in the HTTP process instead would
+    query the GPU and hold a CUDA context there. request_fields names the
+    request fields clients may set for the served model, the same set the
+    generation stage accepts.
     """
     stage = config.stage_named(stage_name)
     if not isinstance(stage.gpu, int):
@@ -112,8 +116,8 @@ def prepare_native_media_app(
         )
     else:
         pass
-    # Explicit strict ports make both sides address the same scheduler, and
-    # startup fails if another process takes one of them.
+    # Explicit strict ports make startup fail if another process takes one
+    # of them, instead of native SGLang moving to another port.
     kwargs.setdefault("scheduler_port", unused_port({port}))
     kwargs.setdefault("master_port", unused_port({port, kwargs["scheduler_port"]}))
     # Native routes keep uploads in a temporary directory for their request
@@ -126,11 +130,15 @@ def prepare_native_media_app(
         strict_ports=True,
         output_path=str(output_dir.resolve()),
     )
-    native_kwargs = server_kwargs(
-        config.model_path, stage.gpu, kwargs, stage.runtime_gpu_ids
-    )
     stage.factory.server_args_overrides = kwargs
-    return partial(NativeMediaFrontend.build, native_kwargs, request_fields)
+    # A private directory, removed once loaded or at interpreter exit.
+    handoff = tempfile.mkdtemp(prefix="sglang-omni-native-args-")
+    stage.factory.server_args_path = os.path.join(handoff, "server_args.pickle")
+    build = partial(
+        NativeMediaFrontend.build, stage.factory.server_args_path, request_fields
+    )
+    weakref.finalize(build, shutil.rmtree, handoff, ignore_errors=True)
+    return build
 
 
 class NativeMediaFrontend:
@@ -188,15 +196,24 @@ class NativeMediaFrontend:
 
     @classmethod
     def build(
-        cls, server_kwargs: dict[str, object], request_fields: RequestFields
+        cls, server_args_path: str, request_fields: RequestFields
     ) -> NativeMediaFrontend:
-        """Import the native runtime and build the frontend off the event loop."""
-        from sglang.multimodal_gen.runtime.server_args import (
-            ServerArgs,
-            set_global_server_args,
-        )
+        """Load the generation stage's native server arguments and build the
+        frontend, off the event loop."""
+        from sglang.multimodal_gen.runtime.server_args import set_global_server_args
 
-        server_args = ServerArgs.from_kwargs(**server_kwargs)
+        try:
+            with open(server_args_path, "rb") as handle:
+                server_args = pickle.load(handle)
+        except FileNotFoundError:
+            raise RuntimeError(
+                "The generation stage did not save its native server arguments "
+                f"to {server_args_path}. Its stage factory must accept "
+                "server_args_path, as the native generation scheduler factory "
+                "does."
+            ) from None
+        finally:
+            shutil.rmtree(os.path.dirname(server_args_path), ignore_errors=True)
         set_global_server_args(server_args)
         fields = request_fields(server_args)
         return cls(server_args, frozenset(f for f in fields if f.endswith("_path")))

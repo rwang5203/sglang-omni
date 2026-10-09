@@ -20,7 +20,6 @@ curl http://127.0.0.1:8000/v1/images/generations \
 - Only the routes above are served. Native weights, memory, LoRA, rollout, mesh, realtime, server info and stats routes are not, so use the Omni admin routes, which require the admin key when one is set.
 - The native scheduler listens on `127.0.0.1` whatever host the server binds. Startup fails if the generation stage's `server_args_overrides` set another `host`.
 - While native warmup runs, `/health` answers 503 with status `warming` and the native routes answer 503. A warmup failure stops the server with a nonzero exit status.
-- The Omni HTTP process builds the native server arguments for these routes, which creates one CUDA context on the generation GPU in that process, in addition to the generation stage's own processes.
 - If the native scheduler or the generation stage stops, requests in flight and new requests on these routes get 503 at once, and the server stops when the generation stage fails.
 
 ## Media policy

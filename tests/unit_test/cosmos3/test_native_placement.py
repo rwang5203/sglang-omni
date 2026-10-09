@@ -1,4 +1,5 @@
 # SPDX-License-Identifier: Apache-2.0
+import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -188,7 +189,7 @@ def test_generation_factory_selects_cooperative_cancellation(
         return SimpleNamespace(
             shutdown=lambda: None,
             local_scheduler_process=[],
-            server_args=None,
+            server_args={"resolved": case},
             supports_cancellation=case == "native",
         )
 
@@ -200,6 +201,7 @@ def test_generation_factory_selects_cooperative_cancellation(
             "checkpoint",
             output_dir=str(tmp_path),
             runtime_gpu_ids=[0, 1] if case == "two_gpus" else None,
+            server_args_path=str(tmp_path / "server_args.pickle"),
         )
     expected = {"native": "native", "plugin": "plugin"}.get(case)
     assert scheduler.cancellation_mode == expected
@@ -210,3 +212,6 @@ def test_generation_factory_selects_cooperative_cancellation(
     assert (activations[0] is not None) is armed
     assert activations[0] is None or not os.path.exists(activations[0])
     assert cancellation.ACTIVATION_ENV not in os.environ
+    # The native media routes load what the stage resolved.
+    with open(tmp_path / "server_args.pickle", "rb") as handle:
+        assert pickle.load(handle) == {"resolved": case}

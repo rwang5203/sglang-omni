@@ -1,5 +1,7 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
+import os
+import pickle
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -21,8 +23,16 @@ class RunningClient:
         return {"running": True}
 
 
+class NativePipeline:
+    def supports_action_endpoint(self):
+        return True
+
+    def supports_openpi_endpoint(self):
+        return True
+
+
 @pytest.fixture
-def native(monkeypatch):
+def native(monkeypatch, tmp_path):
     """Native runtime pieces the frontend calls, without a scheduler."""
     from sglang.multimodal_gen.runtime import (
         scheduler_client,
@@ -35,12 +45,21 @@ def native(monkeypatch):
         prompt_enhancer_config=None,
         scheduler_endpoints=[],
         warmup_resolutions=None,
-        pipeline_config=SimpleNamespace(
-            supports_action_endpoint=lambda: True,
-            supports_openpi_endpoint=lambda: True,
-        ),
+        pipeline_config=NativePipeline(),
     )
     native = SimpleNamespace(args=args, events=[], warmup=None)
+
+    def build():
+        # The generation stage saves its resolved arguments here.
+        handoff = tmp_path / "handoff"
+        handoff.mkdir()
+        path = handoff / "server_args.pickle"
+        path.write_bytes(pickle.dumps(native.args))
+        frontend = media.NativeMediaFrontend.build(str(path), client_fields)
+        assert not handoff.exists()
+        return frontend
+
+    native.build = build
 
     def initialize(self, server_args, *, worker_failure=None):
         native.events.append("initialize")
@@ -48,7 +67,10 @@ def native(monkeypatch):
     def close(self):
         native.events.append("close")
 
-    monkeypatch.setattr(server_args.ServerArgs, "from_kwargs", lambda **kw: args)
+    def query_devices(**kwargs):
+        raise AssertionError("native server arguments built in the HTTP process")
+
+    monkeypatch.setattr(server_args.ServerArgs, "from_kwargs", query_devices)
     monkeypatch.setattr(server_args, "set_global_server_args", lambda args: None)
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "close", close)
@@ -97,7 +119,7 @@ def test_native_routes_and_lifetime_are_composed_without_a_proxy(native):
     def health():
         return {"owner": "omni"}
 
-    frontend = media.NativeMediaFrontend.build({}, client_fields)
+    frontend = native.build()
 
     @frontend.app.get("/v1/images/owner")
     def owner():
@@ -143,7 +165,7 @@ def test_only_native_media_routes_are_served(native):
         response = await client.post("/v1/images/generations", json={})
         assert response.status_code == 422
 
-    serve(omni, media.NativeMediaFrontend.build({}, client_fields), check)
+    serve(omni, native.build(), check)
 
 
 @pytest.mark.parametrize("warmup_fails", [False, True])
@@ -158,7 +180,7 @@ def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
             pass
 
     native.warmup = warmup
-    frontend = media.NativeMediaFrontend.build({}, client_fields)
+    frontend = native.build()
 
     async def check(client, runtime_failure):
         failed = asyncio.ensure_future(frontend.wait_failed())
@@ -204,7 +226,7 @@ def test_native_worker_failure_is_used_when_installed(native, monkeypatch, insta
         assert received == [runtime_failure if installed else None]
         assert (await client.get("/v1/videos")).status_code == 200
 
-    serve(FastAPI(), media.NativeMediaFrontend.build({}, client_fields), check)
+    serve(FastAPI(), native.build(), check)
 
 
 @pytest.mark.parametrize("cause", ["scheduler", "stage"])
@@ -215,7 +237,7 @@ def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
     scheduler = context.socket(zmq.ROUTER)
     port = scheduler.bind_to_random_port("tcp://127.0.0.1")
     native.args.scheduler_endpoints = [f"tcp://127.0.0.1:{port}"]
-    frontend = media.NativeMediaFrontend.build({}, client_fields)
+    frontend = native.build()
     entered = asyncio.Event()
 
     @frontend.app.post("/v1/images/generations-waiting")
@@ -309,7 +331,7 @@ def test_native_requests_follow_the_server_media_policy(
         response = await client.post("/v1/videos", json=inside)
         assert "refused" not in response.text
 
-    serve(FastAPI(), media.NativeMediaFrontend.build({}, client_fields), check)
+    serve(FastAPI(), native.build(), check)
 
 
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
@@ -320,7 +342,7 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     monkeypatch.setattr(
         media.NativeMediaFrontend,
         "build",
-        lambda kwargs, request_fields: built.append(kwargs) or frontend,
+        lambda path, request_fields: built.append(path) or frontend,
     )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
     prepare = import_string(Cosmos3PipelineConfig.native_media_factory)
@@ -334,10 +356,13 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     assert overrides["strict_ports"] is True and overrides["input_save_path"] is None
     assert {"scheduler_port", "master_port", "output_path"} <= set(overrides)
     assert 19000 not in {overrides["scheduler_port"], overrides["master_port"]}
+    # The stage saves its resolved native server arguments where the routes
+    # load them, in a directory only this user can write.
+    path = config.stages[0].factory.server_args_path
+    assert os.stat(os.path.dirname(path)).st_mode & 0o777 == 0o700
     assert built == []
     assert build() is frontend
-    assert built[0]["model_path"] == "checkpoint" and built[0]["base_gpu_id"] == 0
-    assert built[0]["host"] == "127.0.0.1"
+    assert built == [path]
 
     config = Cosmos3PipelineConfig(model_path="checkpoint")
     config.stages[0].factory.server_args_overrides = {"host": "0.0.0.0"}
@@ -345,17 +370,21 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
         prepare(config, port=19000)
 
 
-def test_native_frontend_builds_before_stage_startup(monkeypatch):
+def test_native_frontend_builds_after_stage_startup(monkeypatch):
     from sglang_omni.serve import launcher
 
     events = []
 
     class Config:
+        name = "native"
         native_media_factory = "model.native_media"
 
     class Runner:
         def __init__(self, config):
-            pass
+            self.coordinator = None
+            self.prep = SimpleNamespace(
+                placement_plan=SimpleNamespace(gpus={}), process_plan=None
+            )
 
         async def start(self, timeout):
             events.append("startup")
@@ -370,7 +399,9 @@ def test_native_frontend_builds_before_stage_startup(monkeypatch):
     monkeypatch.setattr(launcher, "MultiProcessPipelineRunner", Runner)
     monkeypatch.setattr(launcher, "find_available_port", lambda host, port: port)
     monkeypatch.setattr(launcher, "import_string", lambda path: lambda *a, **k: fail)
+    monkeypatch.setattr(launcher, "placement_log_summary", lambda *args: {})
     with pytest.raises(RuntimeError, match="frontend build failed"):
         asyncio.run(launcher.run_server(Config()))
-    # The native worker binds the frontend's strict ports, so stages start later.
-    assert events == ["frontend"]
+    # The frontend loads what the generation stage resolved while starting,
+    # and a frontend failure still stops the stages.
+    assert events == ["startup", "frontend", "stopped"]
