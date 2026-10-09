@@ -629,6 +629,7 @@ def test_forward_dynamics_video_keeps_the_known_actions():
         ({"diffusion": []}, "diffusion"),
         ({"stage_params": {"generation": {"num_frames": 1}}}, "more than one frame"),
         ({"diffusion": {"action_mode": " POLICY "}}, "action-only"),
+        ({"stage_params": {"generation": {"output_path": "/tmp"}}}, "output_path"),
     ],
 )
 def test_invalid_options_are_refused_before_any_turn(params, message):
@@ -639,3 +640,15 @@ def test_invalid_options_are_refused_before_any_turn(params, message):
     assert message in error
     assert generation_error_status_code(RuntimeError(error)) == 400
     assert not umm.contexts and not umm.adapter.histories
+
+
+def test_start_check_lists_the_fields_native_cosmos3_declares():
+    from sglang.multimodal_gen.configs.sample.cosmos3 import Cosmos3SamplingParams
+    from sglang.multimodal_gen.runtime.entrypoints.openai.utils import (
+        get_sampling_request_extra_fields,
+    )
+
+    declared = get_sampling_request_extra_fields(
+        Cosmos3SamplingParams, "image"
+    ) | get_sampling_request_extra_fields(Cosmos3SamplingParams, "video")
+    assert cosmos3_umm.COSMOS3_REQUEST_FIELDS == declared

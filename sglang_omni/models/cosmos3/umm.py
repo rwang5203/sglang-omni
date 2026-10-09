@@ -17,6 +17,7 @@ from dataclasses import dataclass, field
 
 from sglang_omni.admission import QueueFullError
 from sglang_omni.models.cosmos3.stages import (
+    COMMON_REQUEST_FIELDS,
     DEADLINE_METADATA_KEY,
     INLINE_MEDIA_LIMIT_BYTES,
     check_media_source,
@@ -133,6 +134,42 @@ MEDIA_TYPES = {
     "image": ("image/png", "image/jpeg", "image/webp"),
     "video": ("video/mp4",),
 }
+
+# The fields native Cosmos3 declares for its image and video routes, which
+# the generation stage adds to COMMON_REQUEST_FIELDS through native SGLang.
+# The orchestrator does not import native SGLang, so they are listed here,
+# and a unit test pins them to the native declaration.
+COSMOS3_REQUEST_FIELDS = frozenset(
+    {
+        "action",
+        "action_fps",
+        "action_mode",
+        "action_normalization",
+        "action_view_point",
+        "condition_frame_indexes",
+        "condition_video_keep",
+        "control_guidance",
+        "control_guidance_interval",
+        "control_hint",
+        "control_path",
+        "domain_id",
+        "domain_name",
+        "guidance_interval",
+        "max_frames",
+        "num_conditional_frames",
+        "num_first_chunk_conditional_frames",
+        "num_video_frames_per_chunk",
+        "raw_action_dim",
+        "share_vision_temporal_positions",
+        "show_control_condition",
+        "show_input",
+        "sound_duration",
+        "use_duration_template",
+        "use_guardrails",
+        "use_resolution_template",
+        "use_system_prompt",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -382,9 +419,17 @@ def generation_options(request: OmniRequest) -> dict[str, object]:
         options = resolve_generation_options(deepcopy(request.params))
     except ValueError as exc:
         raise UMMRequestError(str(exc)) from exc
+    refused = sorted(set(options) - COMMON_REQUEST_FIELDS - COSMOS3_REQUEST_FIELDS)
     action_mode = options.get("action_mode")
     frames = options.get("num_frames")
-    if action_mode is not None and (
+    if refused:
+        # The generation stage would refuse them at the first generation.
+        raise UMMRequestError(
+            f"Cosmos3 generation cannot set {', '.join(refused)}. Clients may "
+            "set the fields that the native image and video routes accept, and "
+            "the server owns paths it writes or reads on its own"
+        )
+    elif action_mode is not None and (
         not isinstance(action_mode, str)
         or action_mode.strip().lower() != "forward_dynamics"
     ):
