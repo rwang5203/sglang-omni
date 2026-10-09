@@ -41,7 +41,7 @@ class CausalConditionalCFM(nn.Module):
         self.out_channels = estimator.out_channels
         # Note (yexiaodong): Keep runtime noise deterministic across model
         # loads without adding it to the converted checkpoint's parameters.
-        self.rand_noise = mx.random.normal(
+        self._rand_noise = mx.random.normal(  # noqa: leading-underscore
             (1, self.out_channels, max_len), key=mx.random.key(0)
         )
 
@@ -97,7 +97,7 @@ class CausalConditionalCFM(nn.Module):
         Returns generated mel [B, mel, T].
         """
         if noise is None:
-            noise = self.rand_noise[:, :, : mu.shape[2]]
+            noise = self._rand_noise[:, :, : mu.shape[2]]  # noqa: leading-underscore
         else:
             pass
         noise = noise.astype(mu.dtype)
