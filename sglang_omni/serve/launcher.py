@@ -25,8 +25,6 @@ Export a config to JSON::
 from __future__ import annotations
 
 import asyncio
-import atexit
-import gc
 import json
 import logging
 import os
@@ -698,11 +696,6 @@ def launch_server(
             ``/v1/audio/speech/batch``.
     """
     apply_gpu_compat_env_defaults()
-    # Interpreter shutdown otherwise spends its final collections walking
-    # every tracked object of the serving import graph after the workers
-    # are already joined. Freezing them right before finalization keeps
-    # every atexit handler unchanged and skips redundant collection passes.
-    atexit.register(gc.freeze)
     sigterm_received = False
     cleanup_failed = False
 
