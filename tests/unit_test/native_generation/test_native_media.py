@@ -2,6 +2,7 @@
 import asyncio
 import os
 import pickle
+import signal
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -416,14 +417,13 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
         prepare(config, port=19000)
 
 
-def test_native_frontend_builds_after_stage_startup(monkeypatch):
+@pytest.mark.parametrize("sigterm", [False, True])
+def test_native_frontend_builds_after_stage_startup(monkeypatch, sigterm):
+    from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
     from sglang_omni.serve import launcher
 
     events = []
-
-    class Config:
-        name = "native"
-        native_media_factory = "model.native_media"
+    config = Cosmos3PipelineConfig(model_path="checkpoint")
 
     class Runner:
         def __init__(self, config):
@@ -434,20 +434,38 @@ def test_native_frontend_builds_after_stage_startup(monkeypatch):
 
         async def start(self, timeout):
             events.append("startup")
+            if sigterm:
+                signal.raise_signal(signal.SIGTERM)
+                await asyncio.sleep(0)
 
         async def stop(self):
             events.append("stopped")
 
-    def fail():
+    def fail(path, request_fields):
         events.append("frontend")
         raise RuntimeError("frontend build failed")
 
+    def passed_on(signal_number, frame):
+        # The default action would end the server here, without exit handlers.
+        handoff = os.path.dirname(config.stages[0].factory.server_args_path)
+        events.append(f"sigterm passed on, handoff left: {os.path.exists(handoff)}")
+
     monkeypatch.setattr(launcher, "MultiProcessPipelineRunner", Runner)
     monkeypatch.setattr(launcher, "find_available_port", lambda host, port: port)
-    monkeypatch.setattr(launcher, "import_string", lambda path: lambda *a, **k: fail)
+    monkeypatch.setattr(launcher, "apply_gpu_compat_env_defaults", lambda: None)
     monkeypatch.setattr(launcher, "placement_log_summary", lambda *args: {})
-    with pytest.raises(RuntimeError, match="frontend build failed"):
-        asyncio.run(launcher.run_server(Config()))
+    monkeypatch.setattr(media.NativeMediaFrontend, "load", fail)
+    previous = signal.signal(signal.SIGTERM, passed_on)
+    try:
+        with pytest.raises(asyncio.CancelledError if sigterm else RuntimeError):
+            launcher.launch_server(config)
+    finally:
+        signal.signal(signal.SIGTERM, previous)
     # The frontend loads what the generation stage resolved while starting,
-    # and a frontend failure still stops the stages.
-    assert events == ["startup", "frontend", "stopped"]
+    # and a frontend failure still stops the stages. A SIGTERM during the
+    # stage start loads nothing, and the handoff goes before the signal
+    # ends the server.
+    if sigterm:
+        assert events == ["startup", "sigterm passed on, handoff left: False"]
+    else:
+        assert events == ["startup", "frontend", "stopped"]

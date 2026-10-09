@@ -27,7 +27,6 @@ import tempfile
 import weakref
 from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import AsyncExitStack, asynccontextmanager, suppress
-from functools import partial
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -94,7 +93,7 @@ def prepare_native_media_app(
     port: int,
     stage_name: str,
     request_fields: RequestFields,
-) -> Callable[[], NativeMediaFrontend]:
+) -> NativeMediaLoader:
     """Settle the native server settings before the generation stage starts.
 
     Runs before any stage starts, because the stage process reads the
@@ -140,14 +139,31 @@ def prepare_native_media_app(
         output_path=str(output_dir.resolve()),
     )
     stage.factory.server_args_overrides = kwargs
-    # A private directory, removed once loaded or at interpreter exit.
-    handoff = tempfile.mkdtemp(prefix="sglang-omni-native-args-")
-    stage.factory.server_args_path = os.path.join(handoff, "server_args.pickle")
-    load = partial(
-        NativeMediaFrontend.load, stage.factory.server_args_path, request_fields
-    )
-    weakref.finalize(load, shutil.rmtree, handoff, ignore_errors=True)
+    load = NativeMediaLoader(request_fields)
+    stage.factory.server_args_path = load.server_args_path
     return load
+
+
+class NativeMediaLoader:
+    """Load the native media routes once the generation stage started.
+
+    The stage saves its native server arguments in a private directory,
+    which goes once they are loaded, when discard is called, or at
+    interpreter exit. The launcher calls discard when the stages do not
+    start, because a SIGTERM during startup ends the server without exit
+    handlers.
+    """
+
+    def __init__(self, request_fields: RequestFields) -> None:
+        handoff = tempfile.mkdtemp(prefix="sglang-omni-native-args-")
+        self.server_args_path = os.path.join(handoff, "server_args.pickle")
+        self.request_fields = request_fields
+        self.discard = weakref.finalize(
+            self, shutil.rmtree, handoff, ignore_errors=True
+        )
+
+    def __call__(self) -> NativeMediaFrontend:
+        return NativeMediaFrontend.load(self.server_args_path, self.request_fields)
 
 
 class NativeMediaFrontend:
