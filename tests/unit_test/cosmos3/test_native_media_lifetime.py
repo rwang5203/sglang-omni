@@ -81,7 +81,10 @@ def test_queued_result_drop_releases_only_its_owned_files(tmp_path, drop):
     asyncio.run(run())
 
 
-def test_successful_stage_delivery_transfers_saved_output_to_client(tmp_path):
+@pytest.mark.parametrize("late_abort", [False, True])
+def test_successful_stage_delivery_transfers_saved_output_to_client(
+    tmp_path, late_abort
+):
     async def run():
         scheduler, stage, path, keep = queued_result(tmp_path)
         await asyncio.wait_for(stage.drain_outbox(), 2)
@@ -89,9 +92,14 @@ def test_successful_stage_delivery_transfers_saved_output_to_client(tmp_path):
         chunk = Client.default_result_builder(message.request_id, message.result)
         assert Path(chunk.media[0]["path"]).read_bytes() == b"native result"
         assert scheduler.native_requests == {}
-        stage.on_abort("request")
+        if late_abort:
+            # The coordinator aborts only a request it has not completed, so
+            # it drops this completion and nobody else owns the files.
+            stage.on_abort("request")
+        else:
+            pass
         scheduler.stop()
-        assert path.read_bytes() == b"native result"
+        assert path.exists() is not late_abort
         assert keep.read_text() == "keep"
 
     asyncio.run(run())
@@ -154,15 +162,12 @@ def test_in_flight_result_owns_files_until_routing_settles(
                 else:
                     await asyncio.wait_for(pending, 2)
                     result = stage.control_plane.completions[0].result
-                    assert (
-                        Path(result["media"][0]["path"]).read_bytes()
-                        == b"native result"
-                    )
+                    assert Path(result["media"][0]["path"]) == path
         finally:
             if not pending.done():
                 pending.cancel()
             await asyncio.gather(pending, return_exceptions=True)
-        assert path.exists() is (outcome == "delivered")
+        assert path.exists() is (outcome == "delivered" and interrupt == "shutdown")
         assert scheduler.native_requests == {}
         assert keep.read_text() == "keep"
 
