@@ -619,10 +619,10 @@ class PipelineConfig(BaseModel):
     # /generate can stream.
     interleaved_output: ClassVar[bool] = False
     native_media_factory: ClassVar[str | None] = None
-    """Import path of ``(config, *, port) -> builder`` for the native media
+    """Import path of ``(config, *, port) -> loader`` for the native media
     routes of a native generation stage, see sglang_omni.native_generation.media.
-    The launcher calls it before stages start and runs the builder off the
-    event loop."""
+    The launcher calls it before stages start and calls the loader once they
+    started."""
     allow_audio_chunking: ClassVar[bool] = False
     max_native_clip_s: ClassVar[float | None] = None
     min_tail_s: ClassVar[float] = 0.5

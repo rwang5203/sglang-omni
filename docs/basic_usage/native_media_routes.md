@@ -19,7 +19,9 @@ curl http://127.0.0.1:8000/v1/images/generations \
 
 - Only the routes above are served. Native weights, memory, LoRA, rollout, mesh, realtime, server info and stats routes are not, so use the Omni admin routes, which require the admin key when one is set.
 - The native scheduler listens on `127.0.0.1` whatever host the server binds. Startup fails if the generation stage's `server_args_overrides` set another `host`.
-- While native warmup runs, `/health` answers 503 with status `warming` and the native routes answer 503. A warmup failure stops the server with a nonzero exit status.
+- The routes start on the first request to them, which loads native SGLang's route modules into the server process once. That request takes several seconds longer, about 7 seconds with Cosmos3 Nano, and the server process keeps about 0.5 GiB more memory from then on. Requests that arrive meanwhile wait for the same start. A server whose clients never call these routes starts and runs as if they were absent.
+- If the routes cannot start, for example because the prompt enhancer config cannot be read, these routes answer 503 with the cause until the server restarts, and the other routes keep serving.
+- When the generation stage's native settings run a server warmup, for example with `warmup_mode: server` in its `server_args_overrides`, the routes start with the server instead. While that warmup runs, `/health` answers 503 with status `warming` and the native routes answer 503. A warmup failure, or a failure to start the routes, then stops the server with a nonzero exit status.
 - If the native scheduler or the generation stage stops, requests in flight and new requests on these routes get 503 at once, and the server stops when the generation stage fails.
 
 ## Media policy

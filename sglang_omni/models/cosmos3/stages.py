@@ -780,7 +780,8 @@ def create_generation_scheduler(
     server_args_path: str | None = None,
 ) -> NativeGenerationScheduler:
     """``server_args_path`` receives the resolved native server arguments,
-    which the native media routes of the Omni HTTP process load."""
+    which the native media routes of the Omni HTTP process load, and
+    whether they select a native server warmup."""
     from sglang_omni.utils.device import resolve_concrete_device
 
     concrete_device = resolve_concrete_device(device, gpu_id)
@@ -850,9 +851,19 @@ def create_generation_scheduler(
             inline_media=inline_media,
         )
         if server_args_path is not None:
+            from sglang.multimodal_gen.runtime.server_warmup import (
+                should_run_synthetic_server_warmup,
+            )
+
+            # The arguments stay pickled inside, so the HTTP process can read
+            # the warmup decision without importing native SGLang.
+            saved = {
+                "server_args": pickle.dumps(generator.server_args),
+                "warmup": should_run_synthetic_server_warmup(generator.server_args),
+            }
             staging = f"{server_args_path}.partial"
             with open(staging, "wb") as handle:
-                pickle.dump(generator.server_args, handle)
+                pickle.dump(saved, handle)
             os.replace(staging, server_args_path)
         else:
             pass

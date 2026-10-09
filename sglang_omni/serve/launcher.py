@@ -487,11 +487,11 @@ async def run_server(
     native_media_factory = type(pipeline_config).native_media_factory
     if native_media_factory is not None:
         # Settles native settings the generation stage reads when it starts.
-        build_native_media = import_string(native_media_factory)(
+        load_native_media = import_string(native_media_factory)(
             pipeline_config, port=port
         )
     else:
-        build_native_media = None
+        load_native_media = None
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
@@ -520,9 +520,10 @@ async def run_server(
     )
 
     try:
-        if build_native_media is not None:
-            # Uses the native server arguments the generation stage resolved.
-            native_media = await asyncio.to_thread(build_native_media)
+        if load_native_media is not None:
+            # Reads what the generation stage resolved, without native imports,
+            # since the routes start on their first request.
+            native_media = load_native_media()
         else:
             native_media = None
         cl_kwargs = client_kwargs or {}
