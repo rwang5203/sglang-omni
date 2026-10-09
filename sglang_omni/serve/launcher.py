@@ -25,8 +25,6 @@ Export a config to JSON::
 from __future__ import annotations
 
 import asyncio
-import atexit
-import gc
 import json
 import logging
 import os
@@ -40,7 +38,7 @@ from types import FrameType
 from typing import TypedDict
 
 import uvicorn
-from fastapi import APIRouter, Depends, FastAPI, HTTPException
+from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
 
 from sglang_omni.client import Client
@@ -164,7 +162,6 @@ def find_available_port(host: str, port: int) -> int:
     """
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
-            s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             s.bind((host, port))
             return port
     except OSError as exc:
@@ -487,22 +484,14 @@ async def run_server(
     # 0. Check port availability before loading models
     port = find_available_port(host, port)
 
-    from sglang_omni.serve.native_media import resolve_native_media_frontend
-
-    frontend = resolve_native_media_frontend(pipeline_config, host=host, port=port)
-    native_media_app = None
-    if frontend is not None:
-        # The native frontend checks its strict ports while it builds, so it
-        # finishes before the stage's native worker binds the same ports.
-        native_media_app = await asyncio.to_thread(frontend)
-        if not isinstance(native_media_app, FastAPI):
-            raise TypeError(
-                "The native media builder must return a FastAPI application"
-            )
-        else:
-            pass
+    native_media_factory = type(pipeline_config).native_media_factory
+    if native_media_factory is not None:
+        # Settles native settings the generation stage reads when it starts.
+        build_native_media = import_string(native_media_factory)(
+            pipeline_config, port=port
+        )
     else:
-        pass
+        build_native_media = None
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
@@ -531,6 +520,11 @@ async def run_server(
     )
 
     try:
+        if build_native_media is not None:
+            # Uses the native server arguments the generation stage resolved.
+            native_media = await asyncio.to_thread(build_native_media)
+        else:
+            native_media = None
         cl_kwargs = client_kwargs or {}
         client = Client(coordinator, **cl_kwargs)
         deployment_factory = type(pipeline_config).realtime_deployment_factory
@@ -577,6 +571,7 @@ async def run_server(
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
         mount_profiler_routes(app, profiler_ctl, profiler_dir)
+
         config = uvicorn.Config(
             app,
             host=host,
@@ -585,24 +580,14 @@ async def run_server(
             timeout_keep_alive=120,
         )
         server = PipelineUvicornServer(config)
-        runtime_failure = asyncio.create_task(mp_runner.wait_failed())
-        try:
-            if native_media_app is not None:
-                from sglang_omni.serve.native_media import mount_native_media_app
-
-                mount_native_media_app(
-                    app, native_media_app, runtime_failure=runtime_failure
-                )
-            else:
-                pass
-            await serve_with_failure_watch(server, [runtime_failure])
-        finally:
-            if not runtime_failure.done():
-                runtime_failure.cancel()
-            else:
-                pass
-            with suppress(asyncio.CancelledError, Exception):
-                await runtime_failure
+        runtime_watchers = [mp_runner.wait_failed()]
+        if native_media is not None:
+            runtime_watchers[0] = asyncio.ensure_future(runtime_watchers[0])
+            native_media.mount(app, runtime_watchers[0])
+            runtime_watchers.append(native_media.wait_failed())
+        else:
+            pass
+        await serve_with_failure_watch(server, runtime_watchers)
     finally:
         logger.info("Shutting down pipeline …")
         await mp_runner.stop()
@@ -698,11 +683,6 @@ def launch_server(
             ``/v1/audio/speech/batch``.
     """
     apply_gpu_compat_env_defaults()
-    # Interpreter shutdown otherwise spends its final collections walking
-    # every tracked object of the serving import graph after the workers
-    # are already joined. Freezing them right before finalization keeps
-    # every atexit handler unchanged and skips redundant collection passes.
-    atexit.register(gc.freeze)
     sigterm_received = False
     cleanup_failed = False
 

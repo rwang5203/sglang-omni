@@ -13,8 +13,7 @@ from sglang_omni.config import (
 
 class Cosmos3PipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
-    native_media_stage: ClassVar[str] = "generation"
-    native_media_factory_path: ClassVar[str] = (
+    native_media_factory: ClassVar[str] = (
         "sglang_omni.models.cosmos3.media.prepare_native_media_app"
     )
 
@@ -36,7 +35,8 @@ EntryClass = Cosmos3PipelineConfig
 
 
 class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
-    native_media_stage: ClassVar[str | None] = None
+    # The Reasoner has no generation stage, so it serves no native media routes.
+    native_media_factory: ClassVar[str | None] = None
     # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "reasoner": EngineStageConfig
