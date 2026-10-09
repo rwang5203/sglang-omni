@@ -282,6 +282,7 @@ def test_native_requests_follow_the_server_media_policy(
     allowed = tmp_path / "media"
     allowed.mkdir()
     outside = str(tmp_path / "clip.mp4")
+    inside = str(allowed / "clip.mp4")
     connector = MultiModalResourceConnector(
         allowed_local_media_path=allowed if configured else None,
         allowed_media_domains=["media.example"] if configured else None,
@@ -292,7 +293,17 @@ def test_native_requests_follow_the_server_media_policy(
     requests = [
         ("/v1/videos", {"json": {"prompt": "a", "output_path": "/srv"}}, True),
         ("/v1/videos", {"json": {"prompt": "a", "video_path": outside}}, configured),
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "video_path": "/srv/a\0b"}},
+            configured,
+        ),
         ("/v1/videos", {"json": {"prompt": "a", "reference_url": remote}}, configured),
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "reference_url": remote.upper()}},
+            configured,
+        ),
         (
             "/v1/videos",
             {
@@ -308,6 +319,12 @@ def test_native_requests_follow_the_server_media_policy(
             {"json": {"input": {"observation": {"image": f"file://{outside}"}}}},
             configured,
         ),
+        # Native decodes an inline action image in memory, so it is no path.
+        (
+            "/v1/actions/generations",
+            {"json": {"input": {"observation": {"image": {"b64_json": "aGk="}}}}},
+            False,
+        ),
         (
             "/v1/images/edits",
             {"data": {"prompt": "a", "url": outside}},
@@ -318,18 +335,55 @@ def test_native_requests_follow_the_server_media_policy(
             {"data": {"prompt": "a", "perf_dump_path": "/srv/perf.json"}},
             True,
         ),
+        # A body nested past the decoder limit, which native may still decode.
+        (
+            "/v1/videos",
+            {
+                "content": "[" * 100000 + "]" * 100000,
+                "headers": {"content-type": "application/json"},
+            },
+            True,
+        ),
+        # Native decodes a JSON encoded list to the allowed paths it names.
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "control_path": json.dumps([inside, inside])}},
+            False,
+        ),
+        # Native decodes these JSON encoded values to the outside path.
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "control_path": json.dumps([outside])}},
+            configured,
+        ),
+        (
+            "/v1/videos",
+            {"data": {"prompt": "a"}, "files": {"video_path": (None, f'"{outside}"')}},
+            configured,
+        ),
     ]
 
     async def check(client, runtime_failure):
-        for path, body, refused in requests:
-            response = await client.post(path, **body)
-            blocked = response.status_code == 400 and (
-                "refused" in response.text or "cannot set" in response.text
+        # Native resolves relative paths against the server working
+        # directory, so the requests run with it outside and inside the
+        # allowed directory.
+        for cwd in (tmp_path, allowed):
+            monkeypatch.chdir(cwd)
+            for path, body, refused in requests:
+                response = await client.post(path, **body)
+                blocked = response.status_code == 400 and (
+                    "refused" in response.text or "cannot set" in response.text
+                )
+                assert blocked == refused, (cwd, path, body, response.text)
+            response = await client.post(
+                "/v1/videos", json={"prompt": "a", "video_path": inside}
             )
-            assert blocked == refused, (path, body, response.text)
-        inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
-        response = await client.post("/v1/videos", json=inside)
-        assert "refused" not in response.text
+            assert "refused" not in response.text
+        # Native opens a file URL as written, relative to its working directory.
+        monkeypatch.chdir(tmp_path)
+        url = {"prompt": "a", "video_path": f"file://{allowed / 'clip.mp4'}"}
+        response = await client.post("/v1/videos", json=url)
+        assert ("refused" in response.text) is configured
 
     serve(FastAPI(), native.build(), check)
 

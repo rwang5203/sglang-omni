@@ -36,6 +36,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from sglang_omni.config import PipelineConfig
 from sglang_omni.preprocessing.resource_connector import (
     MediaPolicyError,
+    MultiModalResourceConnector,
     get_global_resource_connector,
 )
 
@@ -61,6 +62,9 @@ MEDIA_REFERENCE_FIELDS = frozenset(
         "video_url",
     }
 )
+# Keys of the image payloads that the native action routes decode in memory
+# instead of opening a file.
+INLINE_IMAGE_KEYS = frozenset({"b64_json", "base64", "data", "values"})
 # Containers native SGLang merges into a request, as JSON objects or strings.
 EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
@@ -249,9 +253,16 @@ class NativeMediaFrontend:
                 body = await request.json()
             except ValueError:
                 return
-        self.police_fields(body)
+            except RecursionError:
+                raise nested_too_deeply() from None
+        try:
+            self.police_fields(
+                body, inline_images=request.url.path.startswith("/v1/actions/")
+            )
+        except RecursionError:
+            raise nested_too_deeply() from None
 
-    def police_fields(self, value: object) -> None:
+    def police_fields(self, value: object, inline_images: bool = False) -> None:
         if isinstance(value, dict):
             for name, item in value.items():
                 name = str(name)
@@ -266,14 +277,13 @@ class NativeMediaFrontend:
                         "a path the server owns.",
                     )
                 elif name in self.media_fields or name in MEDIA_REFERENCE_FIELDS:
-                    for source in text_values(item):
-                        police_media_reference(name, source)
+                    police_media_value(name, item, inline_images)
                 else:
                     pass
-                self.police_fields(item)
+                self.police_fields(item, inline_images)
         elif isinstance(value, list):
             for item in value:
-                self.police_fields(item)
+                self.police_fields(item, inline_images)
         else:
             pass
 
@@ -472,6 +482,14 @@ class NativeMediaFrontend:
             pass
 
 
+def nested_too_deeply() -> HTTPException:
+    # Native may still decode what nests too deeply for this check.
+    return HTTPException(
+        status_code=400,
+        detail="Native media request refused: it nests too deeply to check.",
+    )
+
+
 def parse_containers(value: object) -> object:
     if isinstance(value, str):
         try:
@@ -484,51 +502,140 @@ def parse_containers(value: object) -> object:
         return value
 
 
-def text_values(value: object) -> Iterator[str]:
+def media_references(
+    value: object, inline_images: bool = False
+) -> Iterator[tuple[str, bool]]:
+    """Each string native SGLang may read a media reference from, and whether
+    native can open it only as written.
+
+    Native decodes JSON encoded request values, multipart fields once and
+    model fields such as control_path once more, so a string also stands
+    for every string it decodes to. JSON text never starts with a slash, a
+    tilde or a scheme, so as written it can only be a relative path. With
+    inline_images, image payloads that native decodes in memory hold no
+    reference.
+    """
     if isinstance(value, str):
-        yield value
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            yield value, False
+            return
+        yield value, True
+        yield from decoded_references(decoded, top=True)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from text_values(item)
+            yield from media_references(item, inline_images)
     elif isinstance(value, dict):
+        if inline_images and INLINE_IMAGE_KEYS.intersection(value):
+            return
+        else:
+            pass
         for item in value.values():
-            yield from text_values(item)
+            yield from media_references(item, inline_images)
     else:
         pass
 
 
-def police_media_reference(name: str, source: str) -> None:
-    """Refuse a media path or URL that the server media policy does not allow.
+def decoded_references(value: object, *, top: bool) -> Iterator[tuple[str, bool]]:
+    """References in a value native decoded from a string.
 
-    Follows the rules main applies to request media: without a policy the
-    reference passes, with one a bare path or file URL must sit in the
-    allowed directory. Inline media should use data URLs.
+    Native reads decoded strings as paths and turns any other decoded value,
+    except a list of paths, into its text, as Cosmos3 lowering does for the
+    items of control_path.
+    """
+    if isinstance(value, str):
+        yield from media_references(value)
+    elif value is not None:
+        if not (top and isinstance(value, list)):
+            yield str(value), True
+        else:
+            pass
+        if isinstance(value, (dict, list)):
+            items = value.values() if isinstance(value, dict) else value
+            for item in items:
+                yield from decoded_references(item, top=False)
+        else:
+            pass
+    else:
+        pass
+
+
+def police_media_value(name: str, value: object, inline_images: bool) -> None:
+    """Refuse a media field value that the server media policy does not allow.
+
+    Without a policy every reference passes, as on other routes.
     """
     connector = get_global_resource_connector()
     if (
         connector.allowed_local_media_path is None
         and not connector.allowed_media_domains
-    ) or source.startswith("data:"):
+    ):
         return
     else:
         pass
+    for source, as_written in media_references(value, inline_images):
+        police_media_reference(connector, name, source, as_written)
+
+
+def police_media_reference(
+    connector: MultiModalResourceConnector, name: str, source: str, as_written: bool
+) -> None:
+    """Refuse a media path or URL that the server media policy does not allow.
+
+    Follows the rules main applies to request media: a bare path or file URL
+    must sit in the allowed directory, here in every reading native SGLang
+    may open it in. Inline media should use data URLs.
+    """
+    remote = source.lower().startswith(("http://", "https://"))
+    file_url = source[:7].lower() == "file://"
     try:
-        if source.startswith(("http://", "https://")):
-            if connector.allowed_media_domains:
-                raise MediaPolicyError(
-                    "remote media is refused on native media routes while "
-                    "--allowed-media-domain is set, since native SGLang fetches "
-                    "it without checking each redirect. Send it as an upload or "
-                    "a data URL."
-                )
-            else:
-                pass
-        elif source.startswith("file://"):
-            connector.local_media_path(unquote(urlparse(source).path))
+        if remote and connector.allowed_media_domains:
+            raise MediaPolicyError(
+                "remote media is refused on native media routes while "
+                "--allowed-media-domain is set, since native SGLang fetches "
+                "it without checking each redirect. Send it as an upload or "
+                "a data URL."
+            )
+        elif connector.allowed_local_media_path is not None:
+            for path in local_readings(source, as_written or remote, file_url):
+                connector.local_media_path(path)
         else:
-            connector.local_media_path(source)
-    except MediaPolicyError as exc:
-        raise HTTPException(status_code=400, detail=f"{name} refused: {exc}") from exc
+            pass
+    except ValueError as exc:
+        # A media policy refusal, or a path that cannot be resolved at all,
+        # such as one with a NUL character.
+        hint = " Send local media as a path." if file_url else ""
+        raise HTTPException(
+            status_code=400, detail=f"{name} refused: {exc}{hint}"
+        ) from exc
+
+
+def local_readings(source: str, if_present: bool, file_url: bool) -> list[str]:
+    """The local paths native SGLang may open for a media reference.
+
+    Native expands the home directory of sampling path fields, while its
+    prompt enhancer opens a path as written. Its loaders open a file URL as
+    written, a path relative to the working directory, while srt opens the
+    path the URL names. A URL, a data URL, or text that native opens only as
+    written (if_present) names a local file only when that file exists, since
+    its image loader tries an existing file first. Relative paths resolve
+    against the server working directory, which the stage and native worker
+    processes inherit.
+    """
+    if if_present or source.startswith("data:"):
+        return [source] if os.path.lexists(source) else []
+    else:
+        readings = [source]
+    if source.startswith("~"):
+        readings.append(os.path.join(os.getcwd(), source))
+    else:
+        pass
+    if file_url:
+        readings.append(unquote(urlparse(source).path))
+    else:
+        pass
+    return readings
 
 
 class NativeMediaRoutes(BaseRoute):

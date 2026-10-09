@@ -10,6 +10,7 @@ import time
 from contextlib import contextmanager
 from pathlib import Path
 from types import SimpleNamespace
+from urllib.parse import unquote, urlparse
 
 import pytest
 from fastapi.responses import JSONResponse
@@ -31,6 +32,7 @@ from sglang_omni.scheduling.native_chat_scheduler import (
     warm_up,
 )
 from sglang_omni.serve.openai_api import build_chat_generate_request
+from sglang_omni.serve.openai_errors import generation_error_status_code
 from sglang_omni.serve.protocol import ChatCompletionRequest
 
 
@@ -93,9 +95,10 @@ class Chat:
         message = request.messages[0]
         content = message["content"] if isinstance(message, dict) else message.content
         for part in content if isinstance(content, list) else ():
-            url = (part.get("image_url") or {}).get("url", "")
+            url = (part.get("image_url") or part.get("video_url") or {}).get("url", "")
             if url.startswith("file://"):
-                self.files[url] = Path(url.removeprefix("file://")).read_bytes()
+                # Native media loaders read a file URL as its unquoted path.
+                self.files[url] = Path(unquote(urlparse(url).path)).read_bytes()
         if content == "hang":
             await asyncio.Event().wait()
         self.active += 1
@@ -315,7 +318,9 @@ def test_unsupported_contracts_reject_before_dispatch(item):
         (False, "file:///srv/a.png", "refused"),
         (True, "https://other.org/a.png", "refused"),
         (True, "https://example.com/a.png", "fetched"),
-        (True, "file://{allowed}/a.png", "{allowed}/a.png"),
+        (True, "https://example.com/unavailable.png", "server error"),
+        (True, "file://{allowed}/a%23b%3Fc%25d.mp4", "a#b?c%d.mp4"),
+        (True, "{allowed}/a#b?c%d.mp4", "a#b?c%d.mp4"),
         (True, "{outside}/a.png", "refused"),
     ],
 )
@@ -326,12 +331,15 @@ def test_chat_media_follows_the_server_media_policy(
 
     allowed = tmp_path / "allowed"
     allowed.mkdir()
+    (allowed / "a#b?c%d.mp4").write_bytes(b"local video")
     reference = reference.format(allowed=allowed, outside=tmp_path)
     connection = ResourceHTTPConnection()
     connection.async_client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
-                200, content=b"png", headers={"content-type": "image/png"}
+                503 if request.url.path == "/unavailable.png" else 200,
+                content=b"png",
+                headers={"content-type": "image/png"},
             )
         )
     )
@@ -344,7 +352,7 @@ def test_chat_media_follows_the_server_media_policy(
         native_chat_scheduler, "get_global_resource_connector", lambda: connector
     )
     item = payload(inputs={"messages": [{"role": "user", "content": "x"}]})
-    item.request.inputs["images"] = [reference]
+    item.request.inputs["videos"] = [reference]
     with running() as (scheduler, _, chat):
         enqueue(scheduler, item)
         message = scheduler.outbox.get(timeout=3)
@@ -352,16 +360,26 @@ def test_chat_media_follows_the_server_media_policy(
         assert message.type == "error"
         assert str(message.data).startswith(native_chat_scheduler.REQUEST_ERROR)
         assert not chat.calls
+    elif outcome == "server error":
+        # The shared classifier decides fetch failures, and an upstream
+        # failure is not the caller's error.
+        assert message.type == "error"
+        assert generation_error_status_code(message.data) == 500
+        assert not chat.calls
     else:
         assert message.type == "result"
-        url = chat.calls[0].messages[0]["content"][1]["image_url"]["url"]
+        url = chat.calls[0].messages[0]["content"][1]["video_url"]["url"]
         if outcome == "fetched":
             # Native read the fetched bytes from a file the stage then removed.
             assert chat.files == {url: b"png"}
             assert not os.path.exists(url.removeprefix("file://"))
+        elif outcome == "same":
+            assert url == reference
         else:
-            expected = reference if outcome == "same" else outcome
-            assert url == expected.format(allowed=allowed)
+            # Native's video loader reads the handed reference back to the file.
+            from sglang.srt.utils.common import get_video_bytes
+
+            assert get_video_bytes(url) == (allowed / outcome).read_bytes()
 
 
 @pytest.mark.parametrize(

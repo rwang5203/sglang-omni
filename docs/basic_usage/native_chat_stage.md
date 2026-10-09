@@ -18,7 +18,7 @@ curl http://127.0.0.1:8000/v1/chat/completions \
 
 ## Media policy
 
-`--allowed-local-media-path` and `--allowed-media-domain` apply as on the other chat routes. File URLs need `--allowed-local-media-path` and must resolve inside it, and local paths are confined to it once it is set. While `--allowed-media-domain` is set, the stage fetches remote media itself, checking the domain on every redirect, keeps native SGLang's `media_url_max_file_size_mb` limit, and hands native SGLang a temporary file that it removes when the request ends. A refused reference returns 400 before native SGLang loads anything.
+`--allowed-local-media-path` and `--allowed-media-domain` apply as on the other chat routes. File URLs need `--allowed-local-media-path` and must resolve inside it, and local paths are confined to it once it is set. While `--allowed-media-domain` is set, the stage fetches remote media itself, checking the domain on every redirect, keeps native SGLang's `media_url_max_file_size_mb` limit, and hands native SGLang a temporary file that it removes when the request ends. A refused reference returns 400 before native SGLang loads anything. A fetch that fails returns the status the other chat routes return: 400 when the media host answers 404, 500 when it fails, times out or sends more than the limit.
 
 ## Sizing and admission
 
