@@ -50,17 +50,17 @@ from tests.unit_test.pipeline.helpers import (
 )
 
 SPLIT_PHASES = {"reason": "reasoner", "generate": "generator"}
+BOUNDS = {
+    "max_dispatches": 17,
+    "max_outputs": 17,
+    "max_active": 32,
+    "max_retained_bytes": 64 * 1024 * 1024,
+    "timeout_s": 3600.0,
+}
 
 
 def limits(**overrides: int | float) -> UMMLimits:
-    values = {
-        "max_dispatches": 17,
-        "max_outputs": 17,
-        "max_active": 32,
-        "max_retained_bytes": 64 * 1024 * 1024,
-        "timeout_s": 3600.0,
-    }
-    return UMMLimits(**{**values, **overrides})
+    return UMMLimits(**{**BOUNDS, **overrides})
 
 
 def make_controller(adapter, phases=SPLIT_PHASES, **kwargs) -> UMMController:
@@ -413,7 +413,7 @@ def test_deadline_fails_a_waiting_request_once_and_bounds_adapter_work():
     dispatched = controller.advance(initial(stream=True))
     with pytest.raises(TimeoutError, match="deadline"):
         controller.advance(reply(dispatched, generate("a cat", "late text")))
-    assert adapter.closed == ["failed"]
+    assert adapter.closed == ["expired"]
     assert controller.outbox.empty() and not controller.contexts
 
 
@@ -517,7 +517,7 @@ def umm_stages(**changes):
         "route_fn": ROUTE_FN_PATH,
         "stream_to": ["output"],
         "stream_done_to_fn": STREAM_DONE_FN_PATH,
-        "factory": FactoryArgs(phases=SPLIT_PHASES, max_active=4),
+        "factory": FactoryArgs(phases=SPLIT_PHASES, **{**BOUNDS, "max_active": 4}),
         **changes.get("orchestrator", {}),
     }
     output = {
@@ -552,7 +552,18 @@ def umm_stages(**changes):
         ),
         ({"orchestrator": {"stream_to": ["reasoner"]}}, "stream_to must be"),
         ({"generator": {"next": "output"}}, "whose next is"),
+        ({"generator": {"stream_to": ["output"]}}, "generator.stream_to must be"),
         ({"output": {"process": "elsewhere"}}, "share a process"),
+        (
+            {
+                "orchestrator": {
+                    "factory": FactoryArgs(
+                        phases=SPLIT_PHASES, **{**BOUNDS, "max_active": True}
+                    )
+                }
+            },
+            "factory.max_active must be",
+        ),
     ],
     ids=[
         "valid",
@@ -560,7 +571,9 @@ def umm_stages(**changes):
         "phase-to-output",
         "no-relay",
         "phase-skips-controller",
+        "phase-streams",
         "split",
+        "boolean-bound",
     ],
 )
 def test_pipeline_config_accepts_only_the_umm_wiring(changes, message):

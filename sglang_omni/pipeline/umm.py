@@ -96,6 +96,26 @@ class UMMStep:
     context: ContextRef | None = None
 
 
+def limit_problems(limits: Mapping[str, object]) -> list[str]:
+    """Name each controller bound that is missing or out of range."""
+    problems = [
+        f"{name} must be a positive integer"
+        for name in (
+            "max_dispatches",
+            "max_outputs",
+            "max_active",
+            "max_retained_bytes",
+        )
+        if type(limits.get(name)) is not int or limits[name] <= 0
+    ]
+    timeout_s = limits.get("timeout_s")
+    if type(timeout_s) not in (int, float) or not 0 < timeout_s < math.inf:
+        problems.append("timeout_s must be a finite positive number")
+    else:
+        pass
+    return problems
+
+
 @dataclass(frozen=True, kw_only=True)
 class UMMLimits:
     """Controller bounds, set by orchestrator factory arguments of the same names."""
@@ -107,19 +127,9 @@ class UMMLimits:
     timeout_s: float
 
     def __post_init__(self) -> None:
-        counts = {
-            "max_dispatches": self.max_dispatches,
-            "max_outputs": self.max_outputs,
-            "max_active": self.max_active,
-            "max_retained_bytes": self.max_retained_bytes,
-        }
-        for name, value in counts.items():
-            if type(value) is not int or value <= 0:
-                raise ValueError(f"{name} must be a positive integer")
-            else:
-                pass
-        if not math.isfinite(self.timeout_s) or self.timeout_s <= 0:
-            raise ValueError("timeout_s must be a finite positive number")
+        problems = limit_problems(vars(self))
+        if problems:
+            raise ValueError(". ".join(problems))
         else:
             pass
 
@@ -180,6 +190,10 @@ class UMMRequestError(ValueError):
 
     def __init__(self, detail: str) -> None:
         super().__init__(self.PREFIX + detail)
+
+
+class UMMDeadlineError(TimeoutError):
+    """A UMM request reached its timeout_s deadline. Its close reason is expired."""
 
 
 def budget_error(name: str, limit: int, *, client: bool) -> Exception:
@@ -265,8 +279,8 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         for request_id in request_ids:
             self.release(request_id, "shutdown")
 
-    def deadline_error(self) -> TimeoutError:
-        return TimeoutError(
+    def deadline_error(self) -> UMMDeadlineError:
+        return UMMDeadlineError(
             f"UMM request deadline exceeded after timeout_s={self.limits.timeout_s}. "
             "Raise stages.<orchestrator>.factory.timeout_s for longer requests"
         )
@@ -388,14 +402,17 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 step = self.adapter.advance(context, phase, data)
             result, added = self.apply(request_id, context, step, client=phase is None)
             self.check_deadline(context)
-        except BaseException:
+        except BaseException as exc:
             with self.lock:
                 context.busy = False
                 if self.contexts.get(request_id) is context:
                     self.contexts.pop(request_id)
                 else:
                     pass
-            self.close(context, context.closed or "failed")
+            reason: CloseReason = (
+                "expired" if isinstance(exc, UMMDeadlineError) else "failed"
+            )
+            self.close(context, context.closed or reason)
             raise
         with self.lock:
             context.busy = False
@@ -656,9 +673,9 @@ class UMMPipelineConfig(PipelineConfig):
     The controller stage uses create_umm_controller, route_fn route_umm,
     stream_done_to_fn umm_stream_done_targets, stream_to the output stage,
     and next naming the output stage and every phase stage, whose own next is
-    the controller. The output stage is terminal, uses
-    create_umm_output_stage, accepts streams before its payload, and shares
-    the controller's process.
+    the controller and which streams nowhere. The output stage is terminal,
+    uses create_umm_output_stage, accepts streams before its payload, and
+    shares the controller's process.
     """
 
     umm_controller_stage: ClassVar[str] = "orchestrator"
@@ -676,13 +693,11 @@ class UMMPipelineConfig(PipelineConfig):
         else:
             return super().stage_factory_kwargs(stage_name)
 
-    def entry_stage_admission_limit(self) -> int | None:
+    def entry_stage_admission_limit(self) -> int:
         controller = self.stage_named(type(self).umm_controller_stage)
         max_active = resolve_stage_typed_kwargs(controller)["max_active"]
-        if not isinstance(max_active, int):
-            raise TypeError("UMM controller max_active must be an integer")
-        else:
-            return max_active
+        assert type(max_active) is int, "model_post_init validates max_active"
+        return max_active
 
     def model_post_init(self, __context: object = None) -> None:
         super().model_post_init(__context)
@@ -700,9 +715,11 @@ class UMMPipelineConfig(PipelineConfig):
             pass
         factory_args = resolve_stage_typed_kwargs(controller)
         phases = factory_args.get("phases")
-        max_active = factory_args.get("max_active")
         phase_targets = list(phases.values()) if isinstance(phases, Mapping) else []
         phase_stages = {name for name in phase_targets if isinstance(name, str)}
+        streaming_phase_stages = sorted(
+            name for name in phase_stages if name in stages and stages[name].stream_to
+        )
         if isinstance(controller.next, list):
             next_stages = set(controller.next)
         else:
@@ -749,8 +766,11 @@ class UMMPipelineConfig(PipelineConfig):
                     "factory.phases",
                 ),
                 (
-                    isinstance(max_active, int) and max_active > 0,
-                    f"{prefix}.factory.max_active must be a positive integer",
+                    not streaming_phase_stages,
+                    ", ".join(
+                        f"stages.{name}.stream_to" for name in streaming_phase_stages
+                    )
+                    + " must be empty, since the controller streams accepted outputs",
                 ),
                 (
                     factory_args.get("output_stage", output_name) == output_name,
@@ -765,7 +785,7 @@ class UMMPipelineConfig(PipelineConfig):
                 ),
             )
             if not holds
-        ]
+        ] + [f"{prefix}.factory.{problem}" for problem in limit_problems(factory_args)]
         if problems:
             raise ValueError("Invalid UMM pipeline. " + ". ".join(problems))
         else:

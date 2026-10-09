@@ -151,12 +151,14 @@ A pipeline config subclasses `UMMPipelineConfig` and declares an
 stream_done_to_fn `umm_stream_done_targets`, `stream_to` and `next` naming
 `output`), an `output` stage in the same process (factory
 `create_umm_output_stage`, terminal, accepting streams before its payload),
-and the phase stages, each routing back to `orchestrator`. The config rejects
-any other wiring at load time. The orchestrator's factory arguments set the
-adapter factory path, the phase map, and the bounds: `max_dispatches`,
-`max_outputs`, `max_active` (which also caps the coordinator),
-`max_retained_bytes`, and `timeout_s`. Accepted segments stream to the client
-in order through the output stage when the request streams.
+and the phase stages, each routing back to `orchestrator` without a
+`stream_to`. The orchestrator's factory arguments set the adapter factory
+path, the phase map, and the required bounds: `max_dispatches`,
+`max_outputs`, `max_active` (which also caps the coordinator, never above the
+running+queued capacity of an engine phase stage), `max_retained_bytes`, and
+`timeout_s`. The config rejects any other wiring, and a missing or
+non-positive bound, at load time. Accepted segments stream to the client in
+order through the output stage when the request streams.
 
 #### Code2WavScheduler
 
