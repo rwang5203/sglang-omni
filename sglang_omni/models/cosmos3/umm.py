@@ -8,21 +8,31 @@ import binascii
 import hashlib
 import json
 from copy import deepcopy
-from typing import Any
+from dataclasses import dataclass, field
 
-from sglang_omni.admission import InvalidRequestError
 from sglang_omni.models.cosmos3.reasoner import build_chat_messages
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
+    data_url,
     resolve_generation_options,
 )
-from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits
+from sglang_omni.pipeline.umm import (
+    CloseReason,
+    UMMContext,
+    UMMOutput,
+    UMMRequestError,
+    UMMStep,
+)
 from sglang_omni.proto import OmniRequest
+
+# Adapter phase names, mapped to stages by the orchestrator's factory.phases.
+REASON = "reason"
+GENERATE = "generate"
 
 MAX_TEXT_CHARS = 8192
 MAX_PROMPT_CHARS = 4096
 
-_DECISION_SCHEMA = {
+DECISION_SCHEMA = {
     "type": "object",
     "properties": {
         "kind": {"type": "string", "enum": ["final", "generate"]},
@@ -50,7 +60,7 @@ _DECISION_SCHEMA = {
     "additionalProperties": False,
 }
 
-_SYSTEM_INSTRUCTION = (
+SYSTEM_INSTRUCTION = (
     "You can understand images and videos and request image or video generation. "
     "Respond only with a JSON object matching the supplied schema. "
     "Use kind generate when media is needed, with a precise generation prompt and "
@@ -62,8 +72,29 @@ _SYSTEM_INSTRUCTION = (
     "before receiving the generation result."
 )
 
+MEDIA_TYPES = {
+    "image": ("image/png", "image/jpeg", "image/webp"),
+    "video": ("video/mp4",),
+}
 
-def unique_object(pairs):
+
+@dataclass(frozen=True)
+class Decision:
+    kind: str
+    text: str
+    generation: dict[str, str] | None
+
+
+@dataclass
+class Cosmos3History:
+    """Chat history one request resubmits to the Reasoner, and its bytes."""
+
+    messages: list[dict[str, object]] = field(default_factory=list)
+    retained_bytes: int = 0
+    decision: Decision | None = None
+
+
+def unique_object(pairs: list[tuple[str, object]]) -> dict[str, object]:
     result = {}
     for key, value in pairs:
         if key in result:
@@ -74,7 +105,7 @@ def unique_object(pairs):
     return result
 
 
-def parse_decision(value: Any) -> UMMDecision:
+def parse_decision(value: object) -> Decision:
     if not isinstance(value, dict) or set(value) != {"kind", "text", "generation"}:
         raise ValueError("Cosmos3 requires a structured final or generate decision")
     else:
@@ -82,27 +113,18 @@ def parse_decision(value: Any) -> UMMDecision:
     kind, text, generation = value["kind"], value["text"], value["generation"]
     if not isinstance(text, str) or len(text) > MAX_TEXT_CHARS:
         raise ValueError("Cosmos3 decision text exceeds its string limit")
-    else:
-        pass
-    if kind == "final":
+    elif kind == "final":
         if generation is not None or not text.strip():
             raise ValueError("Final Cosmos3 decisions require text and no generation")
         else:
-            pass
-    elif kind == "generate":
-        if not isinstance(generation, dict) or set(generation) != {
-            "modality",
-            "prompt",
-        }:
-            raise ValueError("Cosmos3 generation requires only modality and prompt")
-        else:
-            pass
-        if generation["modality"] not in ("image", "video"):
-            raise ValueError(
-                "Cosmos3 interleaving currently supports images and videos"
-            )
-        else:
-            pass
+            return Decision(kind, text, None)
+    elif kind != "generate":
+        raise ValueError("Unknown Cosmos3 decision kind")
+    elif not isinstance(generation, dict) or set(generation) != {"modality", "prompt"}:
+        raise ValueError("Cosmos3 generation requires only modality and prompt")
+    elif generation["modality"] not in MEDIA_TYPES:
+        raise ValueError("Cosmos3 interleaving currently supports images and videos")
+    else:
         prompt = generation["prompt"]
         if (
             not isinstance(prompt, str)
@@ -111,133 +133,146 @@ def parse_decision(value: Any) -> UMMDecision:
         ):
             raise ValueError("Cosmos3 generation requires a bounded nonempty prompt")
         else:
-            pass
-    else:
-        raise ValueError("Unknown Cosmos3 decision kind")
-    return UMMDecision(kind=kind, text=text, generation=deepcopy(generation))
+            return Decision(
+                kind, text, {"modality": generation["modality"], "prompt": prompt}
+            )
 
 
-def media_items(result: Any, *, verify_content: bool) -> list[dict]:
-    if not isinstance(result, dict) or not isinstance(result.get("media"), list):
-        raise ValueError("Cosmos3 generation did not return media")
+def interpret_reasoner(result: object) -> Decision:
+    if not isinstance(result, dict) or not isinstance(result.get("text"), str):
+        raise ValueError("Cosmos3 Reasoner did not return a structured text decision")
+    elif result.get("finish_reason") not in (None, "stop"):
+        raise ValueError("Cosmos3 Reasoner decision was truncated or interrupted")
+    elif len(result["text"]) > 2 * (MAX_TEXT_CHARS + MAX_PROMPT_CHARS):
+        raise ValueError("Cosmos3 decision exceeds its serialized size limit")
     else:
         pass
-    media = result["media"]
-    if len(media) != 1:
+    try:
+        parsed = json.loads(result["text"], object_pairs_hook=unique_object)
+    except (ValueError, RecursionError) as exc:
+        raise ValueError("Cosmos3 Reasoner returned an invalid JSON decision") from exc
+    return parse_decision(parsed)
+
+
+def generated_media(result: object) -> dict[str, object]:
+    """The one owned inline item of a generation turn, with verified content."""
+    if not isinstance(result, dict) or not isinstance(result.get("media"), list):
+        raise ValueError("Cosmos3 generation did not return media")
+    elif len(result["media"]) != 1:
         raise ValueError(
             "Cosmos3 interleaving requires one generated media item per turn"
         )
     else:
         pass
-    for item in media:
-        if not isinstance(item, dict) or "path" in item:
-            raise ValueError("Cosmos3 interleaving requires owned inline media")
-        else:
-            pass
-        mime = item.get("mime_type")
-        kind = item.get("kind")
-        allowed = {
-            "image": ("image/png", "image/jpeg", "image/webp"),
-            "video": ("video/mp4",),
-        }
-        if (
-            not isinstance(kind, str)
-            or kind not in allowed
-            or mime not in allowed[kind]
-        ):
-            raise ValueError("Unsupported inline Cosmos3 media type")
-        else:
-            pass
-        size = item.get("size_bytes")
-        if type(size) is not int or not 0 < size <= INLINE_MEDIA_LIMIT_BYTES:
-            raise ValueError("Cosmos3 inline media exceeds its byte limit")
-        else:
-            pass
-        url = item.get("url")
-        prefix = f"data:{mime};base64,"
-        if not isinstance(url, str) or not url.startswith(prefix):
-            raise ValueError("Cosmos3 media must be a typed data URL")
-        else:
-            pass
-        encoded = url[len(prefix) :]
-        if len(encoded) > 4 * ((INLINE_MEDIA_LIMIT_BYTES + 2) // 3):
-            raise ValueError("Cosmos3 inline media exceeds its encoded byte limit")
-        else:
-            pass
-        if not verify_content:
-            continue
-        else:
-            pass
-        try:
-            content = base64.b64decode(encoded, validate=True)
-        except (ValueError, binascii.Error) as exc:
-            raise ValueError("Malformed Cosmos3 inline media") from exc
-        if len(content) != size or hashlib.sha256(content).hexdigest() != item.get(
-            "sha256"
-        ):
-            raise ValueError("Cosmos3 inline media identity does not match its content")
-        else:
-            pass
-    return media
+    item = result["media"][0]
+    if not isinstance(item, dict) or "path" in item:
+        raise ValueError("Cosmos3 interleaving requires owned inline media")
+    else:
+        pass
+    kind, mime, size = item.get("kind"), item.get("mime_type"), item.get("size_bytes")
+    if not isinstance(kind, str) or mime not in MEDIA_TYPES.get(kind, ()):
+        raise ValueError("Unsupported inline Cosmos3 media type")
+    elif type(size) is not int or not 0 < size <= INLINE_MEDIA_LIMIT_BYTES:
+        raise ValueError("Cosmos3 inline media exceeds its byte limit")
+    else:
+        pass
+    url = item.get("url")
+    prefix = data_url(mime, b"")
+    if not isinstance(url, str) or not url.startswith(prefix):
+        raise ValueError("Cosmos3 media must be a typed data URL")
+    elif len(url) - len(prefix) > 4 * ((INLINE_MEDIA_LIMIT_BYTES + 2) // 3):
+        raise ValueError("Cosmos3 inline media exceeds its encoded byte limit")
+    else:
+        pass
+    try:
+        content = base64.b64decode(url[len(prefix) :], validate=True)
+    except (ValueError, binascii.Error) as exc:
+        raise ValueError("Malformed Cosmos3 inline media") from exc
+    if len(content) != size or hashlib.sha256(content).hexdigest() != item.get(
+        "sha256"
+    ):
+        raise ValueError("Cosmos3 inline media identity does not match its content")
+    else:
+        return item
+
+
+def encoded_size(message: dict[str, object]) -> int:
+    return len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
 
 
 class Cosmos3UMMAdapter:
-    """Translate model decisions while native runtimes retain model execution."""
+    """Translate Cosmos3 decisions while native runtimes keep model execution.
 
-    def start(self, request: OmniRequest) -> list[dict]:
+    Each request alternates between the Reasoner (phase reason), which answers
+    with a structured decision, and native generation (phase generate), whose
+    media returns to the Reasoner in the next turn.
+    """
+
+    def __init__(self, model_path: str) -> None:
+        del model_path
+        self.histories: dict[str, Cosmos3History] = {}
+
+    def start(self, context: UMMContext) -> UMMStep:
         try:
-            messages = build_chat_messages(request.inputs)
+            messages = build_chat_messages(context.request.inputs)
         except ValueError as exc:
-            raise InvalidRequestError(str(exc)) from exc
+            raise UMMRequestError(str(exc)) from exc
         if any(
             message.get("role") not in ("system", "user", "assistant")
             for message in messages
         ):
-            raise InvalidRequestError(
+            raise UMMRequestError(
                 "Cosmos3 interleaving accepts native user and assistant chat history"
             )
-        else:
-            pass
-        if messages[0].get("role") == "system" and isinstance(
+        elif messages[0].get("role") == "system" and isinstance(
             messages[0].get("content"), str
         ):
             messages[0]["content"] = (
-                _SYSTEM_INSTRUCTION + "\n\n" + messages[0]["content"]
+                SYSTEM_INSTRUCTION + "\n\n" + messages[0]["content"]
             )
         else:
-            messages.insert(0, {"role": "system", "content": _SYSTEM_INSTRUCTION})
-        return messages
+            messages.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
+        history = Cosmos3History()
+        self.histories[context.execution_id] = history
+        for message in messages:
+            self.remember(history, message)
+        return self.reason(context, history, ())
 
-    def reasoner_request(
+    @staticmethod
+    def remember(history: Cosmos3History, message: dict[str, object]) -> None:
+        history.messages.append(message)
+        history.retained_bytes += encoded_size(message)
+
+    def reason(
         self,
-        history: list[dict],
-        request: OmniRequest,
-        *,
-        remaining_generation_turns: int,
-    ) -> OmniRequest:
-        params = deepcopy(request.params)
+        context: UMMContext,
+        history: Cosmos3History,
+        outputs: tuple[UMMOutput, ...],
+    ) -> UMMStep:
+        params = deepcopy(context.request.params)
         # Flatten native reasoner overrides first so the internal decision
         # contract cannot be replaced by a stage-specific stream or schema.
         for key in ("stage_sampling", "stage_params"):
             value = params.pop(key, {})
             if not isinstance(value, dict):
-                raise InvalidRequestError(f"{key} must be a mapping")
+                raise UMMRequestError(f"{key} must be a mapping")
             else:
                 pass
             reasoner = value.get("reasoner", {})
             if not isinstance(reasoner, dict):
-                raise InvalidRequestError("Reasoner stage parameters must be a mapping")
+                raise UMMRequestError("Reasoner stage parameters must be a mapping")
             else:
                 pass
             params.update(reasoner)
         template = params.get("chat_template_kwargs") or {}
         if not isinstance(template, dict):
-            raise InvalidRequestError("chat_template_kwargs must be a mapping")
+            raise UMMRequestError("chat_template_kwargs must be a mapping")
         else:
             pass
-        schema = deepcopy(_DECISION_SCHEMA)
-        if remaining_generation_turns == 0:
-            # The controller refuses another generation, so constrain decoding to final.
+        schema = deepcopy(DECISION_SCHEMA)
+        # A generation and the Reasoner turn that inspects it need two more
+        # dispatches after this one, so with fewer left only final remains.
+        if context.remaining_dispatches < 3:
             schema["properties"]["kind"]["enum"] = ["final"]
             schema["properties"]["generation"] = {"type": "null"}
         else:
@@ -257,164 +292,121 @@ class Cosmos3UMMAdapter:
         )
         params.setdefault("temperature", 0.0)
         params.setdefault("max_tokens", 2048)
-        return OmniRequest(
-            {"messages": deepcopy(history)}, params, deepcopy(request.metadata)
+        request = OmniRequest(
+            {"messages": list(history.messages)},
+            params,
+            deepcopy(context.request.metadata),
         )
+        return UMMStep(REASON, request, outputs)
 
-    def interpret_reasoner(self, result: Any) -> UMMDecision:
-        if not isinstance(result, dict) or not isinstance(result.get("text"), str):
-            raise ValueError(
-                "Cosmos3 Reasoner did not return a structured text decision"
-            )
+    def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
+        history = self.histories[context.execution_id]
+        if phase == REASON:
+            decision = interpret_reasoner(result)
+            outputs = (UMMOutput("text", decision.text),) if decision.text else ()
+            if decision.kind == "final":
+                return UMMStep(outputs=outputs)
+            else:
+                history.decision = decision
+                request = self.generation_request(context, decision)
+                return UMMStep(GENERATE, request, outputs)
+        elif phase == GENERATE and history.decision is not None:
+            decision = history.decision
+            item = generated_media(result)
+            if item["kind"] != decision.generation["modality"]:
+                raise ValueError(
+                    "Generated Cosmos3 modality differs from the model decision"
+                )
+            else:
+                pass
+            self.remember(history, self.decision_message(decision))
+            self.remember(history, self.receipt(decision, item))
+            history.decision = None
+            return self.reason(context, history, (UMMOutput(item["kind"], item),))
         else:
-            pass
-        if result.get("finish_reason") not in (None, "stop"):
-            raise ValueError("Cosmos3 Reasoner decision was truncated or interrupted")
-        else:
-            pass
-        text = result["text"]
-        if len(text) > 2 * (MAX_TEXT_CHARS + MAX_PROMPT_CHARS):
-            raise ValueError("Cosmos3 decision exceeds its serialized size limit")
-        else:
-            pass
-        try:
-            parsed = json.loads(text, object_pairs_hook=unique_object)
-        except (ValueError, RecursionError) as exc:
-            raise ValueError(
-                "Cosmos3 Reasoner returned an invalid JSON decision"
-            ) from exc
-        return parse_decision(parsed)
+            raise ValueError(f"Cosmos3 adapter received an unexpected phase {phase!r}")
 
-    def generation_request(
-        self, decision: UMMDecision, request: OmniRequest
-    ) -> OmniRequest:
-        validated = parse_decision(
-            {
-                "kind": decision.kind,
-                "text": decision.text,
-                "generation": decision.generation,
-            }
-        )
-        if validated.kind != "generate":
-            raise ValueError("Only generation decisions can enter the generation stage")
-        else:
-            pass
+    def usage(self, context: UMMContext) -> int:
+        history = self.histories.get(context.execution_id)
+        return 0 if history is None else history.retained_bytes
+
+    def close(self, context: UMMContext, reason: CloseReason) -> None:
+        self.histories.pop(context.execution_id, None)
+
+    @staticmethod
+    def generation_request(context: UMMContext, decision: Decision) -> OmniRequest:
         try:
-            options = resolve_generation_options(deepcopy(request.params))
+            options = resolve_generation_options(deepcopy(context.request.params))
         except ValueError as exc:
-            raise InvalidRequestError(str(exc)) from exc
+            raise UMMRequestError(str(exc)) from exc
         action_mode = options.get("action_mode")
         if action_mode is not None and (
             not isinstance(action_mode, str)
             or action_mode.strip().lower() != "forward_dynamics"
         ):
-            raise InvalidRequestError(
+            raise UMMRequestError(
                 "Cosmos3 visual interleaving cannot return action-only results"
             )
         else:
             pass
-        generation = validated.generation
-        options["prompt"] = generation["prompt"]
+        options["prompt"] = decision.generation["prompt"]
         options["num_outputs_per_prompt"] = 1
-        if generation["modality"] == "image":
+        if decision.generation["modality"] == "image":
             if action_mode is not None:
-                raise InvalidRequestError(
+                raise UMMRequestError(
                     "Cosmos3 forward_dynamics requires a video decision"
                 )
             else:
-                pass
-            options["num_frames"] = 1
+                options["num_frames"] = 1
         else:
             options.setdefault("num_frames", 33)
             if type(options["num_frames"]) is not int or options["num_frames"] <= 1:
-                raise InvalidRequestError(
-                    "Video interleaving requires more than one frame"
-                )
+                raise UMMRequestError("Video interleaving requires more than one frame")
             else:
                 pass
         return OmniRequest(
-            {"prompt": generation["prompt"]},
+            {"prompt": decision.generation["prompt"]},
             {"diffusion": options, "stream": False},
-            deepcopy(request.metadata),
+            deepcopy(context.request.metadata),
         )
 
-    def incorporate_media(
-        self, history: list[dict], decision: UMMDecision, result: Any
-    ) -> list[dict]:
-        # media_segments verifies the bytes earlier in the same transition.
-        media = media_items(result, verify_content=False)
-        if media[0]["kind"] != decision.generation["modality"]:
-            raise ValueError(
-                "Generated Cosmos3 modality differs from the model decision"
-            )
-        else:
-            pass
-        messages = deepcopy(history)
-        messages.append(
+    @staticmethod
+    def decision_message(decision: Decision) -> dict[str, object]:
+        content = json.dumps(
             {
-                "role": "assistant",
-                "content": json.dumps(
-                    {
-                        "kind": decision.kind,
-                        "text": decision.text,
-                        "generation": decision.generation,
-                    },
-                    ensure_ascii=False,
-                ),
-            }
+                "kind": decision.kind,
+                "text": decision.text,
+                "generation": decision.generation,
+            },
+            ensure_ascii=False,
         )
-        content = [
+        return {"role": "assistant", "content": content}
+
+    @staticmethod
+    def receipt(decision: Decision, item: dict[str, object]) -> dict[str, object]:
+        status = json.dumps(
             {
-                "type": "text",
-                "text": (
-                    "Generation execution completed. Result receipt: "
-                    + json.dumps(
-                        {
-                            "status": "completed",
-                            "modality": media[0]["kind"],
-                            "requested_prompt": decision.generation["prompt"],
-                        },
-                        ensure_ascii=False,
-                    )
-                    + "\nThe attached media is the result of your preceding generation "
-                    "request. Inspect the received results against the original user's "
-                    "task. If the task is complete, choose kind final with generation "
-                    "null and your answer in text. Otherwise request the next needed "
-                    "generation. Repeat a completed generation only when the user's "
-                    "task or your assessment of its result calls for a revision."
-                ),
-            }
-        ]
-        for item in media:
-            kind = f"{item['kind']}_url"
-            content.append({"type": kind, kind: {"url": item["url"]}})
-        messages.append({"role": "user", "content": content})
-        return messages
-
-    def media_segments(self, result: Any) -> list[dict]:
-        return [
-            {"kind": item["kind"], "data": deepcopy(item)}
-            for item in media_items(result, verify_content=True)
-        ]
-
-
-def create_umm_scheduler(
-    model_path: str,
-    *,
-    max_turns: int = UMMLimits.max_turns,
-    max_segments: int | None = UMMLimits.max_segments,
-    max_sessions: int = UMMLimits.max_sessions,
-    max_context_bytes: int = UMMLimits.max_context_bytes,
-    timeout_s: float = UMMLimits.timeout_s,
-) -> UMMController:
-    """Construct the CPU controller without loading another model runtime."""
-    return UMMController(
-        Cosmos3UMMAdapter(),
-        limits=UMMLimits(
-            max_turns=max_turns,
-            max_segments=max_segments,
-            max_sessions=max_sessions,
-            max_context_bytes=max_context_bytes,
-            timeout_s=timeout_s,
-        ),
-    )
+                "status": "completed",
+                "modality": item["kind"],
+                "requested_prompt": decision.generation["prompt"],
+            },
+            ensure_ascii=False,
+        )
+        text = (
+            "Generation execution completed. Result receipt: "
+            + status
+            + "\nThe attached media is the result of your preceding generation "
+            "request. Inspect the received results against the original user's "
+            "task. If the task is complete, choose kind final with generation "
+            "null and your answer in text. Otherwise request the next needed "
+            "generation. Repeat a completed generation only when the user's "
+            "task or your assessment of its result calls for a revision."
+        )
+        part = f"{item['kind']}_url"
+        return {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": text},
+                {"type": part, part: {"url": item["url"]}},
+            ],
+        }

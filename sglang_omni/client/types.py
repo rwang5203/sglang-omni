@@ -8,8 +8,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 from typing import TypedDict
 
-from sglang_omni.proto.continuation import UMMSegment
-
 
 class TokenUsageDict(TypedDict):
     prompt_tokens: int | None
@@ -168,8 +166,6 @@ class GenerateChunk:
     audio_data: object = None
     media: list[dict[str, object]] | None = None
     sample_rate: int | None = None
-    segment: UMMSegment | None = None
-    segments: list[UMMSegment] | None = None
 
     @property
     def reported_finish_reason(self) -> str:
@@ -179,7 +175,7 @@ class GenerateChunk:
             return self.model_finish_reason
 
     def to_dict(self) -> dict[str, object]:
-        result = {
+        return {
             "request_id": self.request_id,
             "index": self.index,
             "token_ids": list(self.token_ids),
@@ -200,6 +196,68 @@ class GenerateChunk:
             "sample_rate": self.sample_rate,
         }
 
+
+@dataclass(frozen=True)
+class UMMSegment:
+    """One accepted output of an interleaved (UMM) request, in order.
+
+    data is None only in the final result of a streamed request, which already
+    delivered each segment with its data.
+    """
+
+    execution_id: str
+    segment_index: int
+    kind: str
+    data: object = None
+
+    @classmethod
+    def from_dict(cls, value: object) -> UMMSegment:
+        fields = {"type", "execution_id", "segment_index", "kind", "data"}
+        if (
+            not isinstance(value, dict)
+            or value.get("type") != "segment"
+            or not set(value) <= fields
+            or not isinstance(value.get("execution_id"), str)
+            or type(value.get("segment_index")) is not int
+            or value["segment_index"] < 0
+            or not isinstance(value.get("kind"), str)
+        ):
+            raise ValueError(f"Invalid UMM segment {value!r:.200}")
+        else:
+            return cls(
+                value["execution_id"],
+                value["segment_index"],
+                value["kind"],
+                value.get("data"),
+            )
+
+    def to_dict(self) -> dict[str, object]:
+        result: dict[str, object] = {
+            "type": "segment",
+            "execution_id": self.execution_id,
+            "segment_index": self.segment_index,
+            "kind": self.kind,
+        }
+        if self.data is not None:
+            result["data"] = self.data
+        else:
+            pass
+        return result
+
+
+@dataclass
+class UMMGenerateChunk(GenerateChunk):
+    """A chunk of an interleaved (UMM) request.
+
+    A streamed chunk carries one segment. The final chunk lists every segment,
+    and its text joins the text segments that carry data.
+    """
+
+    segment: UMMSegment | None = None
+    segments: list[UMMSegment] | None = None
+
+    def to_dict(self) -> dict[str, object]:
+        result = super().to_dict()
         if self.segment is not None:
             result["segment"] = self.segment.to_dict()
         else:
@@ -257,7 +315,6 @@ class CompletionResult:
     omni_rollout: dict[str, object] | None = None
     weight_version: str | None = None
     language: str | None = None
-    segments: list[UMMSegment] | None = None
 
 
 @dataclass
@@ -271,6 +328,23 @@ class CompletionStreamChunk:
     finish_reason: str | None = None
     usage: UsageInfo | None = None
     stage_name: str | None = None
+
+
+@dataclass
+class UMMCompletionResult(CompletionResult):
+    """Result of an interleaved (UMM) request.
+
+    text joins the text segments, and segments keeps every accepted output in
+    order with its data.
+    """
+
+    segments: list[UMMSegment] = field(default_factory=list)
+
+
+@dataclass
+class UMMCompletionStreamChunk(CompletionStreamChunk):
+    """A streamed chunk of an interleaved (UMM) request with its segment."""
+
     segment: UMMSegment | None = None
 
 

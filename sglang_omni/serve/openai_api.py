@@ -64,7 +64,13 @@ from sglang_omni.client.audio import (
     encode_pcm,
     select_audio_delta,
 )
-from sglang_omni.client.types import UNKNOWN_FINISH_REASON, UsageInfo
+from sglang_omni.client.types import (
+    UNKNOWN_FINISH_REASON,
+    UMMCompletionResult,
+    UMMCompletionStreamChunk,
+    UMMGenerateChunk,
+    UsageInfo,
+)
 from sglang_omni.config import (
     CustomVoiceConfig,
     RealtimeTranscriptionConfig,
@@ -850,7 +856,7 @@ async def chat_non_stream(
     else:
         pass
 
-    if result.segments is not None:
+    if isinstance(result, UMMCompletionResult):
         message["segments"] = [segment.to_dict() for segment in result.segments]
     else:
         pass
@@ -1015,7 +1021,10 @@ async def chat_stream_events(
 
             delta = ChatCompletionStreamDelta()
             emit = False
-            if chunk.segment is not None:
+            if (
+                isinstance(chunk, UMMCompletionStreamChunk)
+                and chunk.segment is not None
+            ):
                 delta.segment = chunk.segment.to_dict()
                 emit = True
             else:
@@ -1329,13 +1338,13 @@ async def generate_stream(
     try:
         async with aclosing(stream):
             async for chunk in stream:
-                if chunk.segment is not None:
+                if isinstance(chunk, UMMGenerateChunk) and chunk.segment is not None:
                     event, data = "segment", chunk.segment.to_dict()
                 else:
                     event = "complete" if chunk.finish_reason is not None else "chunk"
                     data = chunk.to_dict()
                     data.pop("audio_data", None)
-                    if chunk.segments is not None:
+                    if isinstance(chunk, UMMGenerateChunk):
                         # Segment events already carried each segment's data.
                         data.pop("media")
                         data["segments"] = [
@@ -1343,7 +1352,7 @@ async def generate_stream(
                                 "segment_index": segment.segment_index,
                                 "kind": segment.kind,
                             }
-                            for segment in chunk.segments
+                            for segment in chunk.segments or []
                         ]
                     else:
                         pass
@@ -1584,7 +1593,7 @@ def build_generate_response(
         media=result.media,
         segments=(
             [segment.to_dict() for segment in result.segments]
-            if result.segments is not None
+            if isinstance(result, UMMCompletionResult)
             else None
         ),
         meta_info=meta_info,

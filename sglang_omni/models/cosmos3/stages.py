@@ -3,18 +3,21 @@
 
 from __future__ import annotations
 
+import base64
+import hashlib
 import logging
 import multiprocessing
 import multiprocessing.connection
 import os
 import queue
 import shutil
+import stat
 import tempfile
 import threading
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from urllib.parse import unquote, urlparse
+from urllib.parse import unquote, urlparse, urlunparse
 from uuid import uuid4
 
 from sglang_omni.native_generation import cancellation
@@ -79,6 +82,55 @@ COMMON_REQUEST_FIELDS = frozenset(
 # Native image and video routes clamp n to this many outputs per prompt.
 # Native SGLang keeps the bound inline, so it is restated here.
 NATIVE_MAX_OUTPUTS_PER_PROMPT = 10
+
+# Largest saved output a stage with inline_media returns as bytes.
+INLINE_MEDIA_LIMIT_BYTES = 8 * 1024 * 1024
+INLINE_MEDIA_TYPES = {
+    ".png": ("image", "image/png"),
+    ".jpg": ("image", "image/jpeg"),
+    ".jpeg": ("image", "image/jpeg"),
+    ".webp": ("image", "image/webp"),
+    ".mp4": ("video", "video/mp4"),
+}
+
+
+def data_url(mime: str, content: bytes) -> str:
+    """Base64 data URL (RFC 2397) carrying content of this media type."""
+    header = urlunparse(("data", "", mime, "base64,", "", ""))
+    return header + base64.b64encode(content).decode("ascii")
+
+
+def inline_media(path: str, directory: Path) -> dict[str, object]:
+    """Read one bounded saved output while its request directory is owned."""
+    target = Path(path)
+    if not target.resolve(strict=True).is_relative_to(directory.resolve(strict=True)):
+        raise ValueError("Native inline output is outside its owned request directory")
+    elif target.suffix.lower() not in INLINE_MEDIA_TYPES:
+        raise ValueError("Unsupported native inline media type")
+    else:
+        pass
+    descriptor = os.open(target, os.O_RDONLY | os.O_NOFOLLOW)
+    with os.fdopen(descriptor, "rb") as stream:
+        size = os.fstat(stream.fileno())
+        if not stat.S_ISREG(size.st_mode) or not 0 < size.st_size <= (
+            INLINE_MEDIA_LIMIT_BYTES
+        ):
+            raise ValueError("Native inline media exceeds its regular file byte limit")
+        else:
+            pass
+        content = stream.read(INLINE_MEDIA_LIMIT_BYTES + 1)
+    if not 0 < len(content) <= INLINE_MEDIA_LIMIT_BYTES:
+        raise ValueError("Native inline media exceeds its byte limit")
+    else:
+        pass
+    kind, mime = INLINE_MEDIA_TYPES[target.suffix.lower()]
+    return {
+        "kind": kind,
+        "mime_type": mime,
+        "size_bytes": len(content),
+        "sha256": hashlib.sha256(content).hexdigest(),
+        "url": data_url(mime, content),
+    }
 
 
 def model_request_fields(server_args: object) -> frozenset[str]:
@@ -257,7 +309,9 @@ class NativeGenerationScheduler(SimpleScheduler):
 
     Each request saves its media in its own directory under output_dir.
     Delivered media belongs to the receiver of the completion, and the stage
-    never removes it. The stage removes a request directory when the request
+    never removes it. With inline_media the stage instead returns each output
+    as bytes and removes the directory at once, for a receiver that is another
+    stage. The stage removes a request directory when the request
     fails, is aborted, or is dropped before the coordinator accepts its
     completion. An abort observed during or after delivery also removes it,
     because the coordinator aborts only requests it has not completed, so it
@@ -275,6 +329,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         request_fields: frozenset[str] = COMMON_REQUEST_FIELDS,
         *,
         cancellation_mode: str | None = None,
+        inline_media: bool = False,
     ):
         """``cancellation_mode`` is "native" when the native API cancels,
         "plugin" when the Omni plugin runs in the native worker, else None."""
@@ -282,6 +337,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         self.output_dir = output_dir
         self.request_fields = request_fields
         self.cancellation_mode = cancellation_mode
+        self.inline_media = inline_media
         self.native_requests: dict[str, GenerationRequest] = {}
         self.delivered: OrderedDict[str, Path] = OrderedDict()
         self.workers = list(generator.local_scheduler_process or [])
@@ -425,6 +481,9 @@ class NativeGenerationScheduler(SimpleScheduler):
     def claim_result(self, result: object, *, terminal: bool) -> bool:
         if not isinstance(result, StagePayload):
             return False
+        elif self.inline_media:
+            # Inline results own nothing on disk.
+            return True
         elif not terminal:
             raise ValueError(
                 "Saved native media requires terminal delivery. "
@@ -555,13 +614,20 @@ class NativeGenerationScheduler(SimpleScheduler):
                 ],
                 "finish_reason": "stop",
             }
+            if self.inline_media:
+                for item in payload.data["media"]:
+                    item.update(inline_media(item.pop("path"), request.directory))
+            else:
+                pass
             succeeded = True
             return payload
         finally:
             with self.abort_lock:
                 request.running = False
                 request.result = payload if succeeded else None
-                cleanup = not succeeded or request.cancelled.is_set()
+                cleanup = (
+                    self.inline_media or not succeeded or request.cancelled.is_set()
+                )
                 if cleanup and self.native_requests.get(payload.request_id) is request:
                     self.native_requests.pop(payload.request_id)
                 else:
@@ -632,6 +698,7 @@ def create_generation_scheduler(
     output_dir: str = "outputs",
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, object] | None = None,
+    inline_media: bool = False,
 ) -> NativeGenerationScheduler:
     from sglang_omni.utils.device import resolve_concrete_device
 
@@ -692,6 +759,7 @@ def create_generation_scheduler(
             output_dir,
             COMMON_REQUEST_FIELDS | model_request_fields(generator.server_args),
             cancellation_mode=mode,
+            inline_media=inline_media,
         )
     except BaseException:
         generator.shutdown()
