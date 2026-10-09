@@ -139,7 +139,8 @@ def test_invalid_chat_history_is_a_client_error_before_any_dispatch(inputs):
             },
             0.0,
         ),
-        ({"temperature": 0.25}, 0.25),
+        # An explicit value equal to the stage's placeholder still applies.
+        ({"temperature": 1.0}, 1.0),
     ],
 )
 def test_decisions_keep_their_contract_and_only_explicit_client_sampling(

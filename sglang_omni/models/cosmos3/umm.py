@@ -571,7 +571,11 @@ class Cosmos3UMMAdapter:
                 **message,
                 "content": [text, {"type": part, part: {"url": url}}],
             }
-        return UMMStep(REASON, OmniRequest({"messages": messages}, params), outputs)
+        # Every sampling field here is intended, so the Reasoner stage keeps the
+        # ones equal to its placeholders too.
+        metadata = {EXPLICIT_GENERATION_PARAMS_KEY: sorted(history.sampling)}
+        request = OmniRequest({"messages": messages}, params, metadata)
+        return UMMStep(REASON, request, outputs)
 
     def advance(self, context: UMMContext, phase: str, result: object) -> UMMStep:
         history = self.histories[context.execution_id]
