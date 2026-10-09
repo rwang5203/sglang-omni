@@ -6,12 +6,22 @@ from __future__ import annotations
 import asyncio
 import json
 import multiprocessing
+import os
+import tempfile
 import threading
 from concurrent.futures import Future
 from copy import deepcopy
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
+from urllib.request import url2pathname
 
 from sglang_omni.client.types import SamplingParams
+from sglang_omni.preprocessing.resource_connector import (
+    MediaPolicyError,
+    get_global_resource_connector,
+    resolve_local_file,
+)
 from sglang_omni.proto import (
     EXPLICIT_GENERATION_PARAMS_KEY,
     EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
@@ -45,12 +55,88 @@ def set_sampling_fields(values: dict, explicit: object) -> dict:
     }
 
 
+async def police_media_reference(
+    source: str, max_bytes: int | None, fetched: list[Path]
+) -> str:
+    """Apply the server media policy to one chat media reference.
+
+    These are main's rules for chat media: data URLs pass, remote URLs follow
+    the domain allowlist on every redirect hop, file URLs need the allowed
+    local directory and must resolve inside it, and bare paths are confined to
+    that directory once it is set. Native SGLang applies no path policy and
+    matches exact hosts only, so with an allowlist the stage fetches remote
+    media itself into a temporary file, listed in fetched for the caller to
+    remove, and hands native that file.
+    """
+    connector = get_global_resource_connector()
+    url = urlparse(source)
+    if url.scheme == "data":
+        return source
+    elif url.scheme in ("http", "https") and not connector.allowed_media_domains:
+        connector.assert_url_allowed(source)
+        return source
+    elif url.scheme in ("http", "https"):
+        data, _ = await connector.load_http_bytes_async(
+            source, timeout=connector.connection.timeout, max_bytes=max_bytes
+        )
+        handle, name = tempfile.mkstemp(prefix="sglang-omni-chat-media-")
+        os.close(handle)
+        fetched.append(Path(name))
+        await asyncio.to_thread(Path(name).write_bytes, data)
+        return Path(name).as_uri()
+    elif url.scheme == "file" and connector.allowed_local_media_path is None:
+        raise MediaPolicyError(
+            "File URLs require --allowed-local-media-path on the server"
+        )
+    elif url.scheme == "file" and url.netloc not in ("", "localhost"):
+        raise MediaPolicyError(f"File URL netloc is not supported: {url.netloc}")
+    elif url.scheme == "file":
+        return str(
+            resolve_local_file(
+                url2pathname(url.path),
+                allowed_local_media_path=connector.allowed_local_media_path,
+            )
+        )
+    elif url.scheme:
+        raise MediaPolicyError(f"Unsupported media URL scheme: {url.scheme}")
+    else:
+        return str(connector.local_media_path(source))
+
+
+async def police_chat_media(
+    messages: list[dict], max_bytes: int | None, fetched: list[Path]
+) -> None:
+    """Police every image, video, and audio reference of the messages in place."""
+    for message in messages:
+        content = message.get("content")
+        for part in content if isinstance(content, list) else ():
+            kind = part.get("type") if isinstance(part, dict) else None
+            if kind not in ("image_url", "video_url", "audio_url"):
+                continue
+            else:
+                pass
+            reference = part.get(kind)
+            if isinstance(reference, dict) and isinstance(reference.get("url"), str):
+                reference["url"] = await police_media_reference(
+                    reference["url"], max_bytes, fetched
+                )
+            elif isinstance(reference, str):
+                part[kind] = await police_media_reference(reference, max_bytes, fetched)
+            else:
+                raise ValueError(f"{kind} needs a url")
+
+
 def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> dict:
     inputs = payload.request.inputs
+    metadata = payload.request.metadata or {}
+    if any(key.startswith("video_") or key == "use_audio_in_video" for key in metadata):
+        raise ValueError("Use native chat content for media and its processing options")
+    else:
+        pass
     if isinstance(inputs, str):
         messages = [{"role": "user", "content": inputs}]
     elif isinstance(inputs, list) and all(isinstance(m, dict) for m in inputs):
-        messages = inputs
+        messages = deepcopy(inputs)
     elif isinstance(inputs, dict) and isinstance(inputs.get("messages"), list):
         messages = deepcopy(inputs["messages"])
         if not all(isinstance(message, dict) for message in messages):
@@ -58,7 +144,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         else:
             pass
         media = {key: inputs.get(key) for key in ("images", "videos", "audios")}
-        if media["audios"] or any(key.startswith("video_") for key in inputs):
+        if media["audios"]:
             raise ValueError(
                 "Use native chat content for media and its processing options"
             )
@@ -101,7 +187,6 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
         raise ValueError("Reasoner requests require at least one message")
     else:
         pass
-    metadata = payload.request.metadata or {}
     params = set_sampling_fields(
         dict(payload.request.params), metadata.get(EXPLICIT_GENERATION_PARAMS_KEY)
     )
@@ -198,6 +283,9 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
         self.serving_chat = serving_chat
         self.request_type = request_type
         self.native_lock = threading.Lock()
+        # Remote media fetched under a domain allowlist keeps native's size cap.
+        max_media_mb = getattr(engine.server_args, "media_url_max_file_size_mb", 0)
+        self.max_media_bytes = max_media_mb * 1024 * 1024 if max_media_mb else None
         self.closed = False
         self.ready = threading.Event()
         if engine.loop.is_running():
@@ -254,6 +342,17 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
             )
 
     async def complete(self, payload: StagePayload) -> StagePayload:
+        fetched: list[Path] = []
+        try:
+            return await self.run_native(payload, fetched)
+        finally:
+            # Native SGLang has read the fetched media once the request ends.
+            for path in fetched:
+                path.unlink(missing_ok=True)
+
+    async def run_native(
+        self, payload: StagePayload, fetched: list[Path]
+    ) -> StagePayload:
         # A cancellation requested before the loop reached this coroutine is
         # delivered one loop step after its first step. Yield once so an
         # already aborted request never reaches the native engine.
@@ -264,6 +363,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
                 self.engine.tokenizer_manager.served_model_name,
                 set(self.request_type.model_fields),
             )
+            await police_chat_media(fields["messages"], self.max_media_bytes, fetched)
             request = self.request_type(**fields)
         except ValueError as exc:
             raise ValueError(f"{REQUEST_ERROR}{exc}") from exc

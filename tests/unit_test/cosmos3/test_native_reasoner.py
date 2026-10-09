@@ -3,22 +3,29 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import queue
 import threading
 import time
 from contextlib import contextmanager
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
+from sglang_omni.models.cosmos3 import reasoner
 from sglang_omni.models.cosmos3.config import Cosmos3ReasonerPipelineConfig, Variants
 from sglang_omni.models.cosmos3.reasoner import (
     NativeReasonerScheduler,
     build_chat_fields,
     create_reasoner_scheduler,
     native_reasoner_kwargs,
+)
+from sglang_omni.preprocessing.resource_connector import (
+    MultiModalResourceConnector,
+    ResourceHTTPConnection,
 )
 from sglang_omni.proto import OmniRequest, StagePayload, StreamMessage
 from sglang_omni.scheduling.message import IncomingMessage
@@ -69,6 +76,7 @@ class Chat:
     def __init__(self, engine):
         self.engine = engine
         self.calls = []
+        self.files = {}
         self.started = threading.Event()
         self.active = 0
         self.peak = 0
@@ -83,6 +91,10 @@ class Chat:
         self.started.set()
         message = request.messages[0]
         content = message["content"] if isinstance(message, dict) else message.content
+        for part in content if isinstance(content, list) else ():
+            url = (part.get("image_url") or {}).get("url", "")
+            if url.startswith("file://"):
+                self.files[url] = Path(url.removeprefix("file://")).read_bytes()
         if content == "hang":
             await asyncio.Event().wait()
         self.active += 1
@@ -224,7 +236,7 @@ def test_native_chat_request_tracks_manager_name_changes():
 def test_native_text_and_vision_parameters_preserved():
     original = {
         "messages": [{"role": "user", "content": "What is here?"}],
-        "images": ["data:image/png;base64,AAAA"],
+        "images": ["data:image/png,AAAA"],
     }
     fields = build_chat_fields(
         payload(
@@ -285,6 +297,7 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
         payload(inputs={"messages": ["bad"], "videos": ["video.mp4"]}),
         payload(inputs={"messages": [{"role": "user", "content": "x"}, 1]}),
         payload(inputs={"messages": [], "images": ["image.png"]}),
+        StagePayload("r1", OmniRequest("x", {}, {"video_fps": 2.0}), None),
         payload(stage_params=[]),
         payload(stage_sampling=[]),
         payload(stage_params={"reasoner": ["bad"]}),
@@ -296,6 +309,62 @@ def test_omitted_sampling_resolves_from_the_checkpoint_config(request_):
 def test_unsupported_contracts_reject_before_dispatch(item):
     with pytest.raises(ValueError):
         build_chat_fields(item, "cosmos3", NativeRequest.model_fields)
+
+
+@pytest.mark.parametrize(
+    ("configured", "reference", "outcome"),
+    [
+        (False, "data:image/png,AAAA", "same"),
+        (False, "https://example.com/a.png", "same"),
+        (False, "relative.png", "same"),
+        (False, "file:///srv/a.png", "refused"),
+        (True, "https://other.org/a.png", "refused"),
+        (True, "https://example.com/a.png", "fetched"),
+        (True, "file://{allowed}/a.png", "{allowed}/a.png"),
+        (True, "{outside}/a.png", "refused"),
+    ],
+)
+def test_chat_media_follows_the_server_media_policy(
+    monkeypatch, tmp_path, configured, reference, outcome
+):
+    import httpx
+
+    allowed = tmp_path / "allowed"
+    allowed.mkdir()
+    reference = reference.format(allowed=allowed, outside=tmp_path)
+    connection = ResourceHTTPConnection()
+    connection.async_client = httpx.AsyncClient(
+        transport=httpx.MockTransport(
+            lambda request: httpx.Response(
+                200, content=b"png", headers={"content-type": "image/png"}
+            )
+        )
+    )
+    connector = MultiModalResourceConnector(
+        connection=connection,
+        allowed_local_media_path=allowed if configured else None,
+        allowed_media_domains=["example.com"] if configured else None,
+    )
+    monkeypatch.setattr(reasoner, "get_global_resource_connector", lambda: connector)
+    item = payload(inputs={"messages": [{"role": "user", "content": "x"}]})
+    item.request.inputs["images"] = [reference]
+    with running() as (scheduler, _, chat):
+        enqueue(scheduler, item)
+        message = scheduler.outbox.get(timeout=3)
+    if outcome == "refused":
+        assert message.type == "error"
+        assert str(message.data).startswith(reasoner.REQUEST_ERROR)
+        assert not chat.calls
+    else:
+        assert message.type == "result"
+        url = chat.calls[0].messages[0]["content"][1]["image_url"]["url"]
+        if outcome == "fetched":
+            # Native read the fetched bytes from a file the stage then removed.
+            assert chat.files == {url: b"png"}
+            assert not os.path.exists(url.removeprefix("file://"))
+        else:
+            expected = reference if outcome == "same" else outcome
+            assert url == expected.format(allowed=allowed)
 
 
 @pytest.mark.parametrize(

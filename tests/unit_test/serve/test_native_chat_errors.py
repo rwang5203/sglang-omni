@@ -28,6 +28,7 @@ class NativeValidationClient:
             tokenizer_manager=SimpleNamespace(served_model_name="native-model")
         )
         self.scheduler.request_type = NativeChatRequest
+        self.scheduler.max_media_bytes = None
         self.scheduler.serving_chat = SimpleNamespace(handle_request=AsyncMock())
 
     def health(self):
