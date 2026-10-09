@@ -352,10 +352,10 @@ def test_dispatch_fn_owns_admission_and_cancellation() -> None:
         None, max_concurrency=None, dispatch_fn=dispatch
     )
     for index in range(20):
-        scheduler.inbox.put(_request(f"r{index}", f"r{index}"))
+        scheduler.inbox.put(request(f"r{index}", f"r{index}"))
 
-    with _running(scheduler):
-        _wait_until(lambda: len(futures) == 20)
+    with running(scheduler):
+        wait_until(lambda: len(futures) == 20)
         with pytest.raises(queue.Empty):
             scheduler.outbox.get(timeout=0.1)
         futures["r3"].set_result("done")
