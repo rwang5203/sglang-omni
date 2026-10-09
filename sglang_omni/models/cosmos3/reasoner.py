@@ -17,7 +17,7 @@ from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 
 
-def build_chat_messages(inputs: Any) -> list[dict]:
+def build_chat_messages(inputs: object) -> list[dict]:
     """Keep the native chat representation for text and multimodal content."""
     if isinstance(inputs, str):
         messages = [{"role": "user", "content": inputs}]
