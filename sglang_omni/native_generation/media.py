@@ -18,12 +18,20 @@ from contextlib import asynccontextmanager
 from functools import partial
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import APIRouter, FastAPI
+from fastapi.routing import APIRoute
+from starlette.datastructures import URLPath
+from starlette.routing import BaseRoute, Match, NoMatchFound
+from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sglang_omni.config import PipelineConfig
 
 NATIVE_HOST = "127.0.0.1"
 LOOPBACK_HOSTS = (NATIVE_HOST, "localhost")
+# The native route families Omni serves: image generation and edits, video
+# jobs with retrieval, content and deletion, and action generation.
+# Native warmup waits until /liveness answers on this server before it runs.
+ROUTE_PREFIXES = ("/v1/images", "/v1/videos", "/v1/actions", "/liveness")
 
 NativeServerKwargs = Callable[
     [str, int, dict[str, object], list[int] | None], dict[str, object]
@@ -93,8 +101,16 @@ def prepare_native_media_app(
 
 
 def build_native_media_app(server_kwargs: dict[str, object]) -> FastAPI:
-    """Import the native runtime and construct its application."""
-    from sglang.multimodal_gen.runtime.entrypoints.http_server import create_app
+    """Import the native runtime and construct an app with its media routes.
+
+    Native create_app also serves weights, memory, LoRA, rollout, mesh,
+    realtime, server info and stats routes without Omni's admin key, so
+    only the image, video and action routers are included. The action
+    websocket stays out.
+    """
+    from sglang.multimodal_gen.runtime.entrypoints.action import api as action_api
+    from sglang.multimodal_gen.runtime.entrypoints.http_server import lifespan, liveness
+    from sglang.multimodal_gen.runtime.entrypoints.openai import image_api, video_api
     from sglang.multimodal_gen.runtime.scheduler_client import AsyncSchedulerClient
     from sglang.multimodal_gen.runtime.server_args import (
         ServerArgs,
@@ -116,13 +132,53 @@ def build_native_media_app(server_kwargs: dict[str, object]) -> FastAPI:
         pass
     native_args = ServerArgs.from_kwargs(**server_kwargs)
     set_global_server_args(native_args)
-    return create_app(native_args)
+    native_app = FastAPI(lifespan=lifespan)
+    native_app.state.server_args = native_args
+    native_app.state.prompt_enhancer = None
+    native_app.add_api_route("/liveness", liveness)
+    native_app.include_router(image_api.router)
+    native_app.include_router(video_api.router)
+    if native_args.pipeline_config.supports_action_endpoint():
+        actions = APIRouter()
+        actions.routes.extend(
+            route for route in action_api.router.routes if isinstance(route, APIRoute)
+        )
+        native_app.include_router(actions)
+    else:
+        pass
+    return native_app
+
+
+class NativeMediaRoutes(BaseRoute):
+    """Send the native media route families, and nothing else, to the native app.
+
+    The paths keep their prefix, so the native routers match them unchanged,
+    and Omni routes never depend on being registered before this one.
+    """
+
+    def __init__(self, app: ASGIApp) -> None:
+        self.app = app
+
+    def matches(self, scope: Scope) -> tuple[Match, Scope]:
+        path = scope["path"] if scope["type"] == "http" else ""
+        if any(
+            path == prefix or path.startswith(f"{prefix}/") for prefix in ROUTE_PREFIXES
+        ):
+            return Match.FULL, {}
+        else:
+            return Match.NONE, {}
+
+    def url_path_for(self, name: str, /, **path_params: object) -> URLPath:
+        raise NoMatchFound(name, path_params)
+
+    async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
+        await self.app(scope, receive, send)
 
 
 def mount_native_media_app(
     app: FastAPI, native_app: FastAPI, runtime_failure: asyncio.Future
 ) -> None:
-    """Preserve native routing and run its lifespan before worker shutdown."""
+    """Serve the native media routes and run their lifespan inside Omni's."""
     native_app.state.scheduler_failure = runtime_failure
     previous_lifespan = app.router.lifespan_context
 
@@ -135,4 +191,4 @@ def mount_native_media_app(
     app.router.lifespan_context = lifespan
     # Readiness reports the native warmup state, see the /health route.
     app.state.native_media_app = native_app
-    app.mount("/", native_app)
+    app.router.routes.append(NativeMediaRoutes(native_app))

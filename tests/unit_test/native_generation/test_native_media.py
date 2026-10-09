@@ -77,6 +77,58 @@ def test_health_reports_warming_until_the_native_warmup_finishes():
         assert ready.json()["status"] == "healthy"
 
 
+# Native create_app also serves these, none of them behind Omni's admin key.
+NATIVE_CONTROL_ROUTES = [
+    ("post", "/release_memory_occupation"),
+    ("post", "/resume_memory_occupation"),
+    ("post", "/get_weights_checksum"),
+    ("post", "/update_weights_from_tensor_checker"),
+    ("post", "/v1/set_lora"),
+    ("post", "/v1/merge_lora_weights"),
+    ("post", "/v1/unmerge_lora_weights"),
+    ("get", "/v1/list_loras"),
+    ("get", "/v1/model_info"),
+    ("post", "/rollout/generate"),
+    ("get", "/server_info"),
+    ("get", "/stats"),
+    ("get", "/models"),
+    ("post", "/vertex_generate"),
+    ("post", "/v1/meshes"),
+]
+
+
+def test_only_native_media_routes_are_served(monkeypatch):
+    from types import SimpleNamespace
+
+    from sglang.multimodal_gen.runtime import scheduler_client, server_args
+
+    from sglang_omni.serve import create_app
+
+    class RunningClient:
+        def health(self):
+            return {"running": True}
+
+    def initialize(self, server_args, *, worker_failure=None):
+        pass
+
+    pipeline = SimpleNamespace(
+        supports_action_endpoint=lambda: True, supports_openpi_endpoint=lambda: True
+    )
+    native_args = SimpleNamespace(enable_metrics=False, pipeline_config=pipeline)
+    monkeypatch.setattr(
+        server_args.ServerArgs, "from_kwargs", lambda **kwargs: native_args
+    )
+    monkeypatch.setattr(server_args, "set_global_server_args", lambda args: None)
+    monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
+    omni = create_app(RunningClient(), model_name="native", admin_api_key="secret")
+    mount_native_media_app(omni, media.build_native_media_app({}), object())
+    client = TestClient(omni)
+    for method, path in NATIVE_CONTROL_ROUTES:
+        assert getattr(client, method)(path).status_code == 404, path
+    assert client.get("/v1/videos").json()["object"] == "list"
+    assert client.post("/v1/images/generations", json={}).status_code == 422
+
+
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
 
