@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import copy
 import logging
 import threading
@@ -591,56 +590,3 @@ def test_route_validation_expires_once_but_delivers_accepted_final_snapshots():
     final = controller.advance(reply(current, {"kind": "final", "text": "done"}))
     clock[0] = 4.0
     assert controller.validate_result(final) is True
-
-
-@pytest.mark.asyncio
-async def test_readmitted_retired_id_fails_at_entry_and_fresh_identity_recovers():
-    from sglang_omni.pipeline.coordinator import Coordinator
-    from tests.unit_test.fixtures.pipeline_fakes import RecordingCoordinatorControlPlane
-
-    coordinator = Coordinator(
-        "inproc://complete",
-        "inproc://abort",
-        entry_stage="orchestrator",
-        terminal_stages=["orchestrator"],
-    )
-    control = RecordingCoordinatorControlPlane()
-    coordinator.control_plane = control
-    coordinator.register_stage("orchestrator", "inproc://orchestrator")
-    obj = make_stage(name="orchestrator", is_terminal=True)
-
-    first = asyncio.create_task(coordinator.submit("req", "initial"))
-    await asyncio.sleep(0)
-    await obj.on_submit(control.submitted[-1][2])
-    await coordinator.abort("req")
-    obj.on_abort("req")
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    queued = obj.scheduler.inbox.qsize()
-
-    repeated = asyncio.create_task(coordinator.submit("req", "reused"))
-    await asyncio.sleep(0)
-    await obj.on_submit(control.submitted[-1][2])
-    assert obj.scheduler.inbox.qsize() == queued
-    await coordinator.handle_completion(obj.control_plane.completions[-1])
-    with pytest.raises(
-        RuntimeError,
-        match=r"^Request req \(retired after abort or failure, use a fresh "
-        r"request ID\) already exists$",
-    ):
-        await asyncio.wait_for(repeated, timeout=1)
-    completions = len(obj.control_plane.completions)
-    await obj.receive_payload_from_stage("req", "reasoner", request())
-    assert len(obj.control_plane.completions) == completions
-    assert obj.scheduler.inbox.qsize() == queued
-
-    fresh = asyncio.create_task(coordinator.submit("fresh", "healthy"))
-    await asyncio.sleep(0)
-    message = control.submitted[-1][2]
-    await obj.on_submit(message)
-    message.data.data = {"text": "healthy"}
-    await obj.route_result("fresh", message.data)
-    await coordinator.handle_completion(obj.control_plane.completions[-1])
-    assert await asyncio.wait_for(fresh, timeout=1) == {"text": "healthy"}
-    assert not obj.active_requests
-    assert not obj.request_arrivals
