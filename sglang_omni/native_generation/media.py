@@ -36,6 +36,7 @@ from starlette.types import ASGIApp, Receive, Scope, Send
 from sglang_omni.config import PipelineConfig
 from sglang_omni.preprocessing.resource_connector import (
     MediaPolicyError,
+    MultiModalResourceConnector,
     get_global_resource_connector,
 )
 
@@ -249,7 +250,14 @@ class NativeMediaFrontend:
                 body = await request.json()
             except ValueError:
                 return
-        self.police_fields(body)
+        try:
+            self.police_fields(body)
+        except RecursionError:
+            # Native may still decode what nests too deeply for this check.
+            raise HTTPException(
+                status_code=400,
+                detail="Native media request refused: it nests too deeply to check.",
+            ) from None
 
     def police_fields(self, value: object) -> None:
         if isinstance(value, dict):
@@ -266,8 +274,7 @@ class NativeMediaFrontend:
                         "a path the server owns.",
                     )
                 elif name in self.media_fields or name in MEDIA_REFERENCE_FIELDS:
-                    for source in text_values(item):
-                        police_media_reference(name, source)
+                    police_media_value(name, item)
                 else:
                     pass
                 self.police_fields(item)
@@ -484,31 +491,80 @@ def parse_containers(value: object) -> object:
         return value
 
 
-def text_values(value: object) -> Iterator[str]:
+def media_references(value: object) -> Iterator[str]:
+    """Each string native SGLang may read a media reference from.
+
+    Native decodes JSON encoded request values, multipart fields once and
+    model fields such as control_path once more, so a string also stands
+    for every string it decodes to.
+    """
     if isinstance(value, str):
         yield value
+        try:
+            decoded = json.loads(value)
+        except ValueError:
+            return
+        yield from decoded_references(decoded, top=True)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from text_values(item)
+            yield from media_references(item)
     elif isinstance(value, dict):
         for item in value.values():
-            yield from text_values(item)
+            yield from media_references(item)
     else:
         pass
 
 
-def police_media_reference(name: str, source: str) -> None:
-    """Refuse a media path or URL that the server media policy does not allow.
+def decoded_references(value: object, *, top: bool) -> Iterator[str]:
+    """References in a value native decoded from a string.
 
-    Follows the rules main applies to request media: without a policy the
-    reference passes, with one a bare path or file URL must sit in the
-    allowed directory. Inline media should use data URLs.
+    Native reads decoded strings as paths and turns any other decoded value,
+    except a list of paths, into its text, as Cosmos3 lowering does for the
+    items of control_path.
+    """
+    if isinstance(value, str):
+        yield from media_references(value)
+    elif value is not None:
+        if not (top and isinstance(value, list)):
+            yield str(value)
+        else:
+            pass
+        if isinstance(value, (dict, list)):
+            items = value.values() if isinstance(value, dict) else value
+            for item in items:
+                yield from decoded_references(item, top=False)
+        else:
+            pass
+    else:
+        pass
+
+
+def police_media_value(name: str, value: object) -> None:
+    """Refuse a media field value that the server media policy does not allow.
+
+    Without a policy every reference passes, as on other routes.
     """
     connector = get_global_resource_connector()
     if (
         connector.allowed_local_media_path is None
         and not connector.allowed_media_domains
-    ) or source.startswith("data:"):
+    ):
+        return
+    else:
+        pass
+    for source in media_references(value):
+        police_media_reference(connector, name, source)
+
+
+def police_media_reference(
+    connector: MultiModalResourceConnector, name: str, source: str
+) -> None:
+    """Refuse a media path or URL that the server media policy does not allow.
+
+    Follows the rules main applies to request media: a bare path or file URL
+    must sit in the allowed directory. Inline media should use data URLs.
+    """
+    if source.startswith("data:"):
         return
     else:
         pass

@@ -318,18 +318,34 @@ def test_native_requests_follow_the_server_media_policy(
             {"data": {"prompt": "a", "perf_dump_path": "/srv/perf.json"}},
             True,
         ),
+        # Native decodes these JSON encoded values to the outside path.
+        (
+            "/v1/videos",
+            {"json": {"prompt": "a", "control_path": json.dumps([outside])}},
+            configured,
+        ),
+        (
+            "/v1/videos",
+            {"data": {"prompt": "a"}, "files": {"video_path": (None, f'"{outside}"')}},
+            configured,
+        ),
     ]
 
     async def check(client, runtime_failure):
-        for path, body, refused in requests:
-            response = await client.post(path, **body)
-            blocked = response.status_code == 400 and (
-                "refused" in response.text or "cannot set" in response.text
-            )
-            assert blocked == refused, (path, body, response.text)
-        inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
-        response = await client.post("/v1/videos", json=inside)
-        assert "refused" not in response.text
+        # Native resolves relative paths against the server working
+        # directory, so the requests run with it outside and inside the
+        # allowed directory.
+        for cwd in (tmp_path, allowed):
+            monkeypatch.chdir(cwd)
+            for path, body, refused in requests:
+                response = await client.post(path, **body)
+                blocked = response.status_code == 400 and (
+                    "refused" in response.text or "cannot set" in response.text
+                )
+                assert blocked == refused, (cwd, path, body, response.text)
+            inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
+            response = await client.post("/v1/videos", json=inside)
+            assert "refused" not in response.text
 
     serve(FastAPI(), native.build(), check)
 
