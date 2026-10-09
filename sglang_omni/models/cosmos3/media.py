@@ -14,6 +14,9 @@ from fastapi import FastAPI
 from sglang_omni.config import PipelineConfig
 from sglang_omni.models.cosmos3.stages import native_server_kwargs
 
+NATIVE_HOST = "127.0.0.1"
+LOOPBACK_HOSTS = (NATIVE_HOST, "localhost")
+
 
 def unused_port(exclude: set[int]) -> int:
     for _ in range(100):
@@ -55,7 +58,19 @@ def prepare_native_media_app(
     excluded.add(kwargs["master_port"])
     kwargs.setdefault("nccl_port", unused_port(excluded))
     output_dir = str(Path(getattr(stage.factory, "output_dir", "outputs")).resolve())
-    kwargs.update(host=host, port=port, strict_ports=True, output_path=output_dir)
+    # The native scheduler binds its request socket on this host and
+    # unpickles what it receives, so it stays on loopback whatever host
+    # the Omni HTTP server binds. Native SGLang serves no HTTP here.
+    if kwargs.get("host", NATIVE_HOST) not in LOOPBACK_HOSTS:
+        raise ValueError(
+            "The native generation scheduler listens on loopback only. "
+            "Remove host from the generation stage server_args_overrides."
+        )
+    else:
+        pass
+    kwargs.update(
+        host=NATIVE_HOST, port=port, strict_ports=True, output_path=output_dir
+    )
     server_kwargs = native_server_kwargs(
         config.model_path, stage.gpu, kwargs, stage.runtime_gpu_ids
     )

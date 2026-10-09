@@ -190,6 +190,8 @@ def test_model_factory_must_return_a_resolved_frontend(monkeypatch):
 
 
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
+    import pytest
+
     from sglang_omni.models.cosmos3 import media
     from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
 
@@ -199,10 +201,12 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
         media, "build_native_media_app", lambda kwargs: built.append(kwargs) or app
     )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
-    frontend = resolve_native_media_frontend(config, host="127.0.0.1", port=19000)
+    frontend = resolve_native_media_frontend(config, host="0.0.0.0", port=19000)
     overrides = config.stages[0].factory.server_args_overrides
     # Stage processes read these overrides when they spawn, so they must be
     # resolved before the native runtime is imported or the app is built.
+    # The native scheduler socket follows host, so it stays on loopback
+    # whatever host the Omni HTTP server binds.
     assert overrides["host"] == "127.0.0.1" and overrides["port"] == 19000
     assert overrides["strict_ports"] is True
     assert {"scheduler_port", "master_port", "nccl_port", "output_path"} <= set(
@@ -211,6 +215,12 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     assert built == []
     assert frontend() is app
     assert built[0]["model_path"] == "checkpoint" and built[0]["base_gpu_id"] == 0
+    assert built[0]["host"] == "127.0.0.1"
+
+    config = Cosmos3PipelineConfig(model_path="checkpoint")
+    config.stages[0].factory.server_args_overrides = {"host": "0.0.0.0"}
+    with pytest.raises(ValueError, match="loopback"):
+        resolve_native_media_frontend(config, host="127.0.0.1", port=19000)
 
 
 def test_cosmos3_declares_model_owned_native_frontend():
