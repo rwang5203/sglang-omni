@@ -756,9 +756,7 @@ def common_model_info_value(
 
 def register_chat_completions(app: FastAPI) -> None:
     @app.post("/v1/chat/completions")
-    async def chat_completions(
-        req: ChatCompletionRequest, request: Request
-    ) -> Response:
+    async def chat_completions(req: ChatCompletionRequest) -> Response:
         client: Client = app.state.client
         default_model: str = app.state.model_name
 
@@ -804,7 +802,6 @@ def register_chat_completions(app: FastAPI) -> None:
             model,
             req,
             audio_format,
-            request,
         )
 
 
@@ -817,13 +814,10 @@ async def chat_non_stream(
     model: str,
     req: ChatCompletionRequest,
     audio_format: str,
-    request: Request,
 ) -> JSONResponse:
     """Handle non-streaming chat completions."""
     try:
-        result = await generate_with_disconnect_watch(
-            request,
-            client,
+        result = await client.completion(
             gen_req,
             request_id=request_id,
             audio_format=audio_format,
@@ -1272,7 +1266,7 @@ def register_generate(app: FastAPI) -> None:
     interleaved = app.state.interleaved_output
 
     @app.post("/generate")
-    async def generate(req: RolloutGenerateRequest, request: Request) -> Response:
+    async def generate(req: RolloutGenerateRequest) -> Response:
         client: Client = app.state.client
 
         provided = [
@@ -1315,9 +1309,7 @@ def register_generate(app: FastAPI) -> None:
                 )
             else:
                 pass
-            result = await generate_with_disconnect_watch(
-                request,
-                client,
+            result = await client.completion(
                 gen_req,
                 request_id=request_id,
                 audio_format=audio_format,
@@ -1388,38 +1380,6 @@ async def generate_stream(
         yield f"event: error\ndata: {json.dumps(data)}\n\n"
         return
     yield f"data: {STREAM_DONE_SENTINEL}\n\n"
-
-
-async def generate_with_disconnect_watch(
-    request: Request,
-    client: Client,
-    gen_req: GenerateRequest,
-    *,
-    request_id: str,
-    audio_format: str,
-) -> CompletionResult:
-    result_task = asyncio.create_task(
-        client.completion(gen_req, request_id=request_id, audio_format=audio_format)
-    )
-    disconnect_task = asyncio.create_task(wait_for_request_disconnect(request))
-    try:
-        done, _ = await asyncio.wait(
-            {result_task, disconnect_task}, return_when=asyncio.FIRST_COMPLETED
-        )
-        if result_task in done:
-            return result_task.result()
-        else:
-            pass
-        raise asyncio.CancelledError
-    except asyncio.CancelledError:
-        await client.abort(request_id)
-        raise
-    finally:
-        for task in (result_task, disconnect_task):
-            if not task.done():
-                await cancel_task_bounded(task)
-            else:
-                discard_cancelled_task_result(task)
 
 
 def rollout_sampling_to_client(params: RolloutSamplingParams) -> SamplingParams:

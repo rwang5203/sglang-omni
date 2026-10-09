@@ -1,7 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 from __future__ import annotations
 
-import asyncio
 import json
 import logging
 
@@ -235,101 +234,6 @@ def test_streaming_generate_rejects_unsupported_rollout_artifacts_before_dispatc
     response = client.post("/generate", json={"prompt": "hello", "stream": True})
     assert response.status_code == 400
     assert "rollout artifacts" in response.text
-
-
-@pytest.mark.parametrize("route", ["/generate", "/v1/chat/completions"])
-@pytest.mark.parametrize("disconnect", [True, False])
-@pytest.mark.asyncio
-async def test_registered_non_streaming_route_aborts_and_reaps_on_disconnect(
-    route, disconnect
-):
-    started, finished, disconnected = (
-        asyncio.Event(),
-        asyncio.Event(),
-        asyncio.Event(),
-    )
-
-    class BlockingClient:
-        def __init__(self):
-            self.aborted = []
-            self.dispatched = []
-
-        async def completion(self, *args, **kwargs):
-            self.dispatched.append(kwargs["request_id"])
-            started.set()
-            try:
-                await asyncio.Future()
-            finally:
-                finished.set()
-
-        async def abort(self, request_id):
-            self.aborted.append(request_id)
-
-    client = BlockingClient()
-    app = create_app(client, model_name="cosmos3")
-    body = {"request_id": "owned-request"}
-    if route == "/generate":
-        body.update(prompt="Draw then describe", return_logprob=False)
-    else:
-        body.update(
-            model="cosmos3",
-            messages=[{"role": "user", "content": "Draw then describe"}],
-        )
-    encoded = json.dumps(body).encode()
-    body_sent = False
-    sent = []
-
-    async def receive():
-        nonlocal body_sent
-        if not body_sent:
-            body_sent = True
-            return {"type": "http.request", "body": encoded, "more_body": False}
-        await disconnected.wait()
-        return {"type": "http.disconnect"}
-
-    async def send(message):
-        sent.append(message)
-
-    scope = {
-        "type": "http",
-        "asgi": {"version": "3.0", "spec_version": "2.3"},
-        "http_version": "1.1",
-        "method": "POST",
-        "scheme": "http",
-        "path": route,
-        "raw_path": route.encode(),
-        "query_string": b"",
-        "root_path": "",
-        "headers": [
-            (b"content-type", b"application/json"),
-            (b"content-length", str(len(encoded)).encode()),
-        ],
-        "client": ("127.0.0.1", 12000),
-        "server": ("127.0.0.1", 8000),
-    }
-    pending = asyncio.create_task(app(scope, receive, send))
-    try:
-        await asyncio.wait_for(started.wait(), 1)
-        if disconnect:
-            disconnected.set()
-        else:
-            pending.cancel()
-        # Waiting without cancelling on timeout distinguishes a real abort
-        # from the test deadline cancelling an otherwise orphaned request.
-        done, _ = await asyncio.wait({pending}, timeout=1)
-        assert pending in done
-        with pytest.raises(asyncio.CancelledError):
-            await pending
-        assert len(client.dispatched) == 1
-        assert client.aborted == client.dispatched
-        if route == "/v1/chat/completions":
-            assert client.dispatched == ["owned-request"]
-        assert finished.is_set()
-        assert not sent
-    finally:
-        if not pending.done():
-            pending.cancel()
-        await asyncio.gather(pending, return_exceptions=True)
 
 
 @pytest.mark.parametrize("stream", [False, True])
