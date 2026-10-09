@@ -3,7 +3,12 @@
 
 from typing import ClassVar
 
-from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    FactoryArgs,
+    PipelineConfig,
+    StageConfig,
+)
 
 
 class Cosmos3PipelineConfig(PipelineConfig):
@@ -32,8 +37,12 @@ EntryClass = Cosmos3PipelineConfig
 
 class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
     native_media_stage: ClassVar[str | None] = None
+    # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "reasoner": EngineStageConfig
+    }
     stages: list[StageConfig] = [
-        StageConfig(
+        EngineStageConfig(
             name="reasoner",
             process="reasoner",
             factory_path="sglang_omni.models.cosmos3.reasoner.create_reasoner_scheduler",

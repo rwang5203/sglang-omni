@@ -384,6 +384,22 @@ def test_native_engine_cannot_escape_declared_placement(overrides):
         native_reasoner_kwargs("checkpoint", 0, overrides)
 
 
+def test_native_sizes_the_reasoner_unless_the_stage_config_does():
+    from sglang_omni.cli.serve import engine_stage_names
+
+    assert engine_stage_names(Cosmos3ReasonerPipelineConfig(model_path="m")) == [
+        "reasoner"
+    ]
+    for overrides, budget, expected in [
+        (None, None, None),
+        (None, 0.4, 0.4),
+        ({"mem_fraction_static": 0.5}, 0.4, 0.5),
+    ]:
+        kwargs = native_reasoner_kwargs("checkpoint", 0, overrides, None, budget)
+        assert "context_length" not in kwargs
+        assert kwargs.get("mem_fraction_static") == expected
+
+
 def test_native_scheduler_receives_concurrent_requests_on_one_loop():
     with running() as (scheduler, _, chat):
         for rid in ("r1", "r2", "r3"):

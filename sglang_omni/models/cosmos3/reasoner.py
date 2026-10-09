@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import multiprocessing
 import os
 import tempfile
@@ -29,6 +30,8 @@ from sglang_omni.proto import (
 )
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+
+logger = logging.getLogger(__name__)
 
 # Client errors carry this prefix, which the API maps to 400.
 REQUEST_ERROR = "Native chat request rejected: "
@@ -498,6 +501,7 @@ def native_reasoner_kwargs(
     gpu_id: int,
     overrides: dict | None,
     runtime_gpu_ids: list[int] | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ) -> dict:
     kwargs = dict(overrides or {})
     devices = list(runtime_gpu_ids) if runtime_gpu_ids is not None else [gpu_id]
@@ -536,8 +540,22 @@ def native_reasoner_kwargs(
         gpu_id_step=step,
         tp_size=len(devices),
     )
-    kwargs.setdefault("context_length", 8192)
-    kwargs.setdefault("mem_fraction_static", 0.6)
+    # Native derives the context length from the checkpoint and the memory
+    # fraction from the device. A placement budget for the stage replaces only
+    # the latter, and an explicit engine.mem_fraction_static wins over both.
+    if total_gpu_memory_fraction is None:
+        pass
+    elif kwargs.setdefault("mem_fraction_static", total_gpu_memory_fraction) != (
+        total_gpu_memory_fraction
+    ):
+        logger.warning(
+            "engine.mem_fraction_static=%s overrides the placement budget "
+            "gpu_memory_fraction=%s of the stage",
+            kwargs["mem_fraction_static"],
+            total_gpu_memory_fraction,
+        )
+    else:
+        pass
     # A pipeline stage shares its host with other stages, so the native
     # scheduler waits on its request sockets instead of spinning while idle.
     kwargs.setdefault("sleep_on_idle", True)
@@ -552,6 +570,7 @@ def create_reasoner_scheduler(
     max_concurrency: int | None = None,
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, Any] | None = None,
+    total_gpu_memory_fraction: float | None = None,
 ) -> NativeReasonerScheduler:
     from sglang_omni.utils.device import resolve_concrete_device
 
@@ -578,7 +597,11 @@ def create_reasoner_scheduler(
     from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
 
     kwargs = native_reasoner_kwargs(
-        model_path, gpu_id, server_args_overrides, runtime_gpu_ids
+        model_path,
+        gpu_id,
+        server_args_overrides,
+        runtime_gpu_ids,
+        total_gpu_memory_fraction,
     )
     engine = Engine(**kwargs)
     try:
