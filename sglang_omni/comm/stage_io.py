@@ -6,7 +6,7 @@ from __future__ import annotations
 import base64
 import io
 import pickle
-from dataclasses import fields, is_dataclass, replace
+from dataclasses import fields, is_dataclass
 from multiprocessing.reduction import ForkingPickler
 from typing import Protocol, overload
 
@@ -234,8 +234,11 @@ def serialize_direct_cuda_ipc_payload(
         raise ValueError("direct CUDA IPC payload requires at least one CUDA tensor")
     else:
         pass
-    # replace preserves wire fields and resets init=False scheduler-local state.
-    header = replace(payload, data=data_without_tensors)
+    header = StagePayload(
+        request_id=payload.request_id,
+        request=payload.request,
+        data=data_without_tensors,
+    )
     header_bytes = pickle.dumps(header)
     return {
         "_type": _DIRECT_CUDA_IPC_PAYLOAD_TYPE,
@@ -333,7 +336,11 @@ def deserialize_direct_cuda_ipc_payload(
         else:
             pass
         tensors[path] = tensor
-    return replace(header, data=restore_tensors(header.data, tensors))
+    return StagePayload(
+        request_id=header.request_id,
+        request=header.request,
+        data=restore_tensors(header.data, tensors),
+    )
 
 
 def serialize_direct_cuda_ipc_stream_chunk(
@@ -509,8 +516,11 @@ async def write_payload(
 ) -> tuple[DataRef, RelayOperation]:
     data_without_tensors, tensors = extract_tensors(payload.data)
     packed, entries = pack_tensors(tensors, device=relay_device(relay))
-    # replace preserves wire fields and resets init=False scheduler-local state.
-    header = replace(payload, data=data_without_tensors)
+    header = StagePayload(
+        request_id=payload.request_id,
+        request=payload.request,
+        data=data_without_tensors,
+    )
     op = await relay.put_async(
         packed,
         request_id=request_id,
@@ -559,7 +569,11 @@ async def read_payload(
         for entry in data_ref.tensors
     }
     relay.cleanup(request_id)
-    return replace(header, data=restore_tensors(header.data, tensors))
+    return StagePayload(
+        request_id=header.request_id,
+        request=header.request,
+        data=restore_tensors(header.data, tensors),
+    )
 
 
 async def write_tensor(

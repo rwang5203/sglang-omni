@@ -1,646 +1,786 @@
 # SPDX-License-Identifier: Apache-2.0
+"""UMM controller contracts with three fake adapters and real stages on CPU."""
 
 from __future__ import annotations
 
 import asyncio
-import copy
-import logging
+import base64
+import json
+import pickle
 import threading
 from dataclasses import replace
 from unittest.mock import AsyncMock
 
 import pytest
 
-from sglang_omni.admission import InvalidRequestError, QueueFullError
-from sglang_omni.config.schema import PipelineConfig
-from sglang_omni.pipeline.stage_workers import StageLaunchConfig, construct_stage
-from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits, route_umm
-from sglang_omni.proto.continuation import ContinuationToken
+from sglang_omni.comm.data_ref import DataRef
+from sglang_omni.config.schema import FactoryArgs
+from sglang_omni.pipeline.local_dispatch import LocalStageDispatcher
+from sglang_omni.pipeline.stage.stream_queue import StreamQueue
+from sglang_omni.pipeline.umm import (
+    CONTEXT_KEY,
+    CONTINUATION_METADATA_KEY,
+    CONTROLLER_FACTORY_PATH,
+    OUTPUT_FACTORY_PATH,
+    ROUTE_FN_PATH,
+    STREAM_DONE_FN_PATH,
+    ContextRef,
+    Continuation,
+    UMMController,
+    UMMLimits,
+    UMMOutput,
+    UMMPipelineConfig,
+    UMMStep,
+    create_umm_controller,
+    create_umm_output_stage,
+    route_umm,
+    umm_stream_done_targets,
+)
+from sglang_omni.proto import DataAckMessage, DataReadyMessage
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
-from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
-from tests.unit_test.fixtures.pipeline_fakes import fake_factory_path
-from tests.unit_test.pipeline.helpers import make_stage, stage
+from sglang_omni.relay.shm import ShmRelay
+from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.serve.openai_errors import generation_error_status_code
+from tests.unit_test.fixtures.pipeline_fakes import RecordingStageControlPlane
+from tests.unit_test.pipeline.helpers import (
+    build_compiled_process_topology,
+    make_stage,
+    stage,
+)
+
+SPLIT_PHASES = {"reason": "reasoner", "generate": "generator"}
 
 
-class Adapter:
-    def start(self, request):
-        return [{"role": "user", "content": request.inputs}]
-
-    def reasoner_request(self, history, request, *, remaining_generation_turns):
-        return OmniRequest(inputs={"messages": copy.deepcopy(history)}, params={})
-
-    def interpret_reasoner(self, result):
-        return UMMDecision(**result)
-
-    def generation_request(self, decision, request):
-        return OmniRequest(inputs=decision.generation, params={})
-
-    def incorporate_media(self, history, decision, result):
-        return [
-            *history,
-            {"role": "assistant", "content": decision.generation},
-            {"role": "user", "content": result},
-        ]
-
-    def media_segments(self, result):
-        return [{"kind": "image", "data": result}]
+def limits(**overrides: int | float) -> UMMLimits:
+    values = {
+        "max_dispatches": 17,
+        "max_outputs": 17,
+        "max_active": 32,
+        "max_retained_bytes": 64 * 1024 * 1024,
+        "timeout_s": 3600.0,
+    }
+    return UMMLimits(**{**values, **overrides})
 
 
-def request(request_id="req", *, stream=False):
-    req = OmniRequest(inputs="draw, inspect, and revise", params={"stream": stream})
-    return StagePayload(request_id=request_id, request=req, data=req.inputs)
+def make_controller(adapter, phases=SPLIT_PHASES, **kwargs) -> UMMController:
+    kwargs.setdefault("limits", limits())
+    return UMMController(adapter, phases=phases, output_stage="output", **kwargs)
 
 
-def reply(payload, data):
-    restored = StagePayload.from_dict(payload.to_dict())
-    restored.data = data
-    return restored
+class Recorder:
+    def __init__(self) -> None:
+        self.closed: list[str] = []
+
+    def usage(self, context) -> int:
+        return 0
+
+    def close(self, context, reason) -> None:
+        self.closed.append(reason)
 
 
-def generate(payload, text=""):
-    return reply(
-        payload,
-        {"kind": "generate", "text": text, "generation": {"prompt": "a tree"}},
-    )
+class SplitAdapter(Recorder):
+    """Cosmos 3 Nano: a reasoner decides, a generator renders, media re-enters."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.histories: dict[str, dict] = {}
+
+    def start(self, context):
+        self.histories[context.execution_id] = {"messages": [], "bytes": 0}
+        self.remember(context, {"role": "user", "content": context.request.inputs})
+        return self.reason(context, ())
+
+    def remember(self, context, message) -> None:
+        # Incremental accounting: each appended message is measured once.
+        history = self.histories[context.execution_id]
+        history["messages"].append(message)
+        history["bytes"] += len(json.dumps(message))
+
+    def reason(self, context, outputs):
+        final_only = context.remaining_dispatches < 3
+        messages = list(self.histories[context.execution_id]["messages"])
+        request = OmniRequest({"messages": messages}, {"final_only": final_only})
+        return UMMStep("reason", request, outputs)
+
+    def advance(self, context, phase, result):
+        if phase == "reason":
+            text = (UMMOutput("text", result["text"]),) if result["text"] else ()
+            if result["kind"] == "final":
+                return UMMStep(outputs=text)
+            else:
+                pass
+            self.remember(context, {"role": "assistant", "content": result["prompt"]})
+            return UMMStep("generate", OmniRequest({"prompt": result["prompt"]}), text)
+        else:
+            pass
+        media = result.get("media")
+        if media is None:
+            # A zero-media turn, such as a filtered generation, is not an error.
+            self.remember(context, {"role": "user", "content": "no media returned"})
+            return self.reason(context, ())
+        else:
+            pass
+        self.remember(context, {"role": "user", "content": {"image": media}})
+        return self.reason(context, (UMMOutput("image", media),))
+
+    def usage(self, context) -> int:
+        return self.histories[context.execution_id]["bytes"]
+
+    def close(self, context, reason) -> None:
+        self.histories.pop(context.execution_id)
+        super().close(context, reason)
 
 
-def test_two_model_adapter_cycles_and_ordered_segments():
-    controller = UMMController(Adapter())
-    current = controller.advance(request(stream=True))
-    session = current.continuation.session_id
-    for turn in range(2):
-        assert current.continuation.phase == "reasoner"
-        assert current.continuation.turn_index == turn
-        current = controller.advance(generate(current, f"render {turn}"))
-        assert current.continuation.phase == "generation"
-        current = controller.advance(reply(current, {"url": f"inline-{turn}"}))
-        assert (
-            current.request.inputs["messages"][-1]["content"]["url"] == f"inline-{turn}"
+def split_adapter(model_path: str) -> SplitAdapter:
+    return SplitAdapter()
+
+
+class OneCallAdapter(Recorder):
+    """SenseNova-U1 think mode: one native call returns thinking and an image."""
+
+    def start(self, context):
+        request = OmniRequest({"prompt": context.request.inputs}, {"think_mode": True})
+        return UMMStep("generate", request)
+
+    def advance(self, context, phase, result):
+        outputs = (
+            [UMMOutput("text", result["think_text"])] if result["think_text"] else []
         )
-    final = controller.advance(reply(current, {"kind": "final", "text": "finished"}))
-    assert route_umm("req", final) is None
-    assert controller.active_sessions == 0
-    assert final.data["type"] == "umm_result"
-    assert final.data["text"] == "render 0render 1finished"
-    segments = final.data["segments"]
-    assert [s["segment_index"] for s in segments] == list(range(5))
-    assert [s["kind"] for s in segments] == ["text", "image", "text", "image", "text"]
-    assert {s["session_id"] for s in segments} == {session}
-    streamed = [controller.outbox.get_nowait().data for _ in range(5)]
-    assert streamed == segments
-    assert controller.outbox.empty()
+        outputs += [UMMOutput("image", image) for image in result["images"]]
+        return UMMStep(outputs=tuple(outputs))
 
 
-def test_stale_and_duplicate_results_never_advance_or_corrupt_current_turn():
-    controller = UMMController(Adapter())
-    first = controller.advance(request())
-    second = controller.advance(generate(first))
-    stale = controller.advance(generate(first))
-    controller.emit_result("req", stale, controller.outbox)
-    discarded = controller.outbox.get_nowait()
-    assert discarded.type == "discard"
-    assert discarded.metadata["keep_active"] is True
-    forged = reply(second, {"url": "not accepted"})
-    forged.continuation = replace(second.continuation, nonce="wrong")
-    controller.advance(forged)
-    assert controller.sessions["req"].expected == second.continuation
-    resumed = controller.advance(reply(second, {"url": "accepted"}))
-    final = controller.advance(reply(resumed, {"kind": "final", "text": "done"}))
-    late = controller.advance(reply(second, {"url": "late"}))
-    controller.emit_result("req", late, controller.outbox)
-    assert controller.outbox.get_nowait().metadata["keep_active"] is False
-    assert len(final.data["segments"]) == 2
-    assert controller.active_sessions == 0
+class SharedContextAdapter(Recorder):
+    """BAGEL: generation conditions on the understanding context it receives."""
 
+    def __init__(self, *, consume: bool = True) -> None:
+        super().__init__()
+        self.consume = consume
 
-def test_abort_and_stop_release_all_sessions_and_late_results():
-    controller = UMMController(Adapter())
-    first = controller.advance(request("first"))
-    controller.advance(request("second"))
-    controller.abort("first")
-    assert controller.active_sessions == 1
-    dropped = controller.advance(generate(first))
-    assert dropped.keep_active is False
-    controller.stop()
-    controller.stop()
-    assert controller.active_sessions == 0
-
-
-def test_timeout_while_waiting_for_native_stage_emits_error_and_recovers():
-    clock = [0.0]
-    controller = UMMController(
-        Adapter(), limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
-    )
-    late = controller.advance(request())
-    clock[0] = 1.0
-    controller.expire()
-    error = controller.outbox.get_nowait()
-    assert error.type == "error"
-    assert isinstance(error.data, TimeoutError)
-    assert "timeout_s=1. Raise stages.<orchestrator>.factory.timeout_s" in str(
-        error.data
-    )
-    assert controller.active_sessions == 0
-    assert controller.advance(generate(late)).keep_active is False
-    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
-
-
-def test_capacity_rejection_preserves_existing_session():
-    controller = UMMController(Adapter(), limits=UMMLimits(max_sessions=1))
-    original = controller.advance(request())
-    with pytest.raises(QueueFullError) as rejected:
-        controller.advance(request("excess"))
-    assert isinstance(QueueFullError.from_message(str(rejected.value)), QueueFullError)
-    assert controller.active_sessions == 1
-    assert controller.sessions["req"].expected == original.continuation
-    controller.advance(reply(original, {"kind": "final", "text": "done"}))
-    assert controller.active_sessions == 0
-    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
-
-
-def test_turn_bound_still_allows_final_reasoning_after_last_generation():
-    controller = UMMController(Adapter(), limits=UMMLimits(max_turns=1))
-    reasoner = controller.advance(request())
-    generation = controller.advance(generate(reasoner))
-    last_reasoner = controller.advance(reply(generation, {"url": "media"}))
-    final = controller.advance(reply(last_reasoner, {"kind": "final", "text": "done"}))
-    assert final.continuation is None
-
-    reasoner = controller.advance(request())
-    generation = controller.advance(generate(reasoner))
-    last_reasoner = controller.advance(reply(generation, {"url": "media"}))
-    with pytest.raises(
-        InvalidRequestError,
-        match=r"max_turns=1\. Raise stages\.<orchestrator>\.factory\.max_turns",
-    ) as refused:
-        controller.advance(generate(last_reasoner, "must not stream"))
-    assert isinstance(
-        QueueFullError.from_message(str(refused.value)), InvalidRequestError
-    )
-    assert controller.active_sessions == 0
-
-
-def test_adapter_receives_the_remaining_generation_turns():
-    remaining = []
-
-    class RecordingAdapter(Adapter):
-        def reasoner_request(self, history, request, *, remaining_generation_turns):
-            remaining.append(remaining_generation_turns)
-            return super().reasoner_request(
-                history,
-                request,
-                remaining_generation_turns=remaining_generation_turns,
-            )
-
-    controller = UMMController(RecordingAdapter(), limits=UMMLimits(max_turns=1))
-    reasoner = controller.advance(request())
-    generation = controller.advance(generate(reasoner))
-    controller.advance(reply(generation, {"url": "media"}))
-    assert remaining == [1, 0]
-
-
-def test_default_segment_budget_allows_a_message_with_every_generation_turn():
-    controller = UMMController(Adapter())
-    current = controller.advance(request())
-    for turn in range(controller.limits.max_turns):
-        current = controller.advance(generate(current, f"turn {turn}"))
-        current = controller.advance(reply(current, {"url": f"media-{turn}"}))
-    final = controller.advance(reply(current, {"kind": "final", "text": "done"}))
-    assert len(final.data["segments"]) == 2 * controller.limits.max_turns + 1
-
-
-def test_segment_budget_rejects_entire_transition_before_stream_publication():
-    controller = UMMController(Adapter(), limits=UMMLimits(max_segments=1))
-    reasoner = controller.advance(request(stream=True))
-    generation = controller.advance(generate(reasoner, "first"))
-    assert controller.outbox.get_nowait().type == "stream"
-    with pytest.raises(InvalidRequestError, match="max_segments=1"):
-        controller.advance(reply(generation, {"url": "media"}))
-    assert controller.outbox.empty()
-    assert controller.active_sessions == 0
-
-
-def test_retained_byte_budget_covers_initial_input_and_generated_media():
-    small = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=10))
-    with pytest.raises(InvalidRequestError, match="max_context_bytes=10"):
-        small.advance(request())
-    assert small.active_sessions == 0
-
-    controller = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=2048))
-    reasoner = controller.advance(request())
-    generation = controller.advance(generate(reasoner))
-    with pytest.raises(InvalidRequestError, match="max_context_bytes=2048"):
-        controller.advance(reply(generation, {"url": "x" * 4096}))
-    assert controller.active_sessions == 0
-
-
-def test_result_without_continuation_for_live_session_fails_and_drops_it():
-    controller = UMMController(Adapter())
-    reasoner = controller.advance(request())
-    rebuilt = StagePayload(
-        request_id="req",
-        request=reasoner.request,
-        data={"kind": "final", "text": "lost"},
-    )
-    with pytest.raises(RuntimeError, match="dropped its continuation"):
-        controller.advance(rebuilt)
-    assert controller.active_sessions == 0
-
-
-def test_session_operations_are_refused_before_a_session_exists():
-    controller = UMMController(Adapter())
-    payload = request()
-    payload.request.metadata[SESSION_METADATA_KEY] = {"operation": "open"}
-    with pytest.raises(InvalidRequestError, match="session operations"):
-        controller.advance(payload)
-    assert controller.active_sessions == 0
-
-
-def test_internal_turns_never_stream_when_the_adapter_forwards_client_params():
-    class ForwardingAdapter(Adapter):
-        def reasoner_request(self, history, request, *, remaining_generation_turns):
-            return OmniRequest(inputs=history, params=dict(request.params))
-
-        def generation_request(self, decision, request):
-            return OmniRequest(inputs=decision.generation, params=dict(request.params))
-
-    controller = UMMController(ForwardingAdapter())
-    reasoner = controller.advance(request(stream=True))
-    generation = controller.advance(generate(reasoner))
-    assert reasoner.request.params["stream"] is False
-    assert generation.request.params["stream"] is False
-
-
-def test_adapter_failure_isolated_and_next_request_recovers():
-    controller = UMMController(Adapter())
-    reasoner = controller.advance(request())
-    with pytest.raises(ValueError, match="Invalid structured"):
-        controller.advance(reply(reasoner, {"kind": "unknown"}))
-    assert controller.active_sessions == 0
-    assert controller.advance(request("healthy")).continuation.phase == "reasoner"
-
-
-def test_existing_scheduler_thread_runs_controller_and_reaps_waiting_deadline():
-    controller = UMMController(Adapter(), limits=UMMLimits(timeout_s=0.1))
-    worker = threading.Thread(target=controller.start)
-    worker.start()
-    try:
-        payload = request()
-        controller.inbox.put(IncomingMessage("req", "new_request", payload))
-        assert controller.outbox.get(timeout=2).type == "result"
-        error = controller.outbox.get(timeout=2)
-        assert error.type == "error"
-        assert "deadline" in str(error.data)
-        assert controller.active_sessions == 0
-    finally:
-        controller.stop()
-        worker.join(timeout=2)
-    assert not worker.is_alive()
-
-
-def route_nowhere(request_id, output):
-    return None
-
-
-def test_conditional_terminal_schema_and_route_target_validation():
-    config = PipelineConfig(
-        model_path="model",
-        stages=[
-            stage(
-                "orchestrator",
-                terminal=True,
-                next=["reasoner", "generation"],
-                route_fn="sglang_omni.pipeline.umm.route_umm",
-            ),
-            stage("reasoner", next="orchestrator"),
-            stage("generation", next="orchestrator"),
-        ],
-    )
-    assert config.terminal_stages == ["orchestrator"]
-    spec = StageLaunchConfig(
-        stage_name="orchestrator",
-        factory=fake_factory_path("make_scheduler"),
-        next_stages=["reasoner", "generation"],
-        route_fn="sglang_omni.pipeline.umm.route_umm",
-        is_terminal=True,
-        recv_endpoint="inproc://orchestrator",
-        coordinator_endpoint="inproc://coordinator",
-        abort_endpoint="inproc://abort",
-        stage_endpoints={
-            "reasoner": "inproc://reasoner",
-            "generation": "inproc://generation",
-        },
-        comm_config={"slot_size_mb": 1},
-    )
-    obj = construct_stage(spec, logging.getLogger(__name__))
-    payload = request()
-    assert obj.get_next("req", payload) is None
-    payload.continuation = ContinuationToken("s", 0, "generation", "n")
-    assert obj.get_next("req", payload) == "generation"
-    with pytest.raises(ValueError, match="exactly the UMM phase stages"):
-        construct_stage(
-            replace(spec, next_stages=["planner", "painter"]),
-            logging.getLogger(__name__),
+    def start(self, context):
+        return UMMStep(
+            "understand", OmniRequest(context.request.inputs, {"think": True})
         )
-    with pytest.raises(ValueError, match="must be terminal"):
-        construct_stage(replace(spec, is_terminal=False), logging.getLogger(__name__))
-    # Other routed stages may return no target only when they are terminal.
-    routed = construct_stage(
-        replace(spec, is_terminal=False, route_fn=f"{__name__}.route_nowhere"),
-        logging.getLogger(__name__),
-    )
-    with pytest.raises(ValueError, match="returned no targets"):
-        routed.get_next("req", request())
-    with pytest.raises(ValueError, match="identity mismatch"):
-        route_umm("different", payload)
 
-
-@pytest.mark.asyncio
-async def test_stream_order_and_ownership_survive_controller_reentry_until_completion():
-    obj = make_stage(name="orchestrator", is_terminal=True, get_next=route_umm)
-    obj.control_plane.send_stream = AsyncMock()
-    obj.send_to_stage = AsyncMock()
-    payload = request()
-    obj.active_requests.add("req")
-    await obj.execute(payload)
-    for index in range(2):
-        await obj.send_stream_to_coordinator("req", {"text": str(index)})
-        payload.continuation = ContinuationToken("s", index, "reasoner", str(index))
-        await obj.route_result("req", payload)
-        assert "req" in obj.active_requests
-        payload = reply(payload, {})
-        await obj.receive_payload_from_stage("req", "reasoner", payload)
-    await obj.send_stream_to_coordinator("req", {"text": "done"})
-    assert [
-        call.args[0].chunk_id for call in obj.control_plane.send_stream.call_args_list
-    ] == [0, 1, 2]
-    payload.continuation = None
-    await obj.route_result("req", payload)
-    assert "req" not in obj.active_requests
-    assert "req" not in obj.request_arrivals
-    assert not obj.stream_chunk_counters
-
-
-@pytest.mark.asyncio
-async def test_fast_cycle_cannot_clear_new_arrival_during_send():
-    obj = make_stage(name="reasoner", get_next=lambda *_: "orchestrator")
-    first = request()
-    obj.active_requests.add("req")
-    await obj.execute(first)
-    old_arrival = obj.request_arrivals["req"]
-
-    async def reenter(*args, **kwargs):
-        await obj.receive_payload_from_stage("req", "orchestrator", request())
-
-    obj.send_to_stage = reenter
-    await obj.route_result("req", first)
-    assert "req" in obj.active_requests
-    assert obj.request_arrivals["req"] is not old_arrival
-    assert obj.scheduler.inbox.qsize() == 2
-
-
-@pytest.mark.asyncio
-async def test_old_discard_cannot_clear_new_arrival_but_retired_discard_releases_state():
-    obj = make_stage(name="orchestrator", is_terminal=True)
-    obj.active_requests.add("req")
-    old = request()
-    await obj.execute(old)
-    fresh = request()
-    await obj.execute(fresh)
-    obj.scheduler.outbox.put(
-        OutgoingMessage(
-            "req",
-            "discard",
-            metadata={"arrival_id": old.arrival_id, "keep_active": False},
+    def advance(self, context, phase, result):
+        if phase == "generate":
+            # Early completion: no further understanding turn after the image.
+            return UMMStep(outputs=(UMMOutput("image", result["image"]),))
+        else:
+            pass
+        think = (UMMOutput("text", result["think"]),)
+        if not self.consume:
+            return UMMStep(outputs=think)
+        else:
+            pass
+        return UMMStep(
+            "generate", OmniRequest({"cfg": 4.0}), think, context=result[CONTEXT_KEY]
         )
-    )
-    await obj.drain_outbox_external()
-    assert "req" in obj.active_requests
-    obj.scheduler.outbox.put(
-        OutgoingMessage(
-            "req",
-            "discard",
-            metadata={"arrival_id": fresh.arrival_id, "keep_active": False},
-        )
-    )
-    await obj.drain_outbox_external()
-    assert "req" not in obj.active_requests
-    assert not obj.request_arrivals
 
 
-@pytest.mark.asyncio
-async def test_waiting_controller_deadline_reaches_stage_failure_and_abort_cleans_streams():
-    controller = UMMController(Adapter())
-    obj = make_stage(
-        name="orchestrator",
-        is_terminal=True,
-        get_next=route_umm,
-        scheduler=controller,
-    )
-    obj.send_to_stage = AsyncMock()
-    obj.control_plane.send_stream = AsyncMock()
-    initial = request()
-    obj.active_requests.add("req")
-    await obj.execute(initial)
-    result = controller.advance(initial)
-    await obj.route_result("req", result)
-    assert "req" in obj.active_requests
-    controller.outbox.put(OutgoingMessage("req", "error", TimeoutError("expired")))
-    await obj.drain_outbox_external()
-    assert len(obj.control_plane.completions) == 1
-    assert obj.control_plane.completions[0].success is False
-    obj.on_abort("req")
-    await obj.send_stream_to_coordinator("req", {"text": "late"})
-    assert obj.control_plane.send_stream.await_count == 0
-    assert controller.active_sessions == 0
-    assert not obj.request_arrivals
+def reasoner(decisions):
+    script = iter(decisions)
+
+    def run(payload):
+        return next(script)
+
+    return run
 
 
-@pytest.mark.asyncio
-async def test_cleanup_uses_producing_arrival_when_new_turn_is_already_queued():
-    obj = make_stage(name="reasoner", get_next=lambda *_: "orchestrator")
-    obj.send_to_stage = AsyncMock()
-    old = request()
-    obj.active_requests.add("req")
-    await obj.execute(old)
-    newer = request()
-    await obj.execute(newer)
-    await obj.route_result("req", old)
-    assert "req" in obj.active_requests
-    assert obj.request_arrivals["req"] is newer.arrival_id
+def generator(media):
+    script = iter(media)
+
+    def run(payload):
+        item = next(script)
+        return {} if item is None else {"media": item}
+
+    return run
 
 
-@pytest.mark.asyncio
-async def test_only_a_terminal_stage_forwarding_a_continuation_keeps_request_state():
-    token = ContinuationToken("s", 0, "reasoner", "n")
-    for name, is_terminal, continuation in (
-        ("orchestrator", True, None),
-        ("reasoner", False, token),
+def unified(payload):
+    return {"think_text": "plan", "images": [{"url": "inline-image-0"}]}
+
+
+def bagel(payload):
+    ref = payload.request.metadata.get(CONTEXT_KEY)
+    if ref is None:
+        return {"think": "plan", CONTEXT_KEY: ContextRef("bagel", "kv-1")}
+    else:
+        assert ref == ContextRef("bagel", "kv-1")
+        return {"image": {"url": "inline-image-1"}}
+
+
+def generate(prompt, text=""):
+    return {"kind": "generate", "text": text, "prompt": prompt}
+
+
+def final(text):
+    return {"kind": "final", "text": text, "prompt": None}
+
+
+def initial(request_id="req", *, stream=False):
+    request = OmniRequest("draw, inspect, and revise", {"stream": stream})
+    return StagePayload(request_id, request, request.inputs)
+
+
+def reply(dispatched, data):
+    return StagePayload(dispatched.request_id, dispatched.request, data)
+
+
+def drive(controller, stages, payload):
+    trace = []
+    current = controller.advance(payload)
+    while current is not None and (
+        (target := route_umm(payload.request_id, current)) != "output"
     ):
-        obj = make_stage(name=name, is_terminal=is_terminal, get_next=lambda *_: "b")
-        obj.send_to_stage = AsyncMock()
-        payload = request()
-        payload.continuation = continuation
-        obj.active_requests.add("req")
-        await obj.execute(payload)
-        await obj.route_result("req", payload)
-        assert "req" not in obj.active_requests
-        assert "req" not in obj.request_arrivals
+        trace.append(
+            (current.request.metadata[CONTINUATION_METADATA_KEY].phase, target)
+        )
+        current = controller.advance(reply(current, stages[target](current)))
+    return current, trace
 
 
-def test_controller_output_preserves_the_arrival_that_produced_it():
-    controller = UMMController(Adapter())
-    initial = request()
-    initial.arrival_id = object()
-    reasoner = controller.advance(initial)
-    assert reasoner.arrival_id is initial.arrival_id
-    result = reply(reasoner, {"kind": "final", "text": "done"})
-    result.arrival_id = object()
-    final = controller.advance(result)
-    assert final.arrival_id is result.arrival_id
+def drain(controller):
+    messages = []
+    while not controller.outbox.empty():
+        messages.append(controller.outbox.get_nowait())
+    return messages
 
 
-@pytest.mark.asyncio
-async def test_legacy_reconstructed_payload_without_arrival_still_cleans_up():
-    obj = make_stage()
-    obj.active_requests.add("req")
-    await obj.execute(request())
-    await obj.route_result("req", request())
-    assert not obj.active_requests
-    assert not obj.request_arrivals
+SPLIT = (
+    SplitAdapter,
+    SPLIT_PHASES,
+    lambda: {
+        "reasoner": reasoner(
+            [generate("a cat", "drawing"), generate("a dog"), final("done")]
+        ),
+        "generator": generator([{"url": "cat"}, None]),
+    },
+    [
+        ("reason", "reasoner"),
+        ("generate", "generator"),
+        ("reason", "reasoner"),
+        ("generate", "generator"),
+        ("reason", "reasoner"),
+    ],
+    ["text", "image", "text"],
+)
+ONE_CALL = (
+    OneCallAdapter,
+    {"generate": "unified"},
+    lambda: {"unified": unified},
+    [("generate", "unified")],
+    ["text", "image"],
+)
+SHARED = (
+    SharedContextAdapter,
+    {"understand": "bagel", "generate": "bagel"},
+    lambda: {"bagel": bagel},
+    [("understand", "bagel"), ("generate", "bagel")],
+    ["text", "image"],
+)
 
 
 @pytest.mark.parametrize(
-    "boundary",
+    "adapter_cls, phases, stages, expected_trace, expected_kinds",
+    [SPLIT, ONE_CALL, SHARED],
+    ids=["split-engines", "one-engine", "shared-context"],
+)
+def test_each_execution_shape_completes_with_ordered_segments(
+    adapter_cls, phases, stages, expected_trace, expected_kinds
+):
+    adapter = adapter_cls()
+    controller = make_controller(adapter, phases)
+    phase_streams = []
+
+    def recording(run):
+        def record(payload):
+            phase_streams.append(payload.request.params["stream"])
+            return run(payload)
+
+        return record
+
+    phase_stages = {name: recording(run) for name, run in stages().items()}
+    result, trace = drive(controller, phase_stages, initial(stream=True))
+    assert trace == expected_trace
+    # Only the controller streams. A phase stage that streamed would have no
+    # stream target.
+    assert phase_streams == [False] * len(trace)
+    streamed = [message.data for message in drain(controller)]
+    assert [segment["kind"] for segment in streamed] == expected_kinds
+    assert [segment["segment_index"] for segment in streamed] == list(
+        range(len(streamed))
+    )
+    assert len({segment["execution_id"] for segment in streamed}) == 1
+    # The final result does not repeat media the client already streamed.
+    assert result.data["segments"] == [
+        {name: value for name, value in segment.items() if name != "data"}
+        for segment in streamed
+    ]
+    assert adapter.closed == ["completed"]
+    assert not controller.contexts and not getattr(adapter, "histories", None)
+
+
+def test_stale_duplicate_forged_and_lost_continuations_never_advance():
+    adapter = SplitAdapter()
+    controller = make_controller(adapter)
+    first = controller.advance(initial())
+    token = first.request.metadata[CONTINUATION_METADATA_KEY]
+    forged = reply(first, generate("x"))
+    forged.request = replace(
+        first.request,
+        metadata={CONTINUATION_METADATA_KEY: replace(token, nonce="forged")},
+    )
+    assert controller.advance(forged) is None
+    second = controller.advance(reply(first, generate("a cat")))
+    assert controller.advance(reply(first, generate("again"))) is None
+    expected = second.request.metadata[CONTINUATION_METADATA_KEY]
+    assert controller.contexts["req"].expected == expected
+    rebuilt = StagePayload("req", OmniRequest(second.request.inputs), {"media": None})
+    with pytest.raises(RuntimeError, match="lost its continuation"):
+        controller.advance(rebuilt)
+    assert adapter.closed == ["failed"] and not controller.contexts
+    with pytest.raises(RuntimeError, match="inactive request"):
+        controller.advance(reply(second, {"media": {"url": "late"}}))
+
+
+def test_abort_while_waiting_or_mid_transition_closes_once_and_publishes_nothing():
+    adapter = SplitAdapter()
+    controller = make_controller(adapter)
+    controller.advance(initial())
+    controller.abort("req")
+    assert adapter.closed == ["aborted"] and not controller.contexts
+
+    entered, release = threading.Event(), threading.Event()
+
+    class Blocking(SplitAdapter):
+        def advance(self, context, phase, result):
+            entered.set()
+            release.wait(timeout=5)
+            return super().advance(context, phase, result)
+
+    adapter = Blocking()
+    controller = make_controller(adapter)
+    dispatched = controller.advance(initial(stream=True))
+    outcome = []
+    worker = threading.Thread(
+        target=lambda: outcome.append(
+            controller.advance(reply(dispatched, generate("a cat", "drawing")))
+        )
+    )
+    worker.start()
+    assert entered.wait(timeout=5)
+    controller.abort("req")
+    assert adapter.closed == []
+    release.set()
+    worker.join(timeout=5)
+    assert outcome == [None]
+    assert adapter.closed == ["aborted"]
+    assert controller.outbox.empty() and not controller.contexts
+    controller.advance(initial("other"))
+    controller.stop()
+    controller.stop()
+    assert adapter.closed == ["aborted", "shutdown"]
+
+
+def test_deadline_fails_a_waiting_request_once_and_bounds_adapter_work():
+    clock = [0.0]
+    adapter = SplitAdapter()
+    controller = make_controller(
+        adapter, limits=limits(timeout_s=1), clock=lambda: clock[0]
+    )
+    dispatched = controller.advance(initial())
+    clock[0] = 1.0
+    controller.expire()
+    controller.expire()
+    admitted, error = drain(controller)
+    assert (admitted.type, error.type) == ("admitted", "error")
+    assert "timeout_s=1" in str(error.data) and adapter.closed == ["expired"]
+    with pytest.raises(RuntimeError, match="inactive request"):
+        controller.advance(reply(dispatched, generate("late")))
+
+    class Slow(SplitAdapter):
+        def advance(self, context, phase, result):
+            clock[0] = 5.0
+            return super().advance(context, phase, result)
+
+    adapter = Slow()
+    controller = make_controller(
+        adapter, limits=limits(timeout_s=1), clock=lambda: clock[0]
+    )
+    clock[0] = 0.0
+    dispatched = controller.advance(initial(stream=True))
+    with pytest.raises(TimeoutError, match="deadline"):
+        controller.advance(reply(dispatched, generate("a cat", "late text")))
+    assert adapter.closed == ["failed"]
+    assert controller.outbox.empty() and not controller.contexts
+
+
+def test_scheduler_loop_sweeps_the_deadline_of_a_waiting_request():
+    controller = make_controller(SplitAdapter(), limits=limits(timeout_s=0.1))
+    worker = threading.Thread(target=controller.start)
+    worker.start()
+    try:
+        controller.inbox.put(IncomingMessage("req", "new_request", initial()))
+        assert controller.outbox.get(timeout=2).type == "result"
+        assert controller.outbox.get(timeout=2).type == "admitted"
+        error = controller.outbox.get(timeout=2)
+        assert error.type == "error" and "deadline" in str(error.data)
+    finally:
+        controller.stop()
+        worker.join(timeout=2)
+    assert not worker.is_alive() and not controller.contexts
+
+
+@pytest.mark.parametrize(
+    "bounds, script, media, name, published, status",
     [
-        "start",
-        "reasoner_request",
-        "generation_request",
-        "interpret_reasoner",
-        "incorporate_media",
+        (
+            {"max_retained_bytes": 160},
+            [generate("a cat")],
+            [{"url": "x" * 200}],
+            "max_retained_bytes",
+            0,
+            500,
+        ),
+        ({"max_retained_bytes": 10}, [], [], "max_retained_bytes", 0, 400),
+        (
+            {"max_outputs": 1},
+            [generate("a cat", "drawing")],
+            [{}],
+            "max_outputs",
+            1,
+            500,
+        ),
+        (
+            {"max_dispatches": 3},
+            [generate("a cat"), generate("over")],
+            [{"url": "cat"}],
+            "max_dispatches",
+            1,
+            500,
+        ),
+    ],
+    ids=["generated-bytes", "client-bytes", "outputs", "dispatches"],
+)
+def test_bounds_reject_the_whole_transition(
+    bounds, script, media, name, published, status
+):
+    adapter = SplitAdapter()
+    controller = make_controller(adapter, limits=limits(**bounds))
+    stages = {"reasoner": reasoner(script), "generator": generator(media)}
+    try:
+        result, _ = drive(controller, stages, initial(stream=True))
+    except RuntimeError as exc:
+        error = exc
+    else:
+        # A client-caused rejection is reported through the outbox.
+        assert result is None
+        error = drain(controller).pop().data
+    assert f"factory.{name}" in str(error)
+    assert generation_error_status_code(RuntimeError(str(error))) == status
+    assert adapter.closed == ["failed"] and not controller.contexts
+    # Earlier transitions streamed their segments, the rejected one none.
+    assert [m.type for m in drain(controller)] == ["stream"] * published
+
+
+def test_admission_rejects_excess_and_session_requests_and_keeps_live_ones():
+    controller = make_controller(SplitAdapter(), limits=limits(max_active=1))
+    first = controller.advance(initial())
+    assert controller.advance(initial("excess")) is None
+    session = initial("session")
+    session.request.metadata[SESSION_METADATA_KEY] = {"operation": "open"}
+    assert controller.advance(session) is None
+    errors = drain(controller)
+    assert [error.request_id for error in errors] == ["excess", "session"]
+    assert [
+        generation_error_status_code(RuntimeError(str(error.data))) for error in errors
+    ] == [503, 400]
+    assert list(controller.contexts) == ["req"]
+    done = controller.advance(reply(first, final("done")))
+    assert route_umm("req", done) == "output"
+
+
+def test_unconsumed_engine_context_fails_the_request():
+    adapter = SharedContextAdapter(consume=False)
+    controller = make_controller(adapter, {"understand": "bagel"})
+    with pytest.raises(RuntimeError, match="unconsumed"):
+        drive(controller, {"bagel": bagel}, initial())
+    assert adapter.closed == ["failed"] and not controller.contexts
+
+
+def umm_stages(**changes):
+    controller = {
+        "factory_path": CONTROLLER_FACTORY_PATH,
+        "next": ["reasoner", "generator", "output"],
+        "route_fn": ROUTE_FN_PATH,
+        "stream_to": ["output"],
+        "stream_done_to_fn": STREAM_DONE_FN_PATH,
+        "factory": FactoryArgs(phases=SPLIT_PHASES, max_active=4),
+        **changes.get("orchestrator", {}),
+    }
+    output = {
+        "factory_path": OUTPUT_FACTORY_PATH,
+        "terminal": True,
+        "can_accept_stream_before_payload": True,
+        **changes.get("output", {}),
+    }
+    return [
+        stage("orchestrator", **controller),
+        stage("output", **output),
+        stage("reasoner", next="orchestrator", process="reasoner"),
+        stage(
+            "generator",
+            **{
+                "next": "orchestrator",
+                "process": "generator",
+                **changes.get("generator", {}),
+            },
+        ),
+    ]
+
+
+@pytest.mark.parametrize(
+    "changes, message",
+    [
+        ({}, None),
+        ({"orchestrator": {"next": ["reasoner", "output"]}}, "next must name"),
+        (
+            {"orchestrator": {"factory": FactoryArgs(phases={"reason": "output"})}},
+            "factory.phases",
+        ),
+        ({"orchestrator": {"stream_to": ["reasoner"]}}, "stream_to must be"),
+        ({"generator": {"next": "output"}}, "whose next is"),
+        ({"output": {"process": "elsewhere"}}, "share a process"),
+    ],
+    ids=[
+        "valid",
+        "undeclared-phase-stage",
+        "phase-to-output",
+        "no-relay",
+        "phase-skips-controller",
+        "split",
     ],
 )
-def test_adapter_work_cannot_admit_a_transition_after_its_deadline(
-    boundary, monkeypatch
-):
-    clock = [0.0]
-    adapter = Adapter()
-    original = getattr(adapter, boundary)
+def test_pipeline_config_accepts_only_the_umm_wiring(changes, message):
+    def build():
+        config = UMMPipelineConfig(
+            model_path="model", entry_stage="orchestrator", stages=umm_stages(**changes)
+        )
+        build_compiled_process_topology(config)
+        return config
 
-    def slow(*args, **kwargs):
-        value = original(*args, **kwargs)
-        clock[0] = 2.0
-        return value
-
-    monkeypatch.setattr(adapter, boundary, slow)
-    controller = UMMController(
-        adapter, limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
-    )
-    with pytest.raises(TimeoutError, match="deadline"):
-        current = controller.advance(request(stream=True))
-        if boundary == "interpret_reasoner":
-            controller.advance(reply(current, {"kind": "final", "text": "late text"}))
-        else:
-            current = controller.advance(generate(current))
-            controller.advance(reply(current, {"url": "late media"}))
-    assert controller.active_sessions == 0
-    assert controller.outbox.empty()
+    if message is None:
+        config = build()
+        assert config.entry_stage_admission_limit() == 4
+        assert config.stage_factory_kwargs("orchestrator") == {"output_stage": "output"}
+    else:
+        with pytest.raises(ValueError, match=message):
+            build()
 
 
-@pytest.mark.asyncio
-async def test_expired_queued_continuation_is_not_forwarded_and_fails_once():
-    clock = [0.0]
-    controller = UMMController(
-        Adapter(), limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
-    )
-    obj = make_stage(
+async def settle(stages):
+    pending = [
+        item.task
+        for obj in stages.values()
+        for item in obj.comm.pending.values()
+        if item.task is not None
+    ]
+    if pending:
+        await asyncio.wait_for(asyncio.gather(*pending), timeout=2)
+    else:
+        pass
+
+
+def real_stages(controller, relay, *, reasoner_script, generator_script):
+    stages = {}
+    crossed = []
+
+    class Bridge(RecordingStageControlPlane):
+        async def send_to_stage(self, target, endpoint, msg):
+            await super().send_to_stage(target, endpoint, msg)
+            raw = json.loads(json.dumps(msg.to_dict()))
+            if isinstance(msg, DataAckMessage):
+                stages[target].comm.ack_transfer(DataAckMessage.from_dict(raw))
+                return
+            else:
+                pass
+            ready = DataReadyMessage.from_dict(raw)
+            ref = DataRef.from_dict(ready.data_ref)
+            header = pickle.loads(base64.b64decode(ref.header))
+            token = header.request.metadata.get(CONTINUATION_METADATA_KEY)
+            crossed.append((msg.from_stage, target, isinstance(token, Continuation)))
+            await stages[target].on_data_ready(ready)
+
+    names = ("orchestrator", "output", "reasoner", "generator")
+    endpoints = {name: "inproc://" + name for name in names}
+    dispatcher = LocalStageDispatcher()
+    local = {"local_dispatcher": dispatcher}
+    stages["orchestrator"] = make_stage(
         name="orchestrator",
-        scheduler=controller,
-        is_terminal=True,
         get_next=route_umm,
+        endpoints=endpoints,
+        control_plane=Bridge(),
+        relay=ShmRelay("orchestrator", device="cpu", credits=1),
+        scheduler=controller,
+        stream_targets=["output"],
+        get_stream_done_targets=umm_stream_done_targets,
+        same_process_targets={"output"},
+        **local,
     )
-    obj.send_to_stage = AsyncMock()
-    payload = request()
-    obj.active_requests.add("req")
-    await obj.execute(payload)
-    result = controller.advance(payload)
-    controller.emit_result("req", result, controller.outbox)
-    clock[0] = 2.0
-    controller.expire()
-    await obj.drain_outbox_external()
-    assert obj.send_to_stage.await_count == 0
-    assert len(obj.control_plane.completions) == 1
-    assert obj.control_plane.completions[0].success is False
-    assert controller.active_sessions == 0
+    stages["output"] = make_stage(
+        name="output",
+        endpoints=endpoints,
+        scheduler=relay,
+        is_terminal=True,
+        can_accept_stream_before_payload=True,
+        same_process_targets={"orchestrator"},
+        **local,
+    )
+    stages["output"].stream_queue = StreamQueue(max_pending=64)
+    stages["output"].control_plane.send_stream = AsyncMock()
+    dispatcher.register_many([stages["orchestrator"], stages["output"]])
+    for name, script in (
+        ("reasoner", reasoner(reasoner_script)),
+        ("generator", generator(generator_script)),
+    ):
+        stages[name] = make_stage(
+            name=name,
+            get_next=lambda *_: "orchestrator",
+            endpoints=endpoints,
+            control_plane=Bridge(),
+            relay=ShmRelay(name, device="cpu", credits=1),
+        )
+        stages[name].script = script
+    return stages, crossed
 
 
-def test_route_validation_expires_once_but_delivers_accepted_final_snapshots():
-    clock = [0.0]
-    controller = UMMController(
-        Adapter(), limits=UMMLimits(timeout_s=1), clock=lambda: clock[0]
-    )
-    result = controller.advance(request())
-    clock[0] = 2.0
-    assert controller.validate_result(result) is False
-    assert controller.validate_result(result) is False
-    controller.expire()
-    assert controller.outbox.qsize() == 1
-    assert controller.outbox.get_nowait().type == "error"
-    current = controller.advance(request("fresh"))
-    final = controller.advance(reply(current, {"kind": "final", "text": "done"}))
-    clock[0] = 4.0
-    assert controller.validate_result(final) is True
+async def run_real_stages(stages, controller, rid="req"):
+    """Route through real Stage objects, the orchestrator through its outbox."""
+
+    async def orchestrate():
+        item = controller.inbox.get_nowait().data
+        controller.emit_result(rid, controller.advance(item), controller.outbox)
+        await asyncio.wait_for(stages["orchestrator"].drain_outbox_external(), 2)
+        await settle(stages)
+
+    await orchestrate()
+    while not stages["reasoner"].scheduler.inbox.empty() or not (
+        stages["generator"].scheduler.inbox.empty()
+    ):
+        for name in ("reasoner", "generator"):
+            inbox = stages[name].scheduler.inbox
+            if inbox.empty():
+                continue
+            else:
+                pass
+            item = inbox.get_nowait().data
+            result = reply(item, stages[name].script(item))
+            await asyncio.wait_for(stages[name].route_result(rid, result), 2)
+            await settle(stages)
+            await orchestrate()
+    output = stages["output"]
+    for _ in range(200):
+        await asyncio.wait_for(output.drain_outbox_external(), 2)
+        if output.control_plane.completions:
+            break
+        else:
+            await asyncio.sleep(0.01)
 
 
 @pytest.mark.asyncio
-async def test_readmitted_retired_id_fails_at_entry_and_fresh_identity_recovers():
-    from sglang_omni.pipeline.coordinator import Coordinator
-    from tests.unit_test.fixtures.pipeline_fakes import RecordingCoordinatorControlPlane
-
-    coordinator = Coordinator(
-        "inproc://complete",
-        "inproc://abort",
-        entry_stage="orchestrator",
-        terminal_stages=["orchestrator"],
+async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage():
+    controller = create_umm_controller(
+        "model",
+        adapter=f"{__name__}.split_adapter",
+        phases=SPLIT_PHASES,
+        output_stage="output",
+        **{
+            "max_dispatches": 17,
+            "max_outputs": 17,
+            "max_active": 4,
+            "max_retained_bytes": 1 << 20,
+            "timeout_s": 60.0,
+        },
     )
-    control = RecordingCoordinatorControlPlane()
-    coordinator.control_plane = control
-    coordinator.register_stage("orchestrator", "inproc://orchestrator")
-    obj = make_stage(name="orchestrator", is_terminal=True)
+    relay = create_umm_output_stage()
+    relay_thread = threading.Thread(target=relay.start)
+    relay_thread.start()
+    stages, crossed = real_stages(
+        controller,
+        relay,
+        reasoner_script=[
+            generate("a cat", "drawing"),
+            generate("a dog"),
+            final("done"),
+        ],
+        generator_script=[{"url": "cat"}, {"url": "dog"}],
+    )
+    try:
+        stages["orchestrator"].active_requests.add("req")
+        await stages["orchestrator"].execute(initial(stream=True))
+        await run_real_stages(stages, controller)
+        output = stages["output"]
+        assert [c.success for c in output.control_plane.completions] == [True]
+        streams = [call.args[0] for call in output.control_plane.send_stream.mock_calls]
+        assert [message.chunk_id for message in streams] == [0, 1, 2, 3]
+        assert [message.chunk["kind"] for message in streams] == [
+            "text",
+            "image",
+            "image",
+            "text",
+        ]
+        assert [message.chunk["data"] for message in streams][1:3] == [
+            {"url": "cat"},
+            {"url": "dog"},
+        ]
+        result = output.control_plane.completions[0].result
+        assert [s["segment_index"] for s in result["segments"]] == [0, 1, 2, 3]
+        # Five dispatches cross the relay to a phase and back, each carrying
+        # its continuation. The completed request reaches the output locally.
+        assert len(crossed) == 10 and all(token for *_, token in crossed)
+        assert stages["orchestrator"].control_plane.completions == []
+        for obj in stages.values():
+            assert not obj.active_requests and not obj.comm.pending
+        assert not controller.contexts
+    finally:
+        controller.stop()
+        relay.stop()
+        relay_thread.join(timeout=2)
+        tasks = [
+            task for obj in stages.values() for task in obj.comm.send_workers.values()
+        ]
+        for obj in stages.values():
+            await obj.comm.close()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
+        else:
+            pass
 
-    first = asyncio.create_task(coordinator.submit("req", "initial"))
-    await asyncio.sleep(0)
-    await obj.on_submit(control.submitted[-1][2])
-    await coordinator.abort("req")
-    obj.on_abort("req")
-    with pytest.raises(asyncio.CancelledError):
-        await first
-    queued = obj.scheduler.inbox.qsize()
 
-    repeated = asyncio.create_task(coordinator.submit("req", "reused"))
-    await asyncio.sleep(0)
-    await obj.on_submit(control.submitted[-1][2])
-    assert obj.scheduler.inbox.qsize() == queued
-    await coordinator.handle_completion(obj.control_plane.completions[-1])
-    with pytest.raises(
-        RuntimeError,
-        match=r"^Request req \(retired after abort or failure, use a fresh "
-        r"request ID\) already exists$",
-    ):
-        await asyncio.wait_for(repeated, timeout=1)
-    completions = len(obj.control_plane.completions)
-    await obj.receive_payload_from_stage("req", "reasoner", request())
-    assert len(obj.control_plane.completions) == completions
-    assert obj.scheduler.inbox.qsize() == queued
-
-    fresh = asyncio.create_task(coordinator.submit("fresh", "healthy"))
-    await asyncio.sleep(0)
-    message = control.submitted[-1][2]
-    await obj.on_submit(message)
-    message.data.data = {"text": "healthy"}
-    await obj.route_result("fresh", message.data)
-    await coordinator.handle_completion(obj.control_plane.completions[-1])
-    assert await asyncio.wait_for(fresh, timeout=1) == {"text": "healthy"}
-    assert not obj.active_requests
-    assert not obj.request_arrivals
+@pytest.mark.asyncio
+async def test_waiting_controller_reports_its_deadline_through_its_stage():
+    clock = [0.0]
+    controller = make_controller(
+        SplitAdapter(), limits=limits(timeout_s=1), clock=lambda: clock[0]
+    )
+    orchestrator = make_stage(
+        name="orchestrator", get_next=route_umm, scheduler=controller
+    )
+    orchestrator.send_to_stage = AsyncMock()
+    orchestrator.active_requests.add("req")
+    await orchestrator.execute(initial())
+    controller.emit_result(
+        "req", controller.advance(controller.inbox.get_nowait().data), controller.outbox
+    )
+    await orchestrator.drain_outbox_external()
+    # The dispatch left the stage, which no longer tracks the request.
+    assert orchestrator.send_to_stage.await_count == 1
+    assert not orchestrator.active_requests
+    clock[0] = 2.0
+    controller.expire()
+    await orchestrator.drain_outbox_external()
+    (failure,) = orchestrator.control_plane.completions
+    assert not failure.success and "timeout_s=1" in failure.error
+    assert not orchestrator.active_requests and "req" in orchestrator.aborted

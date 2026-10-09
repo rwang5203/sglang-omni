@@ -65,9 +65,11 @@ def resolve_coordinator_max_in_flight(
     *,
     logical_process_plan: LogicalProcessPlan,
 ) -> int | None:
-    """Return an explicit request cap or native generation admission capacity."""
-    if config.max_in_flight is not None:
-        return config.max_in_flight
+    """Return the entry or generation stage capacity summed across replicas."""
+    entry_limit = config.entry_stage_admission_limit()
+    if entry_limit is not None:
+        entry_process = logical_process_plan.process_of(config.resolved_entry_stage)
+        return entry_limit * entry_process.num_replicas
     else:
         pass
     config_cls = type(config)

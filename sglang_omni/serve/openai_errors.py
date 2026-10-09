@@ -47,6 +47,7 @@ _BAD_REQUEST_MARKERS = (
     "PersonaPlex takes one caller recording",
     "Unsupported PersonaPlex audio input",
     "; packaged voices:",
+    "Invalid UMM request: ",
 )
 _BAD_REQUEST_PATTERNS = (
     re.compile(

@@ -19,8 +19,10 @@ from sglang_omni.config.schema import (
     CustomVoiceConfig,
     EndpointsConfig,
     PipelineConfig,
+    ProcessConfig,
     StageConfig,
 )
+from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, StageWorkerProcessSpec
 from sglang_omni.profiler.event_recorder import get_recorder
 from tests.unit_test.fixtures.pipeline_fakes import FakeMpContext, FakeRelay
@@ -318,16 +320,36 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("entry_limit", "expected_max_in_flight"), [(None, None), (3, 6)]
+)
+def test_coordinator_cap_follows_an_entry_stage_that_admits_requests(
+    tmp_path: Path, entry_limit: int | None, expected_max_in_flight: int | None
+) -> None:
+    class EntryAdmitsConfig(PipelineConfig):
+        def entry_stage_admission_limit(self) -> int | None:
+            return entry_limit
+
+    config = EntryAdmitsConfig(
+        **{
+            **make_config(tmp_path).model_dump(),
+            "processes": {"pipeline": ProcessConfig(num_replicas=2)},
+        }
+    )
+    plan, _ = compile_logical_processes(config)
+
+    assert (
+        mp_runner.resolve_coordinator_max_in_flight(config, logical_process_plan=plan)
+        == expected_max_in_flight
+    )
+
+
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_in_flight", [None, 2])
 async def test_mp_runner_stop_cleans_runtime_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    max_in_flight: int | None,
 ) -> None:
     """Preserves IPC runtime directory cleanup when the runner stops."""
-
-    expected_max_in_flight = max_in_flight
 
     class FakeCoordinator:
         def __init__(
@@ -341,7 +363,6 @@ async def test_mp_runner_stop_cleans_runtime_dir(
             logical_process_plan=None,
             max_in_flight=None,
         ) -> None:
-            assert max_in_flight == expected_max_in_flight
             del (
                 abort_endpoint,
                 entry_stage,
@@ -409,9 +430,7 @@ async def test_mp_runner_stop_cleans_runtime_dir(
     capacity = Mock(return_value=8)
     monkeypatch.setattr(mp_runner, "effective_cpu_count", capacity)
 
-    config = make_config(tmp_path)
-    config.max_in_flight = max_in_flight
-    runner = mp_runner.MultiProcessPipelineRunner(config)
+    runner = mp_runner.MultiProcessPipelineRunner(make_config(tmp_path))
     await runner.start()
     capacity.assert_called_once_with()
     assert len([path for path in tmp_path.iterdir() if path.is_dir()]) == 1

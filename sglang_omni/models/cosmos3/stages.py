@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
+from sglang_omni.pipeline.umm import CONTINUATION_METADATA_KEY
 from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
@@ -229,7 +230,7 @@ class NativeGenerationScheduler(SimpleScheduler):
 
     def claim_result(self, result: StagePayload, *, terminal: bool) -> bool:
         # Inline UMM output has already released its temporary directory.
-        if result.continuation is not None:
+        if CONTINUATION_METADATA_KEY in result.request.metadata:
             return True
         else:
             pass
@@ -313,11 +314,7 @@ class NativeGenerationScheduler(SimpleScheduler):
 
     def generate(self, payload: StagePayload) -> StagePayload:
         params = build_sampling_params(payload, self.output_dir)
-        inline = payload.continuation is not None
-        if inline and payload.continuation.phase != "generation":
-            raise ValueError("Native generation received a non-generation continuation")
-        else:
-            pass
+        inline = CONTINUATION_METADATA_KEY in payload.request.metadata
         if inline and params.get("num_outputs_per_prompt", 1) != 1:
             raise ValueError("Inline generation requires one output per turn")
         else:
