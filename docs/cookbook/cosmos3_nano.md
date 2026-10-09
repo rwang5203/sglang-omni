@@ -1,16 +1,16 @@
 # Cosmos3 Nano serving
 
-Nano reuses native SGLang `Engine` and `OpenAIServingChat` for understanding and `multimodal_gen.DiffGenerator` for generation. Omni owns request routing, continuation state and delivery. Native SGLang owns model loading, scheduling, KV caches, codecs and parallelism.
+Nano reuses native SGLang `Engine` and `OpenAIServingChat` for understanding and `multimodal_gen.DiffGenerator` for generation. Omni owns request routing, interleaving state and delivery. Native SGLang owns model loading, scheduling, KV caches, codecs and parallelism.
 
-## SGLang prerequisites
+## Requirements
 
-Nano needs an SGLang build that provides the SRT Cosmos3 model and native chat serving APIs, cooperative SDK cancellation, scheduler owner-failure propagation, video job settlement, the Nano modality contracts and native `Engine` cleanup at shutdown. Recent SGLang releases, including the pinned one, provide the model and chat APIs, but the other capabilities come from coordinated SGLang changes that no published release contains yet, so public packages alone cannot reproduce this setup.
+The pinned SGLang release serves Nano. Install sglang-omni as a package (`pip install -e .`), so native SGLang finds the Omni generation plugin through its `sglang.multimodal_gen.plugins` entry point. The plugin lets an aborted or disconnected request stop its native generation within about one denoising step, and lets a request fail promptly when the native generation worker dies. If `SGLANG_PLUGINS` is set, it must list `omni_generation_cancellation`. Without the plugin, or with more than one native GPU for generation, startup logs a warning that names the reason, and an aborted request keeps the generation stage busy until its native generation finishes. A later SGLang that cancels natively is used instead of the plugin.
 
-Startup stops with an error that names the missing capability when it can detect one. The generation stage requires cooperative cancellation (`DiffGenerator.supports_cancellation`), because without it an aborted request cannot stop its native generation and a request in flight when the generation worker dies waits indefinitely. Even with a capable build, a configuration that cannot cancel cooperatively, such as more than one native GPU, logs a warning at startup and keeps that cost, and so does a request with more than one output per prompt. The native media routes require scheduler owner-failure support (`worker_failure in AsyncSchedulerClient.initialize`), because without it a request in flight when the generation worker dies waits for its client deadline. Startup does not detect the other capabilities, so confirm them in the installed build. Audiovisual generation requires the full Nano checkpoint and FFmpeg with AAC support. Policy-DROID requires its separate checkpoint. Keep checkpoint configuration and tokenizer files alongside the weights.
+Native Cosmos3 guardrails run when the `cosmos-guardrail` package is installed. Set `SGLANG_DISABLE_COSMOS3_GUARDRAILS=1` to turn them off, for example on hosts without network access to the guardrail checkpoint. Audiovisual generation requires the full Nano checkpoint and FFmpeg with AAC support. Keep checkpoint configuration and tokenizer files alongside the weights.
 
 ## Interleaved understanding and generation
 
-Save this as `cosmos3.yaml`. The default placement uses visible GPU 0 for generation, visible GPU 1 for the Reasoner and CPU for orchestration, so it needs two visible GPUs. With one visible GPU, startup stops with a GPU id out of range error for the reasoner stage. Set `stages.reasoner.gpu` and `stages.generation.gpu`, or pass `--reasoner.gpu` and `--generation.gpu`, to choose other devices. Placement refuses both native stages on one GPU unless each declares `gpu_memory_fraction` or `total_reserve_bytes`, and that sharing has not been qualified.
+Save this as `cosmos3.yaml`. The default placement uses visible GPU 0 for generation, visible GPU 1 for the Reasoner and CPU for orchestration, so it needs two visible GPUs. Set `stages.reasoner.gpu` and `stages.generation.gpu`, or pass `--reasoner.gpu` and `--generation.gpu`, to choose other devices.
 
 ```yaml
 config_cls: Cosmos3UMMPipelineConfig
@@ -28,48 +28,30 @@ curl -N http://127.0.0.1:8000/generate \
   -d '{
     "prompt": "Create an image of a red cube, inspect it, then create a blue cube and compare them.",
     "stream": true,
-    "return_logprob": false,
-    "sampling_params": {"temperature": 0, "max_new_tokens": 1024},
-    "stage_params": {"generation": {"width": 640, "height": 640, "num_inference_steps": 35, "seed": 7}}
+    "stage_params": {"generation": {"width": 640, "height": 640, "seed": 7}}
   }'
 ```
 
-`/generate` streams each accepted text or media segment once through `event: segment`, then emits `event: complete` and `[DONE]`. The complete event carries the concatenated `text`, `finish_reason` and `segments` as `segment_index` and `kind` references without data. Failure emits `event: error` with the error `message`, `type` and status `code`. Set `return_logprob=false` for streaming. A non-streaming request returns `segments` with their data, concatenated `text` and `media`.
+The Reasoner answers each turn with a structured decision: generate an image or a video from a prompt, or give the final answer. Generated media returns to the Reasoner in its next turn, until it answers final or eight generations ran. Video generations default to 33 frames, and `stage_params.generation.num_frames` sets another count. With `action_mode` `forward_dynamics`, the Reasoner may only request videos. Other generation options in `stage_params.generation` apply to every generation of the request and are checked before the first turn.
 
-`/v1/chat/completions` exposes the same ordered extension as `choices[0].message.segments` or streamed `choices[0].delta.segment`. SDK results expose `CompletionResult.segments` and `GenerateChunk.segment`. The SDK reads the terminal result as segments only when its `type` is `umm_result`, as the controller sets it. Use a fresh request ID for every execution and close unfinished SDK iterators to propagate cancellation.
+Every accepted output is a segment with `type` `segment`, `execution_id`, a contiguous `segment_index`, `kind` (`text`, `image` or `video`) and `data`. Text data is a string. Media data carries `kind`, `mime_type`, `size_bytes`, `sha256` and `url`, a data URL with the bytes.
 
-Each segment has `session_id`, a contiguous `segment_index`, `kind` and `data`. Media carries inline bytes, MIME type, SHA-256 and byte count. The generator reads only its owned output, releases its temporary directory and sends those bytes into the next native image or video chat turn. The Reasoner chooses `generate` or `final` through a validated JSON decision. Internal model calls are non-streaming.
+- `/generate` streams each segment once as `event: segment`, then `event: complete` with `finish_reason` and the segments as references without data, then `[DONE]`. Failure emits `event: error` with the error `message`, `type` and status `code`. Without `stream`, the response carries the joined text segments as `text` and `segments` with their data. Leave `return_logprob` unset: interleaved results carry no logprobs, so the default is dropped and setting it or another rollout artifact to true returns 400. Other pipelines refuse `stream=true` on `/generate`.
+- `/v1/chat/completions` returns `choices[0].message.segments` beside the joined text, or streams each segment as `choices[0].delta.segment`, text segments also as `delta.content`.
+- The SDK returns `UMMCompletionResult.segments` from `Client.completion` and yields `UMMGenerateChunk.segment` from `Client.generate` with `stream=True`, both from `sglang_omni.client.types`.
 
-The controller defaults to 8 generation turns, 17 segments (one message and one media segment per turn plus the final text), 32 sessions, 64 MiB retained JSON per session and a 3600-second deadline. Override these under `stages.orchestrator.factory` using `max_turns`, `max_segments`, `max_sessions`, `max_context_bytes` and `timeout_s`. Without an explicit `max_segments`, the segment limit follows `max_turns`. Once no generation turn remains, the Reasoner can only choose `final`. A request that exceeds `max_turns`, `max_segments` or `max_context_bytes` fails with status 400 naming the limit and its override, and a request that outlives `timeout_s` fails with an error naming it. A non-streaming request returns the status as its HTTP status. A streaming request has already received HTTP 200, so its error carries the status as `code`.
+Decisions sample greedily. A sampling field the client sets, at the top level, in `stage_sampling.reasoner` or in `stage_params.reasoner`, applies to every decision. Length and stop settings never apply to decisions, since the decision format bounds their length. Chat media and generation `image_path` and `video_path` options follow `--allowed-local-media-path` and `--allowed-media-domain` and are refused with 400 before the first turn when the policy refuses them.
 
-The top-level `max_in_flight` (default 32) caps the requests the pipeline admits, and `max_sessions` caps live controller sessions. Keep `max_in_flight` at or below `max_sessions` and raise them together, so excess requests get status 503 at admission, reported the same way, before they reach the controller. Use native backend limits for model memory. Retained JSON limits do not measure peak host or GPU memory.
+The orchestrator bounds each request under `stages.orchestrator.factory`: `max_dispatches` (17, eight generations and the Reasoner turns around them), `max_outputs` (17), `max_active` (32 requests at once, which also caps admission, so excess requests get 503), `max_retained_bytes` (128 MiB) and `timeout_s` (3600). A request may retain up to `max_retained_bytes` of host memory in the orchestrator process, so 32 active requests hold at most 4 GiB. The largest output 17 dispatches can produce, eight videos at the 8 MiB inline limit and their turns, takes about 87 MiB, and the rest bounds the client's chat history. A request whose history leaves too little room is refused with 400 before any turn. Configuration loading refuses a `max_retained_bytes` or `max_outputs` that cannot hold the largest output of `max_dispatches`. A request that outlives `timeout_s` fails with an error naming it. A non-streaming request returns the status as its HTTP status. A streaming request has already received HTTP 200, so its error carries the status as `code`. Use a fresh request ID for every request, and close unfinished SDK iterators so the request is aborted.
 
 ## Direct generation
 
-For direct native generation, change `config_cls` to `Cosmos3PipelineConfig`. This uses visible GPU 0 and exposes native media routes.
+For native generation without interleaving, change `config_cls` to `Cosmos3PipelineConfig`. This uses visible GPU 0 and serves the native image, video and action routes described in [native media routes](../basic_usage/native_media_routes.md). SDK generation returns caller-owned saved files. Actions are served by the native action route.
 
-| Operation | HTTP route | Native options |
-| --- | --- | --- |
-| Image generation | `/v1/images/generations` | Prompt and native image sampling options |
-| Text, image or video to video | `/v1/videos` | Native input references and video sampling options |
-| Video with sound | `/v1/videos` | `generate_sound=true` and `sound_duration` matching the requested video duration |
-| Action-conditioned video | `/v1/videos` | `action_mode=forward_dynamics`, initial image and known actions |
-| Action prediction | `/v1/actions/generations` | `action_mode=policy` or `inverse_dynamics`, matching observation and domain |
-
-Video routes return jobs. Poll `/v1/videos/{id}` with a deadline, retrieve `/v1/videos/{id}/content`, and delete finished jobs with `DELETE /v1/videos/{id}`. SDK generation returns caller-owned saved files or structured action values. Native HTTP retention and SDK file ownership are separate contracts.
-
-The Policy-DROID checkpoint uses `raw_action_dim=8`. Match observation layout, units and normalization to the checkpoint. Actions and audiovisual codecs remain native model responsibilities. Image and video feedback are supported by this interleaving adapter. Sound in a returned video does not establish audio understanding, and action feedback loops require a separate adapter contract.
+The Policy-DROID checkpoint uses `raw_action_dim=8` in the joint position action space, as NVIDIA's reference policy server does. Match observation layout, units and normalization to the checkpoint.
 
 ## Reusing the serving pipeline
 
-Implement `UMMAdapter` from `sglang_omni.pipeline.umm` for another compatible model to prepare native Reasoner and generation requests, interpret decisions, incorporate generated media and expose segments. Its orchestrator factory returns `UMMController(adapter, limits=UMMLimits(...))`, as `create_umm_scheduler` does for Cosmos3. Keep model prompts, media conversion and modality restrictions in the adapter. Reuse the existing stage scheduler, transport and client delivery. The shared controller relies on these contracts:
+The interleaving controller is model agnostic. Another unified model implements `UMMAdapter` from `sglang_omni.pipeline.umm` with `start`, `advance`, `usage` and `close`, and subclasses `UMMPipelineConfig`, as `Cosmos3UMMAdapter` and `Cosmos3UMMPipelineConfig` do. Keep prompts, decision formats, media conversion and modality rules in the adapter. The developer reference describes the controller contract.
 
-- The orchestrator stage is terminal, routes with `route_umm` and lists exactly the stages named `reasoner` and `generation` in `next`. Startup rejects other names.
-- Both native stages set `next` to the orchestrator and return the input `StagePayload`, or a result that copies its `continuation`. A result without it fails the request.
-- Internal turns never stream. The controller sends them with `stream` false and streams accepted segments itself.
-- Generation returns inline media bytes rather than stage-local files, because the controller keeps media after the stage releases its outputs.
-- `reasoner_request` receives `remaining_generation_turns` and allows only a final decision when it is 0.
-- UMM pipelines refuse session operations.
-- `max_in_flight` stays at or below `max_sessions`.
-
-Qualify actual generated bytes in the following understanding turn, stale results, cancellation, deadlines and native ownership before enabling a new model. Interface reuse does not establish checkpoint quality or performance. H100 and robot task quality require separate qualification.
+Qualify generated bytes in the following understanding turn, cancellation, deadlines and native ownership before enabling a new model. Interface reuse does not establish checkpoint quality or performance.
