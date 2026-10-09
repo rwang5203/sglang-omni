@@ -192,6 +192,10 @@ class UMMRequestError(ValueError):
         super().__init__(self.PREFIX + detail)
 
 
+class UMMDeadlineError(TimeoutError):
+    """A UMM request reached its timeout_s deadline. Its close reason is expired."""
+
+
 def budget_error(name: str, limit: int, *, client: bool) -> Exception:
     # Before the first dispatch only the client's input exists, so a bound it
     # crosses is a client error. Later breaches come from model output.
@@ -275,8 +279,8 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         for request_id in request_ids:
             self.release(request_id, "shutdown")
 
-    def deadline_error(self) -> TimeoutError:
-        return TimeoutError(
+    def deadline_error(self) -> UMMDeadlineError:
+        return UMMDeadlineError(
             f"UMM request deadline exceeded after timeout_s={self.limits.timeout_s}. "
             "Raise stages.<orchestrator>.factory.timeout_s for longer requests"
         )
@@ -398,14 +402,17 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 step = self.adapter.advance(context, phase, data)
             result, added = self.apply(request_id, context, step, client=phase is None)
             self.check_deadline(context)
-        except BaseException:
+        except BaseException as exc:
             with self.lock:
                 context.busy = False
                 if self.contexts.get(request_id) is context:
                     self.contexts.pop(request_id)
                 else:
                     pass
-            self.close(context, context.closed or "failed")
+            reason: CloseReason = (
+                "expired" if isinstance(exc, UMMDeadlineError) else "failed"
+            )
+            self.close(context, context.closed or reason)
             raise
         with self.lock:
             context.busy = False

@@ -413,7 +413,7 @@ def test_deadline_fails_a_waiting_request_once_and_bounds_adapter_work():
     dispatched = controller.advance(initial(stream=True))
     with pytest.raises(TimeoutError, match="deadline"):
         controller.advance(reply(dispatched, generate("a cat", "late text")))
-    assert adapter.closed == ["failed"]
+    assert adapter.closed == ["expired"]
     assert controller.outbox.empty() and not controller.contexts
 
 
