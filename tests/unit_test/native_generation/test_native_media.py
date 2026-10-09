@@ -12,6 +12,10 @@ from sglang_omni.serve import create_app
 from sglang_omni.utils.imports import import_string
 
 
+def client_fields(server_args):
+    return frozenset({"control_path", "image_path", "prompt", "video_path"})
+
+
 class RunningClient:
     def health(self):
         return {"running": True}
@@ -68,7 +72,9 @@ def serve(omni, frontend, check):
         runtime_failure = asyncio.get_running_loop().create_future()
         frontend.mount(omni, runtime_failure)
         async with omni.router.lifespan_context(omni):
-            transport = httpx.ASGITransport(app=omni)
+            # Native handlers past the checks under test may fail without a
+            # scheduler, which then answers 500.
+            transport = httpx.ASGITransport(app=omni, raise_app_exceptions=False)
             async with httpx.AsyncClient(
                 transport=transport, base_url="http://omni"
             ) as client:
@@ -91,7 +97,7 @@ def test_native_routes_and_lifetime_are_composed_without_a_proxy(native):
     def health():
         return {"owner": "omni"}
 
-    frontend = media.NativeMediaFrontend.build({})
+    frontend = media.NativeMediaFrontend.build({}, client_fields)
 
     @frontend.app.get("/v1/images/owner")
     def owner():
@@ -137,7 +143,7 @@ def test_only_native_media_routes_are_served(native):
         response = await client.post("/v1/images/generations", json={})
         assert response.status_code == 422
 
-    serve(omni, media.NativeMediaFrontend.build({}), check)
+    serve(omni, media.NativeMediaFrontend.build({}, client_fields), check)
 
 
 @pytest.mark.parametrize("warmup_fails", [False, True])
@@ -152,7 +158,7 @@ def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
             pass
 
     native.warmup = warmup
-    frontend = media.NativeMediaFrontend.build({})
+    frontend = media.NativeMediaFrontend.build({}, client_fields)
 
     async def check(client, runtime_failure):
         failed = asyncio.ensure_future(frontend.wait_failed())
@@ -198,7 +204,7 @@ def test_native_worker_failure_is_used_when_installed(native, monkeypatch, insta
         assert received == [runtime_failure if installed else None]
         assert (await client.get("/v1/videos")).status_code == 200
 
-    serve(FastAPI(), media.NativeMediaFrontend.build({}), check)
+    serve(FastAPI(), media.NativeMediaFrontend.build({}, client_fields), check)
 
 
 @pytest.mark.parametrize("cause", ["scheduler", "stage"])
@@ -209,7 +215,7 @@ def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
     scheduler = context.socket(zmq.ROUTER)
     port = scheduler.bind_to_random_port("tcp://127.0.0.1")
     native.args.scheduler_endpoints = [f"tcp://127.0.0.1:{port}"]
-    frontend = media.NativeMediaFrontend.build({})
+    frontend = media.NativeMediaFrontend.build({}, client_fields)
     entered = asyncio.Event()
 
     @frontend.app.post("/v1/images/generations-waiting")
@@ -243,6 +249,69 @@ def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
         context.term()
 
 
+@pytest.mark.parametrize("configured", [False, True])
+def test_native_requests_follow_the_server_media_policy(
+    native, monkeypatch, tmp_path, configured
+):
+    import json
+
+    from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
+
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    outside = str(tmp_path / "clip.mp4")
+    connector = MultiModalResourceConnector(
+        allowed_local_media_path=allowed if configured else None,
+        allowed_media_domains=["media.example"] if configured else None,
+    )
+    monkeypatch.setattr(media, "get_global_resource_connector", lambda: connector)
+    remote = "https://media.example/frame.png"
+    # Every request reaches a native media route. A refusal names the field.
+    requests = [
+        ("/v1/videos", {"json": {"prompt": "a", "output_path": "/srv"}}, True),
+        ("/v1/videos", {"json": {"prompt": "a", "video_path": outside}}, configured),
+        ("/v1/videos", {"json": {"prompt": "a", "reference_url": remote}}, configured),
+        (
+            "/v1/videos",
+            {
+                "json": {
+                    "prompt": "a",
+                    "extra_params": json.dumps({"control_path": [outside]}),
+                }
+            },
+            configured,
+        ),
+        (
+            "/v1/actions/generations",
+            {"json": {"input": {"observation": {"image": f"file://{outside}"}}}},
+            configured,
+        ),
+        (
+            "/v1/images/edits",
+            {"data": {"prompt": "a", "url": outside}},
+            configured,
+        ),
+        (
+            "/v1/images/edits",
+            {"data": {"prompt": "a", "perf_dump_path": "/srv/perf.json"}},
+            True,
+        ),
+    ]
+
+    async def check(client, runtime_failure):
+        for path, body, refused in requests:
+            response = await client.post(path, **body)
+            blocked = response.status_code == 400 and (
+                "refused" in response.text or "cannot set" in response.text
+            )
+            assert blocked == refused, (path, body, response.text)
+        inside = {"prompt": "a", "video_path": str(allowed / "clip.mp4")}
+        response = await client.post("/v1/videos", json=inside)
+        assert "refused" not in response.text
+
+    serve(FastAPI(), media.NativeMediaFrontend.build({}, client_fields), check)
+
+
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
 
@@ -251,7 +320,7 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     monkeypatch.setattr(
         media.NativeMediaFrontend,
         "build",
-        lambda kwargs: built.append(kwargs) or frontend,
+        lambda kwargs, request_fields: built.append(kwargs) or frontend,
     )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
     prepare = import_string(Cosmos3PipelineConfig.native_media_factory)

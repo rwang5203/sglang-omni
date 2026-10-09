@@ -12,14 +12,16 @@ from __future__ import annotations
 
 import asyncio
 import inspect
+import json
 import logging
 import socket
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Callable, Iterator
 from contextlib import asynccontextmanager, suppress
 from functools import partial
 from pathlib import Path
+from urllib.parse import unquote, urlparse
 
-from fastapi import APIRouter, FastAPI
+from fastapi import APIRouter, Depends, FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from fastapi.routing import APIRoute
 from starlette.datastructures import URLPath
@@ -27,6 +29,10 @@ from starlette.routing import BaseRoute, Match, NoMatchFound
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sglang_omni.config import PipelineConfig
+from sglang_omni.preprocessing.resource_connector import (
+    MediaPolicyError,
+    get_global_resource_connector,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -35,10 +41,28 @@ LOOPBACK_HOSTS = (NATIVE_HOST, "localhost")
 # The native route families Omni serves: image generation and edits, video
 # jobs with retrieval, content and deletion, and action generation.
 ROUTE_PREFIXES = ("/v1/images", "/v1/videos", "/v1/actions")
+# Fields of those routes that carry a media path or URL, besides the *_path
+# request fields the served model declares. Action observations use image,
+# images and video.
+MEDIA_REFERENCE_FIELDS = frozenset(
+    {
+        "image",
+        "images",
+        "input_reference",
+        "reference_url",
+        "url",
+        "url[]",
+        "video",
+        "video_url",
+    }
+)
+# Containers native SGLang merges into a request, as JSON objects or strings.
+EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
 NativeServerKwargs = Callable[
     [str, int, dict[str, object], list[int] | None], dict[str, object]
 ]
+RequestFields = Callable[[object], frozenset[str]]
 
 
 def unused_port(exclude: set[int]) -> int:
@@ -59,12 +83,15 @@ def prepare_native_media_app(
     port: int,
     stage_name: str,
     server_kwargs: NativeServerKwargs,
+    request_fields: RequestFields,
 ) -> Callable[[], NativeMediaFrontend]:
     """Settle the native server arguments the stage and the routes share.
 
     Runs before any stage starts, because the stage process reads the
     overrides written here when it builds its native runtime. Returns the
-    builder of the frontend, which imports native SGLang.
+    builder of the frontend, which imports native SGLang. request_fields
+    names the request fields clients may set for the served model, the same
+    set the generation stage accepts.
     """
     stage = config.stage_named(stage_name)
     if not isinstance(stage.gpu, int):
@@ -100,7 +127,7 @@ def prepare_native_media_app(
         config.model_path, stage.gpu, kwargs, stage.runtime_gpu_ids
     )
     stage.factory.server_args_overrides = kwargs
-    return partial(NativeMediaFrontend.build, native_kwargs)
+    return partial(NativeMediaFrontend.build, native_kwargs, request_fields)
 
 
 class NativeMediaFrontend:
@@ -117,7 +144,7 @@ class NativeMediaFrontend:
     for the answer forever.
     """
 
-    def __init__(self, server_args: object) -> None:
+    def __init__(self, server_args: object, media_fields: frozenset[str]) -> None:
         from sglang.multimodal_gen.runtime.entrypoints.action import api as action_api
         from sglang.multimodal_gen.runtime.entrypoints.openai import (
             image_api,
@@ -125,6 +152,7 @@ class NativeMediaFrontend:
         )
 
         self.server_args = server_args
+        self.media_fields = media_fields
         self.ready = asyncio.Event()
         self.failure: BaseException | None = None
         self.failed = asyncio.Event()
@@ -140,8 +168,9 @@ class NativeMediaFrontend:
         app = FastAPI()
         app.state.server_args = server_args
         app.state.prompt_enhancer = None
-        app.include_router(image_api.router)
-        app.include_router(video_api.router)
+        police = [Depends(self.police_request)]
+        app.include_router(image_api.router, dependencies=police)
+        app.include_router(video_api.router, dependencies=police)
         if server_args.pipeline_config.supports_action_endpoint():
             actions = APIRouter()
             actions.routes.extend(
@@ -149,13 +178,15 @@ class NativeMediaFrontend:
                 for route in action_api.router.routes
                 if isinstance(route, APIRoute)
             )
-            app.include_router(actions)
+            app.include_router(actions, dependencies=police)
         else:
             pass
         self.app = app
 
     @classmethod
-    def build(cls, server_kwargs: dict[str, object]) -> NativeMediaFrontend:
+    def build(
+        cls, server_kwargs: dict[str, object], request_fields: RequestFields
+    ) -> NativeMediaFrontend:
         """Import the native runtime and build the frontend off the event loop."""
         from sglang.multimodal_gen.runtime.server_args import (
             ServerArgs,
@@ -164,7 +195,67 @@ class NativeMediaFrontend:
 
         server_args = ServerArgs.from_kwargs(**server_kwargs)
         set_global_server_args(server_args)
-        return cls(server_args)
+        fields = request_fields(server_args)
+        return cls(server_args, frozenset(f for f in fields if f.endswith("_path")))
+
+    async def police_request(self, request: Request) -> None:
+        """Apply the server media policy before a native route reads a request.
+
+        Fields that name server paths are refused. Without a configured policy,
+        media paths and URLs pass as on other routes. With one, local paths and
+        file URLs must resolve inside the allowed directory, and remote URLs are
+        refused while a domain allowlist is set, because native SGLang fetches
+        them itself and follows redirects without checking each hop.
+        """
+        content_type = request.headers.get("content-type", "")
+        if request.method not in ("PATCH", "POST", "PUT"):
+            return
+        elif "multipart/form-data" in content_type or "urlencoded" in content_type:
+            fields: dict[str, list[object]] = {}
+            for name, value in (await request.form()).multi_items():
+                fields.setdefault(name, []).append(value)
+            body: object = fields
+        elif "msgpack" in content_type:
+            import msgpack
+
+            try:
+                body = msgpack.unpackb(
+                    await request.body(), raw=False, strict_map_key=False
+                )
+            except ValueError:
+                return
+        else:
+            try:
+                body = await request.json()
+            except ValueError:
+                return
+        self.police_fields(body)
+
+    def police_fields(self, value: object) -> None:
+        if isinstance(value, dict):
+            for name, item in value.items():
+                name = str(name)
+                if name in EXTRA_CONTAINERS:
+                    item = parse_containers(item)
+                else:
+                    pass
+                if name.endswith("_path") and name not in self.media_fields:
+                    raise HTTPException(
+                        status_code=400,
+                        detail=f"Native media requests cannot set {name}, "
+                        "a path the server owns.",
+                    )
+                elif name in self.media_fields or name in MEDIA_REFERENCE_FIELDS:
+                    for source in text_values(item):
+                        police_media_reference(name, source)
+                else:
+                    pass
+                self.police_fields(item)
+        elif isinstance(value, list):
+            for item in value:
+                self.police_fields(item)
+        else:
+            pass
 
     @property
     def warming(self) -> bool:
@@ -359,6 +450,65 @@ class NativeMediaFrontend:
         else:
             # The response already started, so the connection just closes.
             pass
+
+
+def parse_containers(value: object) -> object:
+    if isinstance(value, str):
+        try:
+            return json.loads(value)
+        except ValueError:
+            return value
+    elif isinstance(value, list):
+        return [parse_containers(item) for item in value]
+    else:
+        return value
+
+
+def text_values(value: object) -> Iterator[str]:
+    if isinstance(value, str):
+        yield value
+    elif isinstance(value, (list, tuple)):
+        for item in value:
+            yield from text_values(item)
+    elif isinstance(value, dict):
+        for item in value.values():
+            yield from text_values(item)
+    else:
+        pass
+
+
+def police_media_reference(name: str, source: str) -> None:
+    """Refuse a media path or URL that the server media policy does not allow.
+
+    Follows the rules main applies to request media: without a policy the
+    reference passes, with one a bare path or file URL must sit in the
+    allowed directory. Inline media should use data URLs.
+    """
+    connector = get_global_resource_connector()
+    if (
+        connector.allowed_local_media_path is None
+        and not connector.allowed_media_domains
+    ) or source.startswith("data:"):
+        return
+    else:
+        pass
+    try:
+        if source.startswith(("http://", "https://")):
+            if connector.allowed_media_domains:
+                raise MediaPolicyError(
+                    "remote media is refused on native media routes while "
+                    "--allowed-media-domain is set, since native SGLang fetches "
+                    "it without checking each redirect. Send it as an upload or "
+                    "a data URL."
+                )
+            else:
+                pass
+        elif source.startswith("file://"):
+            connector.local_media_path(unquote(urlparse(source).path))
+        else:
+            connector.local_media_path(source)
+    except MediaPolicyError as exc:
+        raise HTTPException(status_code=400, detail=f"{name} refused: {exc}") from exc
 
 
 class NativeMediaRoutes(BaseRoute):
