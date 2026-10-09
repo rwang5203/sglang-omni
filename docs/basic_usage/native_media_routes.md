@@ -1,0 +1,32 @@
+# Native Media Routes
+
+Pipelines whose generation stage runs native SGLang `multimodal_gen`, such as Cosmos3, serve the native SGLang image, video and action routes from the Omni server. These requests go straight to the native scheduler that the generation stage owns, so their request and response formats are those of native SGLang.
+
+| Routes | Purpose |
+| --- | --- |
+| `POST /v1/images/generations`, `POST /v1/images/edits`, `GET /v1/images/{id}/content` | Image generation and editing |
+| `POST /v1/videos`, `GET /v1/videos`, `GET /v1/videos/{id}`, `GET /v1/videos/{id}/content`, `DELETE /v1/videos/{id}` | Video jobs |
+| `POST /v1/actions/generations`, `GET /v1/actions/metadata` | Action generation, when the checkpoint supports it |
+
+```bash
+sgl-omni serve --model-path /path/to/Cosmos3-Nano --port 8000
+curl http://127.0.0.1:8000/v1/images/generations \
+  -H 'Content-Type: application/json' \
+  -d '{"prompt": "A red cube on a wooden table", "size": "640x640", "response_format": "b64_json"}'
+```
+
+## Behavior
+
+- Only the routes above are served. Native weights, memory, LoRA, rollout, mesh, realtime, server info and stats routes are not, so use the Omni admin routes, which require the admin key when one is set.
+- The native scheduler listens on `127.0.0.1` whatever host the server binds. Startup fails if the generation stage's `server_args_overrides` set another `host`.
+- While native warmup runs, `/health` answers 503 with status `warming` and the native routes answer 503. A warmup failure stops the server with a nonzero exit status.
+- The Omni HTTP process builds the native server arguments for these routes, which creates one CUDA context on the generation GPU in that process, in addition to the generation stage's own processes.
+- If the native scheduler or the generation stage stops, requests in flight and new requests on these routes get 503 at once, and the server stops when the generation stage fails.
+
+## Media policy
+
+`--allowed-local-media-path` and `--allowed-media-domain` apply to every media path and URL in a native route request, including native extra parameters and action observations. With `--allowed-local-media-path`, local paths and file URLs must resolve inside that directory. While `--allowed-media-domain` is set, remote URLs are refused on these routes, because native SGLang fetches them itself and follows redirects without checking each one, so send such media as an upload or a data URL. Without either option, media references are read as on other routes. Requests can never set server paths such as `output_path`, `perf_dump_path` or model paths.
+
+## Retention
+
+Generated images and videos stay in the generation stage output directory (`stages.generation.factory.output_dir`, `outputs` by default), and native SGLang keeps one job record per request in server memory until the server stops. Native SGLang has no expiry for either. `DELETE /v1/videos/{id}` only removes the job record, so it neither stops a running job nor deletes its file. Remove old files from the output directory on a long running server. Uploaded inputs are kept only for their request or video job.
