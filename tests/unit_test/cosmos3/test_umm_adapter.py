@@ -545,18 +545,24 @@ def test_umm_variant_wires_the_controller_and_inline_generation(monkeypatch):
 
 
 @pytest.mark.parametrize(
-    "service_s, admitted, offered",
-    [(100.0, True, True), (200.0, False, True), (1200.0, False, False)],
+    "service_s, admitted, offered, ended",
+    [
+        (100.0, True, True, False),
+        (200.0, False, True, False),
+        (1200.0, False, False, True),
+    ],
 )
 def test_admission_refuses_requests_generation_cannot_finish_in_time(
-    service_s, admitted, offered
+    service_s, admitted, offered, ended
 ):
     now = {"t": 0.0}
     umm = controller(lambda: now["t"])
     # Before any generation was measured, requests are admitted.
     first = submit(umm, rid="a")
+    queued = submit(umm, rid="c")
     now["t"] = 1.0
     generation = umm.advance(reply(first, reasoner_reply()))
+    umm.advance(reply(queued, reasoner_reply()))
     assert generation.request.metadata[DEADLINE_METADATA_KEY] == [3600.0, 0]
     now["t"] = 1.0 + service_s
     resumed = umm.advance(reply(generation, {**media(), "service_s": service_s}))
@@ -564,9 +570,22 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
     # Reasoner turns of the measured second must end by the deadline 3600.
     schema = resumed.request.params["response_format"]["json_schema"]["schema"]
     assert ("anyOf" in schema) is offered
-    # The new request plans 8 generations behind the 7 still planned for the
-    # first, plus one younger generation per own one, and 9 Reasoner turns:
-    # 1 + service_s + service_s * 23 + 9 against its deadline 3601 + service_s.
+    # The first measurement plans again: c's queued generation, a younger one
+    # running ahead of it, and its final answer must still end by 3600, or c
+    # ends now with the deadline error instead of at its deadline.
+    umm.expire()
+    assert ("c" in umm.contexts) is not ended
+    if ended:
+        notices = [umm.outbox.get_nowait() for _ in range(umm.outbox.qsize())]
+        assert [(n.request_id, n.type) for n in notices] == [
+            ("c", "admitted"),
+            ("c", "error"),
+        ]
+        assert "deadline" in str(notices[1].data)
+    else:
+        pass
+    # The new request plans 8 generations behind those still planned for a
+    # and c, plus one younger generation per own one, and 9 Reasoner turns.
     second = submit(umm, rid="b")
     if admitted:
         assert route_umm("b", second) == "reasoner"
