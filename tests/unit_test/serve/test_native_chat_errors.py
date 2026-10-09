@@ -25,7 +25,9 @@ class NativeValidationClient:
         self.closed = 0
         self.scheduler = object.__new__(NativeReasonerScheduler)
         self.scheduler.engine = SimpleNamespace(
-            tokenizer_manager=SimpleNamespace(served_model_name="native-model")
+            tokenizer_manager=SimpleNamespace(
+                served_model_name="native-model", abort_request=lambda rid: None
+            )
         )
         self.scheduler.request_type = NativeChatRequest
         self.scheduler.max_media_bytes = None

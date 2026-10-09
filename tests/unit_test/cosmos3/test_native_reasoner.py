@@ -41,7 +41,7 @@ class NativeRequest(SimpleNamespace):
         "n",
         "temperature",
         "seed",
-        "max_tokens",
+        "max_completion_tokens",
         "stream",
         "stream_options",
         "logprobs",
@@ -253,7 +253,11 @@ def test_native_text_and_vision_parameters_preserved():
         fields["messages"][0]["content"][1]["image_url"]["url"] == original["images"][0]
     )
     assert original["messages"][0]["content"] == "What is here?"
-    assert (fields["temperature"], fields["seed"], fields["max_tokens"]) == (0.0, 0, 7)
+    assert (
+        fields["temperature"],
+        fields["seed"],
+        fields["max_completion_tokens"],
+    ) == (0.0, 0, 7)
     assert fields["return_meta_info"] and fields["return_token_ids"]
     assert fields["rid"] == "r1"
 
@@ -485,7 +489,7 @@ def test_abort_reaches_native_loop_and_suppresses_terminal_result():
         scheduler.abort("r1")
         with pytest.raises(queue.Empty):
             scheduler.outbox.get(timeout=0.15)
-        assert ("r1", False) in engine.aborts
+        assert engine.aborts == [("r1", False)]
 
 
 def test_abort_before_native_loop_runs_does_not_start_native_request():
@@ -563,7 +567,7 @@ def test_stage_sampling_is_preserved_and_stage_params_take_precedence():
         NativeRequest.model_fields,
     )
     assert fields["temperature"] == 0.2
-    assert fields["max_tokens"] == 9
+    assert fields["max_completion_tokens"] == 9
 
 
 @pytest.mark.parametrize("devices", [None, [3, 5]])

@@ -223,7 +223,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
     else:
         pass
     if "max_new_tokens" in params:
-        params["max_tokens"] = params.pop("max_new_tokens")
+        params["max_completion_tokens"] = params.pop("max_new_tokens")
     else:
         pass
     if "return_logprob" in params:
@@ -265,6 +265,29 @@ def response_dict(response: object) -> dict:
     return response.model_dump()
 
 
+def collect_response(response: object) -> dict:
+    data = response_dict(response)
+    if "error" in data or "choices" not in data:
+        if getattr(response, "status_code", None) == 400:
+            raise ValueError(f"{REQUEST_ERROR}{data.get('message', data)}")
+        else:
+            pass
+        raise ValueError(str(data.get("error", data)))
+    else:
+        pass
+    choice = data["choices"][0]
+    return {
+        "text": choice["message"].get("content") or "",
+        "modality": "text",
+        "token_ids": choice.get("response_token_ids"),
+        "output_token_logprobs": (choice.get("meta_info") or {}).get(
+            "output_token_logprobs"
+        ),
+        "usage": data.get("usage"),
+        "finish_reason": choice.get("finish_reason") or "stop",
+    }
+
+
 class NativeReasonerScheduler(ThreadedSimpleScheduler):
     """Submit every request to the native engine loop and let SRT own admission.
 
@@ -296,10 +319,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
         else:
             pass
         super().__init__(
-            None,
-            max_concurrency=max_concurrency,
-            abort_callback=self.abort_native,
-            dispatch_fn=self.dispatch,
+            None, max_concurrency=max_concurrency, dispatch_fn=self.dispatch
         )
         self.requires_tp_work_fanout = False
         self.loop_thread = threading.Thread(
@@ -370,93 +390,78 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
             request = self.request_type(**fields)
         except ValueError as exc:
             raise ValueError(f"{REQUEST_ERROR}{exc}") from exc
-        response = await self.serving_chat.handle_request(request, None)
-        if hasattr(response, "body_iterator"):
-            text_parts = []
-            usage = None
-            finish_reason = "stop"
-            drained = False
-            try:
-                async for frame in response.body_iterator:
-                    if isinstance(frame, bytes):
-                        frame = frame.decode("utf-8")
-                    else:
-                        pass
-                    data = frame.removeprefix("data:").strip()
-                    if data == "[DONE]" or not data:
-                        continue
-                    else:
-                        pass
-                    event = json.loads(data)
-                    if "error" in event:
-                        raise RuntimeError(str(event["error"]))
-                    else:
-                        pass
-                    usage = event.get("usage") or usage
-                    for choice in event.get("choices", []):
-                        delta = choice.get("delta", {}).get("content") or ""
-                        finish_reason = choice.get("finish_reason") or finish_reason
-                        if delta:
-                            text_parts.append(delta)
-                            # The stage result owns completion and final usage.
-                            self.outbox.put(
-                                OutgoingMessage(
-                                    payload.request_id,
-                                    "stream",
-                                    {"text": delta, "modality": "text"},
-                                )
-                            )
-                        else:
-                            pass
-                drained = True
-                payload.data = {
-                    "text": "".join(text_parts),
-                    "modality": "text",
-                    "usage": usage,
-                    "finish_reason": finish_reason,
-                }
-            finally:
-                if hasattr(response.body_iterator, "aclose"):
-                    await response.body_iterator.aclose()
-                else:
-                    pass
-                if not drained:
-                    # note (Richard Wang): Direct consumers need no HTTP abort grace.
-                    self.engine.tokenizer_manager.abort_request(payload.request_id)
-                else:
-                    pass
-        else:
-            data = response_dict(response)
-            if "error" in data or "choices" not in data:
-                if getattr(response, "status_code", None) == 400:
-                    raise ValueError(f"{REQUEST_ERROR}{data.get('message', data)}")
-                else:
-                    pass
-                raise ValueError(str(data.get("error", data)))
+        settled = False
+        try:
+            response = await self.serving_chat.handle_request(request, None)
+            # A complete response means native has already settled the request.
+            settled = not hasattr(response, "body_iterator")
+            if settled:
+                payload.data = collect_response(response)
+            else:
+                payload.data = await self.collect_stream(payload.request_id, response)
+                settled = True
+        finally:
+            if not settled:
+                # A cancelled or failed request must not keep running in
+                # native SGLang, and only this coroutine aborts it.
+                self.engine.tokenizer_manager.abort_request(payload.request_id)
             else:
                 pass
-            choice = data["choices"][0]
-            payload.data = {
-                "text": choice["message"].get("content") or "",
-                "modality": "text",
-                "token_ids": choice.get("response_token_ids"),
-                "output_token_logprobs": (choice.get("meta_info") or {}).get(
-                    "output_token_logprobs"
-                ),
-                "usage": data.get("usage"),
-                "finish_reason": choice.get("finish_reason") or "stop",
-            }
         return payload
 
-    def abort_native(self, request_id: str):
-        with self.native_lock:
-            if self.closed:
-                return
+    async def collect_stream(self, request_id: str, response: object) -> dict:
+        text_parts = []
+        usage = None
+        finish_reason = "stop"
+        try:
+            async for frame in response.body_iterator:
+                if isinstance(frame, bytes):
+                    frame = frame.decode("utf-8")
+                else:
+                    pass
+                data = frame.removeprefix("data:").strip()
+                if data == "[DONE]" or not data:
+                    continue
+                else:
+                    pass
+                event = json.loads(data)
+                if "error" in event:
+                    raise RuntimeError(str(event["error"]))
+                else:
+                    pass
+                usage = event.get("usage") or usage
+                for choice in event.get("choices", []):
+                    delta = choice.get("delta", {}).get("content") or ""
+                    finish_reason = choice.get("finish_reason") or finish_reason
+                    if delta:
+                        text_parts.append(delta)
+                        # The stage result owns completion and final usage.
+                        self.outbox.put(
+                            OutgoingMessage(
+                                request_id,
+                                "stream",
+                                {"text": delta, "modality": "text"},
+                            )
+                        )
+                    else:
+                        pass
+        finally:
+            if hasattr(response.body_iterator, "aclose"):
+                await response.body_iterator.aclose()
             else:
                 pass
-            self.engine.loop.call_soon_threadsafe(
-                self.engine.tokenizer_manager.abort_request, request_id
-            )
+        return {
+            "text": "".join(text_parts),
+            "modality": "text",
+            "usage": usage,
+            "finish_reason": finish_reason,
+        }
+
+    def log_failure(self, request_id: str, exc: BaseException) -> None:
+        if str(exc).startswith(REQUEST_ERROR):
+            logger.warning("Native chat request %s failed: %s", request_id, exc)
+        else:
+            super().log_failure(request_id, exc)
 
     async def cancel_native_tasks(self):
         self.engine.tokenizer_manager.abort_request(abort_all=True)

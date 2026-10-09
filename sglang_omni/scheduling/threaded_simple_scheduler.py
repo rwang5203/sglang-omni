@@ -272,6 +272,13 @@ class ThreadedSimpleScheduler(Generic[ComputeInput, ComputeResult]):
             pass
         return result
 
+    def log_failure(self, request_id: str, exc: BaseException) -> None:
+        """Log a failed request from inside the handler of ``exc``."""
+        del exc
+        logger.exception(
+            "ThreadedSimpleScheduler: compute_fn failed for %s", request_id
+        )
+
     def finish(self, request_id: str, future: Future) -> None:
         with self.lock:
             if self.pending.get(request_id) is future:
@@ -295,9 +302,7 @@ class ThreadedSimpleScheduler(Generic[ComputeInput, ComputeResult]):
         try:
             result = future.result()
         except BaseException as exc:
-            logger.exception(
-                "ThreadedSimpleScheduler: compute_fn failed for %s", request_id
-            )
+            self.log_failure(request_id, exc)
             self.outbox.put(
                 OutgoingMessage(request_id=request_id, type="error", data=exc)
             )
