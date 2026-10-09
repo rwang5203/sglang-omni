@@ -86,15 +86,26 @@ def test_invalid_request_is_rejected_before_native_dispatch(invalid_payload, tmp
 
 
 def test_saved_result_survives_scheduler_and_client_boundary(tmp_path):
+    from pathlib import Path
+
     result = SimpleNamespace(
-        output_file_path=str(tmp_path / "output.mp4"),
+        output_file_path=None,
         size=(480, 832, 33),
         prompt="A lake",
         generation_time=2.5,
         peak_memory_mb=16000.0,
         metrics={"denoise": 1.8},
     )
-    generator = Generator(result)
+
+    class SavedGenerator(Generator):
+        def generate(self, **kwargs):
+            params = kwargs["sampling_params_kwargs"]
+            target = Path(params["output_path"]) / f"{params['output_file_name']}.mp4"
+            target.write_bytes(b"video")
+            result.output_file_path = str(target)
+            return super().generate(**kwargs)
+
+    generator = SavedGenerator(result)
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
     scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload("A lake")))
     thread = threading.Thread(target=scheduler.start)
@@ -103,7 +114,9 @@ def test_saved_result_survives_scheduler_and_client_boundary(tmp_path):
         message = scheduler.outbox.get(timeout=3)
         assert message.type == "result"
         chunk = Client.default_result_builder("request-1", message.data.data)
-        assert chunk.media[0]["path"] == result.output_file_path
+        # The saved file leaves the request workspace for the output directory.
+        assert list(tmp_path.iterdir()) == [Path(chunk.media[0]["path"])]
+        assert Path(chunk.media[0]["path"]).read_bytes() == b"video"
         assert chunk.media[0]["metrics"] == {"denoise": 1.8}
         assert len(generator.calls) == 1
     finally:
