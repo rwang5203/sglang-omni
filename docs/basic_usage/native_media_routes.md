@@ -21,8 +21,22 @@ curl http://127.0.0.1:8000/v1/images/generations \
 - The native scheduler listens on `127.0.0.1` whatever host the server binds. Startup fails if the generation stage's `server_args_overrides` set another `host`.
 - The routes start on the first request to them, which loads native SGLang's route modules into the server process once. That request takes several seconds longer, about 7 seconds with Cosmos3 Nano, and the server process keeps about 0.5 GiB more memory from then on. Requests that arrive meanwhile wait for the same start. A server whose clients never call these routes starts and runs as if they were absent.
 - If the routes cannot start, for example because the prompt enhancer config cannot be read, these routes answer 503 with the cause until the server restarts, and the other routes keep serving.
-- When the generation stage's native settings run a server warmup, for example with `warmup_mode: server` in its `server_args_overrides`, the routes start with the server instead. While that warmup runs, `/health` answers 503 with status `warming` and the native routes answer 503. A warmup failure, or a failure to start the routes, then stops the server with a nonzero exit status.
 - If the native scheduler or the generation stage stops, requests in flight and new requests on these routes get 503 at once, and the server stops when the generation stage fails.
+
+## Server warmup
+
+With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. The native routes still start on their first request. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. With Cosmos3 Nano on one H200 it costs:
+
+| Cost against warmup off | Typical | At most |
+| --- | --- | --- |
+| Time until `/health` answers 200 | +14 s, 11 s of them native's automatic residency probe | +20 s |
+| Energy of the generation GPU until ready | +9 kJ | +12 kJ |
+| Energy of each other visible GPU until ready, idle during the longer startup | +1.3 kJ | +2.5 kJ |
+| GPU memory in use from readiness until the first request | +5.4 GiB | +5.5 GiB |
+| Host memory at readiness, all of it in the native worker | +0.9 GiB | +1.5 GiB |
+| Host memory after the first request, all of it in the native worker | +0.1 GiB | +0.5 GiB |
+
+In return the first request after readiness runs about 1.7 s faster.
 
 ## Media policy
 

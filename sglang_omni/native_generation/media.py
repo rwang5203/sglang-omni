@@ -154,17 +154,14 @@ class NativeMediaFrontend:
     """The native media routes of one generation stage inside the Omni server.
 
     Omni owns the lifespan of these routes. It reuses the native scheduler
-    client, warmup and video job shutdown, starts no native broker, since
-    nothing in Omni sends offline jobs through one, answers 503 while native
-    warmup runs, and turns a warmup failure into a startup failure.
+    client and video job shutdown, and starts no native broker, since nothing
+    in Omni sends offline jobs through one. A native server warmup runs in
+    the generation stage before it reports ready, not here.
 
     The routes start once, on the first request to them: native imports run
     off the event loop, then their lifespan enters, and requests that arrive
-    meanwhile wait for the same start. When the generation stage resolved a
-    native server warmup, which readiness waits for, they start with the
-    server instead. A failed start answers 503 with its cause on these
-    routes until the server restarts, and stops the server when readiness
-    waits for it.
+    meanwhile wait for the same start. A failed start answers 503 with its
+    cause on these routes until the server restarts.
 
     A request in flight fails with 503 as soon as the generation stage fails
     or a native scheduler socket closes, which happens when its process
@@ -172,12 +169,9 @@ class NativeMediaFrontend:
     for the answer forever.
     """
 
-    def __init__(
-        self, server_args: bytes, warmup: bool, request_fields: RequestFields
-    ) -> None:
+    def __init__(self, server_args: bytes, request_fields: RequestFields) -> None:
         # The pickled native server arguments, loaded when the routes start.
         self.saved_server_args = server_args
-        self.warmup = warmup
         self.request_fields = request_fields
         self.server_args: object = None
         self.media_fields: frozenset[str] = frozenset()
@@ -186,9 +180,6 @@ class NativeMediaFrontend:
         self.start_task: asyncio.Future | None = None
         self.start_failure: str | None = None
         self.lifespans = AsyncExitStack()
-        self.ready = asyncio.Event()
-        self.failure: BaseException | None = None
-        self.failed = asyncio.Event()
         self.stage_failed = False
         # Last monitor event of each native scheduler endpoint.
         self.scheduler_events: dict[bytes, int] = {}
@@ -201,13 +192,12 @@ class NativeMediaFrontend:
     ) -> NativeMediaFrontend:
         """Read what the generation stage saved, without importing native SGLang.
 
-        The stage saves its pickled native server arguments together with
-        whether they select a native server warmup, so this needs no native
-        class to read.
+        The stage saves its pickled native server arguments, which stay
+        pickled until the routes start.
         """
         try:
             with open(server_args_path, "rb") as handle:
-                saved = pickle.load(handle)
+                saved = handle.read()
         except FileNotFoundError:
             raise RuntimeError(
                 "The generation stage did not save its native server arguments "
@@ -217,7 +207,7 @@ class NativeMediaFrontend:
             ) from None
         finally:
             shutil.rmtree(os.path.dirname(server_args_path), ignore_errors=True)
-        return cls(saved["server_args"], saved["warmup"], request_fields)
+        return cls(saved, request_fields)
 
     def build_app(self) -> None:
         """Load the native server arguments and routes, in a worker thread."""
@@ -273,11 +263,6 @@ class NativeMediaFrontend:
                 f"The native media routes could not start: {exc}. Fix the "
                 "cause in the server log, then restart the server."
             )
-            if self.warmup:
-                # Readiness waits for the warmup, which now never runs.
-                self.fail(RuntimeError(self.start_failure))
-            else:
-                pass
 
     async def police_request(self, request: Request) -> None:
         """Apply the server media policy before a native route reads a request.
@@ -344,23 +329,6 @@ class NativeMediaFrontend:
         else:
             pass
 
-    @property
-    def warming(self) -> bool:
-        """Whether readiness still waits for the native server warmup."""
-        return self.warmup and not self.ready.is_set()
-
-    def fail(self, error: BaseException) -> None:
-        if self.failure is None:
-            self.failure = error
-            self.failed.set()
-        else:
-            pass
-
-    async def wait_failed(self) -> None:
-        """Runtime watcher that raises once the native routes cannot serve."""
-        await self.failed.wait()
-        raise self.failure
-
     def mount(self, app: FastAPI, runtime_failure: asyncio.Future) -> None:
         """Serve the native media routes and end their lifespan inside Omni's."""
         self.runtime_failure = runtime_failure
@@ -370,19 +338,12 @@ class NativeMediaFrontend:
         @asynccontextmanager
         async def lifespan(parent: FastAPI) -> AsyncIterator[None]:
             async with previous_lifespan(parent):
-                if self.warmup:
-                    # Readiness waits for the warmup, so start with the server.
-                    self.begin()
-                else:
-                    pass
                 try:
                     yield
                 finally:
                     await self.close()
 
         app.router.lifespan_context = lifespan
-        # Readiness reports the native warmup state, see the /health route.
-        app.state.native_media = self
         app.router.routes.append(NativeMediaRoutes(self.serve))
 
     async def close(self) -> None:
@@ -414,7 +375,7 @@ class NativeMediaFrontend:
             initialize(self.server_args, worker_failure=self.runtime_failure)
         else:
             initialize(self.server_args)
-        warmup = watch = enhancer = None
+        watch = enhancer = None
         # A failure before serving still releases what started, since the
         # server keeps running when the routes start on first use.
         try:
@@ -422,44 +383,20 @@ class NativeMediaFrontend:
             config = self.server_args.prompt_enhancer_config
             enhancer = None if config is None else PromptEnhancer.from_file(config)
             self.app.state.prompt_enhancer = enhancer
-            if self.warmup:
-                warmup = asyncio.create_task(self.warm_up())
-            else:
-                self.ready.set()
             yield
         finally:
-            for task in (warmup, watch):
-                if task is not None:
-                    task.cancel()
-                    with suppress(asyncio.CancelledError):
-                        await task
-                else:
-                    pass
+            if watch is not None:
+                watch.cancel()
+                with suppress(asyncio.CancelledError):
+                    await watch
+            else:
+                pass
             await shutdown_video_jobs()
             if enhancer is not None:
                 await enhancer.close()
             else:
                 pass
             async_scheduler_client.close()
-
-    async def warm_up(self) -> None:
-        from sglang.multimodal_gen.runtime.scheduler_client import (
-            async_scheduler_client,
-        )
-        from sglang.multimodal_gen.runtime.server_warmup import run_async_client_warmup
-
-        try:
-            # Native fails open without explicit warmup resolutions.
-            await run_async_client_warmup(
-                self.server_args,
-                async_scheduler_client.forward,
-                fail_open=self.server_args.warmup_resolutions is None,
-            )
-        except Exception as exc:
-            logger.exception("Native server warmup failed")
-            self.fail(RuntimeError(f"Native server warmup failed: {exc}"))
-        else:
-            self.ready.set()
 
     def on_runtime_failure(self, runtime_failure: asyncio.Future) -> None:
         # Serving shutdown cancels the watcher, which is no failure.
@@ -516,9 +453,6 @@ class NativeMediaFrontend:
             await self.refuse(scope, receive, send, self.unavailable_reason)
         elif self.start_failure is not None:
             await self.refuse(scope, receive, send, self.start_failure)
-        elif self.warming:
-            # Nothing waits on warmup, so warmup can never hold up shutdown.
-            await self.refuse(scope, receive, send, "Native generation is warming up")
         else:
             self.begin()
             await self.serve_while_available(scope, receive, send)

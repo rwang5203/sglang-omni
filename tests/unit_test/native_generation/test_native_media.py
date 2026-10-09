@@ -34,29 +34,22 @@ class NativePipeline:
 @pytest.fixture
 def native(monkeypatch, tmp_path):
     """Native runtime pieces the frontend calls, without a scheduler."""
-    from sglang.multimodal_gen.runtime import (
-        scheduler_client,
-        server_args,
-        server_warmup,
-    )
+    from sglang.multimodal_gen.runtime import scheduler_client, server_args
 
     args = SimpleNamespace(
         enable_metrics=False,
         prompt_enhancer_config=None,
         scheduler_endpoints=[],
-        warmup_resolutions=None,
         pipeline_config=NativePipeline(),
     )
-    native = SimpleNamespace(args=args, events=[], warmup=None)
+    native = SimpleNamespace(args=args, events=[])
 
     def build():
         # The generation stage saves its resolved arguments here.
         handoff = tmp_path / "handoff"
         handoff.mkdir()
         path = handoff / "server_args.pickle"
-        warmup = native.warmup is not None
-        saved = {"server_args": pickle.dumps(native.args), "warmup": warmup}
-        path.write_bytes(pickle.dumps(saved))
+        path.write_bytes(pickle.dumps(native.args))
         frontend = media.NativeMediaFrontend.load(str(path), client_fields)
         assert not handoff.exists()
         return frontend
@@ -81,11 +74,6 @@ def native(monkeypatch, tmp_path):
     )
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
     monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "close", close)
-
-    async def warm_up(args, forward, *, fail_open):
-        await native.warmup()
-
-    monkeypatch.setattr(server_warmup, "run_async_client_warmup", warm_up)
     return native
 
 
@@ -186,59 +174,12 @@ def test_only_native_media_routes_are_served(native):
     serve(omni, native.build(), check)
 
 
-@pytest.mark.parametrize("warmup_fails", [False, True])
-def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
-    finish = asyncio.Event()
-
-    async def warmup():
-        await finish.wait()
-        if warmup_fails:
-            raise RuntimeError("warmup request failed")
-        else:
-            pass
-
-    native.warmup = warmup
-    frontend = native.build()
-
-    async def check(client, runtime_failure):
-        failed = asyncio.ensure_future(frontend.wait_failed())
-        health = await client.get("/health")
-        assert (health.status_code, health.json()["status"]) == (503, "warming")
-        # Requests answer at once instead of waiting on warmup.
-        assert (await client.get("/v1/videos")).status_code == 503
-        finish.set()
-        if warmup_fails:
-            with pytest.raises(RuntimeError, match="warmup failed"):
-                await asyncio.wait_for(failed, 5)
-            assert (await client.get("/v1/videos")).status_code == 503
-        else:
-            while frontend.warming:
-                await asyncio.sleep(0)
-            assert (await client.get("/health")).status_code == 200
-            assert (await client.get("/v1/videos")).status_code == 200
-            assert not failed.done()
-            failed.cancel()
-
-    serve(create_app(RunningClient(), model_name="native"), frontend, check)
-
-
-@pytest.mark.parametrize("warmup", [False, True])
-def test_failed_native_start_answers_503_until_restart(native, tmp_path, warmup):
+def test_failed_native_start_answers_503_until_restart(native, tmp_path):
     # A prompt enhancer config that cannot be read fails the native lifespan.
     native.args.prompt_enhancer_config = str(tmp_path / "missing-enhancer.json")
-    if warmup:
-        native.warmup = asyncio.Event().wait
-    else:
-        pass
     frontend = native.build()
 
     async def check(client, runtime_failure):
-        if warmup:
-            # Readiness waits for the warmup, so the server stops.
-            with pytest.raises(RuntimeError, match="missing-enhancer"):
-                await asyncio.wait_for(frontend.wait_failed(), 5)
-        else:
-            pass
         for _ in range(2):
             response = await client.get("/v1/videos")
             assert response.status_code == 503
@@ -247,7 +188,7 @@ def test_failed_native_start_answers_503_until_restart(native, tmp_path, warmup)
         # One start, whose scheduler client closed again, and other routes
         # keep serving.
         assert native.events == ["build", "initialize", "close"]
-        assert (await client.get("/health")).status_code == (503 if warmup else 200)
+        assert (await client.get("/health")).status_code == 200
 
     serve(create_app(RunningClient(), model_name="native"), frontend, check)
     assert native.events == ["build", "initialize", "close"]
