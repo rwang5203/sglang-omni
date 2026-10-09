@@ -14,7 +14,9 @@ from dataclasses import dataclass, field
 from sglang_omni.models.cosmos3.reasoner import build_chat_messages
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
+    check_media_source,
     data_url,
+    media_policy_configured,
     resolve_generation_options,
 )
 from sglang_omni.pipeline.umm import (
@@ -24,6 +26,7 @@ from sglang_omni.pipeline.umm import (
     UMMRequestError,
     UMMStep,
 )
+from sglang_omni.preprocessing.resource_connector import get_global_resource_connector
 from sglang_omni.proto import (
     EXPLICIT_GENERATION_PARAMS_KEY,
     EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
@@ -354,6 +357,45 @@ def generation_options(request: OmniRequest) -> dict[str, object]:
         return options
 
 
+def check_media_policy(
+    messages: list[dict[str, object]], options: dict[str, object]
+) -> None:
+    """Refuse client media the server media policy refuses, before any turn.
+
+    Chat media parts and generation path options are checked without being
+    read. The stages that read them apply the same policy again.
+    """
+    connector = get_global_resource_connector()
+    if not media_policy_configured(connector):
+        return
+    else:
+        pass
+    sources: list[tuple[str, object]] = []
+    for message in messages:
+        content = message.get("content")
+        for part in content if isinstance(content, list) else []:
+            kind = part.get("type") if isinstance(part, dict) else None
+            if isinstance(kind, str) and kind.endswith("_url"):
+                reference = part.get(kind)
+                url = reference.get("url") if isinstance(reference, dict) else None
+                sources.append((kind, url))
+            else:
+                pass
+    for name, value in options.items():
+        if name.endswith("_path"):
+            items = value if isinstance(value, list) else [value]
+            sources.extend((name, item) for item in items)
+        else:
+            pass
+    for name, source in sources:
+        try:
+            check_media_source(connector, name, source)
+        except ValueError as exc:
+            raise UMMRequestError(
+                f"{name} refused by the server media policy: {exc}"
+            ) from exc
+
+
 def encoded_size(message: dict[str, object]) -> int:
     return len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
 
@@ -471,12 +513,14 @@ class Cosmos3UMMAdapter:
             )
         else:
             messages.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
+        options = generation_options(context.request)
+        check_media_policy(messages, options)
         generations = (context.remaining_dispatches - 1) // 2
         history = Cosmos3History(
             reasons_left=generations + 1,
             generations_left=generations,
             sampling=decision_sampling(context.request),
-            options=generation_options(context.request),
+            options=options,
         )
         self.histories[context.execution_id] = history
         for message in messages:

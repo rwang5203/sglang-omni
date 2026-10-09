@@ -38,6 +38,8 @@ from sglang_omni.pipeline.umm import (
     UMMLimits,
     route_umm,
 )
+from sglang_omni.preprocessing import resource_connector
+from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.openai_errors import generation_error_status_code
@@ -354,6 +356,35 @@ def test_admitted_requests_never_exceed_retained_bytes_through_model_output(
         "video",
         "text",
     ]
+
+
+@pytest.mark.parametrize("inside", [True, False])
+@pytest.mark.parametrize("where", ["chat", "generation"])
+def test_client_media_follows_the_server_media_policy(
+    tmp_path, monkeypatch, where, inside
+):
+    allowed = tmp_path / "media"
+    allowed.mkdir()
+    image = (allowed if inside else tmp_path) / "input.png"
+    image.write_bytes(b"image")
+    connector = MultiModalResourceConnector(allowed_local_media_path=allowed)
+    monkeypatch.setattr(resource_connector, "_global_connector", connector)
+    if where == "chat":
+        inputs, params = {"messages": [{"role": "user", "content": "x"}]}, {}
+        inputs["images"] = [str(image)]
+    else:
+        inputs, params = "x", {
+            "stage_params": {"generation": {"image_path": str(image)}}
+        }
+    umm = controller()
+    dispatched = submit(umm, inputs, params)
+    if inside:
+        assert route_umm("r", dispatched) == "reasoner"
+    else:
+        assert dispatched is None
+        error = rejection(umm)
+        assert "refused by the server media policy" in error
+        assert generation_error_status_code(RuntimeError(error)) == 400
 
 
 class SavedGenerator:

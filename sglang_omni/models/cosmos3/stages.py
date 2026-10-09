@@ -23,6 +23,7 @@ from uuid import uuid4
 from sglang_omni.native_generation import cancellation
 from sglang_omni.preprocessing.resource_connector import (
     MediaPolicyError,
+    MultiModalResourceConnector,
     get_global_resource_connector,
 )
 from sglang_omni.proto import StagePayload
@@ -248,6 +249,34 @@ def build_sampling_params(
     return params
 
 
+def media_policy_configured(connector: MultiModalResourceConnector) -> bool:
+    return connector.allowed_local_media_path is not None or bool(
+        connector.allowed_media_domains
+    )
+
+
+def check_media_source(
+    connector: MultiModalResourceConnector, name: str, source: object
+) -> str:
+    """Apply the server media policy to one client path or URL without reading it.
+
+    Returns what a loader may read: a data URL as is, a local path or file URL
+    resolved inside the allowed directory, or an allowed http(s) URL as is,
+    which its loader fetches under the same policy.
+    """
+    if not isinstance(source, str):
+        raise ValueError(f"{REQUEST_ERROR} {name} must be a path or URL")
+    elif source.startswith("data:"):
+        return source
+    elif source.startswith(("http://", "https://")):
+        connector.assert_url_allowed(source)
+        return source
+    elif source.startswith("file://"):
+        return str(connector.local_media_path(unquote(urlparse(source).path)))
+    else:
+        return str(connector.local_media_path(source))
+
+
 def police_media_inputs(
     params: dict[str, object], request_fields: frozenset[str], directory: Path
 ) -> list[Path]:
@@ -259,21 +288,14 @@ def police_media_inputs(
     every redirect, into the request directory. Returns the fetched files.
     """
     connector = get_global_resource_connector()
-    if (
-        connector.allowed_local_media_path is None
-        and not connector.allowed_media_domains
-    ):
+    if not media_policy_configured(connector):
         return []
     else:
         pass
     fetched: list[Path] = []
 
     def police(name: str, source: object) -> str:
-        if not isinstance(source, str):
-            raise ValueError(f"{REQUEST_ERROR} {name} must be a path or URL")
-        elif source.startswith("data:"):
-            return source
-        elif source.startswith(("http://", "https://")):
+        if isinstance(source, str) and source.startswith(("http://", "https://")):
             data, _ = connector.load_http_bytes(
                 source, timeout=connector.connection.timeout, max_bytes=None
             )
@@ -283,10 +305,8 @@ def police_media_inputs(
             target.write_bytes(data)
             fetched.append(target)
             return str(target)
-        elif source.startswith("file://"):
-            return str(connector.local_media_path(unquote(urlparse(source).path)))
         else:
-            return str(connector.local_media_path(source))
+            return check_media_source(connector, name, source)
 
     for name in sorted(params):
         if name not in request_fields or not name.endswith("_path"):
