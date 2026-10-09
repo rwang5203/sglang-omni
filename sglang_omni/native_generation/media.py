@@ -62,6 +62,9 @@ MEDIA_REFERENCE_FIELDS = frozenset(
         "video_url",
     }
 )
+# Keys of the image payloads that the native action routes decode in memory
+# instead of opening a file.
+INLINE_IMAGE_KEYS = frozenset({"b64_json", "base64", "data", "values"})
 # Containers native SGLang merges into a request, as JSON objects or strings.
 EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
@@ -251,7 +254,9 @@ class NativeMediaFrontend:
             except ValueError:
                 return
         try:
-            self.police_fields(body)
+            self.police_fields(
+                body, inline_images=request.url.path.startswith("/v1/actions/")
+            )
         except RecursionError:
             # Native may still decode what nests too deeply for this check.
             raise HTTPException(
@@ -259,7 +264,7 @@ class NativeMediaFrontend:
                 detail="Native media request refused: it nests too deeply to check.",
             ) from None
 
-    def police_fields(self, value: object) -> None:
+    def police_fields(self, value: object, inline_images: bool = False) -> None:
         if isinstance(value, dict):
             for name, item in value.items():
                 name = str(name)
@@ -274,13 +279,13 @@ class NativeMediaFrontend:
                         "a path the server owns.",
                     )
                 elif name in self.media_fields or name in MEDIA_REFERENCE_FIELDS:
-                    police_media_value(name, item)
+                    police_media_value(name, item, inline_images)
                 else:
                     pass
-                self.police_fields(item)
+                self.police_fields(item, inline_images)
         elif isinstance(value, list):
             for item in value:
-                self.police_fields(item)
+                self.police_fields(item, inline_images)
         else:
             pass
 
@@ -491,12 +496,13 @@ def parse_containers(value: object) -> object:
         return value
 
 
-def media_references(value: object) -> Iterator[str]:
+def media_references(value: object, inline_images: bool = False) -> Iterator[str]:
     """Each string native SGLang may read a media reference from.
 
     Native decodes JSON encoded request values, multipart fields once and
     model fields such as control_path once more, so a string also stands
-    for every string it decodes to.
+    for every string it decodes to. With inline_images, image payloads that
+    native decodes in memory hold no reference.
     """
     if isinstance(value, str):
         yield value
@@ -507,10 +513,14 @@ def media_references(value: object) -> Iterator[str]:
         yield from decoded_references(decoded, top=True)
     elif isinstance(value, (list, tuple)):
         for item in value:
-            yield from media_references(item)
+            yield from media_references(item, inline_images)
     elif isinstance(value, dict):
+        if inline_images and INLINE_IMAGE_KEYS.intersection(value):
+            return
+        else:
+            pass
         for item in value.values():
-            yield from media_references(item)
+            yield from media_references(item, inline_images)
     else:
         pass
 
@@ -539,7 +549,7 @@ def decoded_references(value: object, *, top: bool) -> Iterator[str]:
         pass
 
 
-def police_media_value(name: str, value: object) -> None:
+def police_media_value(name: str, value: object, inline_images: bool) -> None:
     """Refuse a media field value that the server media policy does not allow.
 
     Without a policy every reference passes, as on other routes.
@@ -552,7 +562,7 @@ def police_media_value(name: str, value: object) -> None:
         return
     else:
         pass
-    for source in media_references(value):
+    for source in media_references(value, inline_images):
         police_media_reference(connector, name, source)
 
 

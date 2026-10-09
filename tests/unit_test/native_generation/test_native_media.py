@@ -313,6 +313,12 @@ def test_native_requests_follow_the_server_media_policy(
             {"json": {"input": {"observation": {"image": f"file://{outside}"}}}},
             configured,
         ),
+        # Native decodes an inline action image in memory, so it is no path.
+        (
+            "/v1/actions/generations",
+            {"json": {"input": {"observation": {"image": {"b64_json": "aGk="}}}}},
+            False,
+        ),
         (
             "/v1/images/edits",
             {"data": {"prompt": "a", "url": outside}},
