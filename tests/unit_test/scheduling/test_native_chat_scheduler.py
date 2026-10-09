@@ -28,6 +28,7 @@ from sglang_omni.scheduling.native_chat_scheduler import (
     build_chat_fields,
     create_native_chat_scheduler,
     native_chat_server_kwargs,
+    warm_up,
 )
 from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.protocol import ChatCompletionRequest
@@ -523,6 +524,33 @@ def test_stage_sampling_is_preserved_and_stage_params_take_precedence():
     )
     assert fields["temperature"] == 0.2
     assert fields["max_completion_tokens"] == 9
+
+
+@pytest.mark.parametrize("model", ["vision", "text", "skipped"])
+def test_warmup_sends_the_request_sglang_serve_sends(model):
+    from sglang.srt.entrypoints.http_server import MINIMUM_PNG_PICTURE_BASE64
+
+    engine = Engine()
+    engine.server_args.skip_server_warmup = model == "skipped"
+    engine.tokenizer_manager.model_config = SimpleNamespace(
+        is_image_understandable_model=model != "text",
+        hf_config=SimpleNamespace(architectures=["Cosmos3ForConditionalGeneration"]),
+    )
+    chat = Chat(engine)
+    try:
+        warm_up(engine, chat, NativeRequest)
+    finally:
+        engine.loop.close()
+    if model == "skipped":
+        assert not chat.calls
+    else:
+        (request,) = chat.calls
+        assert (request.temperature, request.max_completion_tokens) == (0.0, 8)
+        content = request.messages[0]["content"]
+        if model == "vision":
+            assert content[0]["image_url"]["url"].endswith(MINIMUM_PNG_PICTURE_BASE64)
+        else:
+            assert content == "The capital city of France is"
 
 
 @pytest.mark.parametrize("devices", [None, [3, 5]])

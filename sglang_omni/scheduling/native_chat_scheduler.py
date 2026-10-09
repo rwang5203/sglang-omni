@@ -300,6 +300,61 @@ def collect_response(response: ChatCompletionResponse | Response) -> dict:
     }
 
 
+def warm_up(
+    engine: Engine,
+    serving_chat: OpenAIServingChat,
+    request_type: type[ChatCompletionRequest],
+) -> None:
+    """Send the request that sglang serve sends before it reports ready.
+
+    Lazy kernel and encoder setup then runs at startup, as it does for sglang
+    serve, instead of on the first client request. The native
+    skip_server_warmup flag turns it off.
+    """
+    if engine.server_args.skip_server_warmup:
+        return
+    else:
+        pass
+    model_config = engine.tokenizer_manager.model_config
+    if model_config.is_image_understandable_model:
+        from sglang.srt.entrypoints.http_server import (  # noqa: leading-underscore
+            _get_vlm_warmup_image_base64 as warmup_image,
+        )
+
+        hf_config = model_config.hf_config
+        image = warmup_image(
+            {
+                "architectures": getattr(hf_config, "architectures", None),
+                "model_type": getattr(hf_config, "model_type", None),
+            }
+        )
+        content = [
+            {
+                "type": "image_url",
+                # Native SGLang decodes a plain base64 string as an image.
+                "image_url": {"url": image},
+            },
+            {"type": "text", "text": "Describe the image."},
+        ]
+    else:
+        content = "The capital city of France is"
+    request = request_type(
+        model=engine.tokenizer_manager.served_model_name,
+        messages=[{"role": "user", "content": content}],
+        max_completion_tokens=8,
+        temperature=0.0,
+    )
+    response = engine.loop.run_until_complete(
+        serving_chat.handle_request(request, None)
+    )
+    if getattr(response, "status_code", 200) != 200:
+        raise RuntimeError(
+            f"The native chat warmup request failed: {response_dict(response)}"
+        )
+    else:
+        pass
+
+
 class NativeChatScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
     """Submit every request to the native engine loop and let SRT own admission.
 
@@ -629,6 +684,7 @@ def create_native_chat_scheduler(
     engine = Engine(**kwargs)
     try:
         service = OpenAIServingChat(engine.tokenizer_manager, engine.template_manager)
+        warm_up(engine, service, ChatCompletionRequest)
         return NativeChatScheduler(
             engine,
             service,
