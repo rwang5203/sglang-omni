@@ -468,20 +468,10 @@ def register_health(app: FastAPI) -> None:
         client: Client = app.state.client
         info = client.health()
         is_running = info.get("running", False)
-        # Native media routes may still be running their server warmup.
-        # Readiness means steady latency, so report 503 until it finishes.
-        native_media = getattr(app.state, "native_media", None)
-        warming = native_media is not None and native_media.warming
-        if is_running and warming:
-            status = "warming"
-        elif is_running:
-            status = "healthy"
-        else:
-            status = "unhealthy"
-        status_code = 200 if is_running and not warming else 503
+        status_code = 200 if is_running else 503
         return JSONResponse(
             content={
-                "status": status,
+                "status": "healthy" if is_running else "unhealthy",
                 **info,
             },
             status_code=status_code,
