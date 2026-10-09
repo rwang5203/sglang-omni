@@ -317,15 +317,11 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("max_in_flight", [None, 2])
 async def test_mp_runner_stop_cleans_runtime_dir(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
-    max_in_flight: int | None,
 ) -> None:
     """Preserves IPC runtime directory cleanup when the runner stops."""
-
-    expected_max_in_flight = max_in_flight
 
     class FakeCoordinator:
         def __init__(
@@ -339,7 +335,6 @@ async def test_mp_runner_stop_cleans_runtime_dir(
             logical_process_plan=None,
             max_in_flight=None,
         ) -> None:
-            assert max_in_flight == expected_max_in_flight
             del (
                 abort_endpoint,
                 entry_stage,
@@ -407,9 +402,7 @@ async def test_mp_runner_stop_cleans_runtime_dir(
     capacity = Mock(return_value=8)
     monkeypatch.setattr(mp_runner, "effective_cpu_count", capacity)
 
-    config = make_config(tmp_path)
-    config.max_in_flight = max_in_flight
-    runner = mp_runner.MultiProcessPipelineRunner(config)
+    runner = mp_runner.MultiProcessPipelineRunner(make_config(tmp_path))
     await runner.start()
     capacity.assert_called_once_with()
     assert len([path for path in tmp_path.iterdir() if path.is_dir()]) == 1

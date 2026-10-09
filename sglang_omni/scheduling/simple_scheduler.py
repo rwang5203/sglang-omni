@@ -223,14 +223,6 @@ class SimpleScheduler(Generic[ComputeInput, ComputeResult]):
             )
         )
 
-    def validate_result(self, payload: StagePayload) -> bool:
-        """Return whether Stage may still route this emitted result.
-
-        Schedulers that retain per-request state return False when the result
-        became stale or expired while it waited in the outbox.
-        """
-        return True
-
     def run_single(self, msg: IncomingMessage, loop: asyncio.AbstractEventLoop) -> None:
         if self.consume_if_aborted(msg.request_id):
             return

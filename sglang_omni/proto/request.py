@@ -6,7 +6,6 @@ from dataclasses import dataclass, field
 from enum import Enum
 
 from sglang_omni.pipeline.stage.stream_queue import StreamItem
-from sglang_omni.proto.continuation import ContinuationToken
 
 
 class RequestState(Enum):
@@ -67,12 +66,6 @@ class StagePayload:
     request_id: str
     request: OmniRequest
     data: object
-    continuation: ContinuationToken | None = None
-    # A receiving Stage assigns this local identity before scheduler dispatch.
-    # It is never serialized and prevents old cleanup from clearing re-entry.
-    arrival_id: object | None = field(
-        default=None, init=False, repr=False, compare=False
-    )
     # Scheduler-local stream ingress state. These fields intentionally stay
     # out of to_dict(); they are rebuilt by the receiving scheduler and never
     # form part of the inter-stage wire contract.
@@ -84,17 +77,12 @@ class StagePayload:
     )
 
     def to_dict(self) -> dict[str, object]:
-        payload = {
+        return {
             "_type": "StagePayload",
             "request_id": self.request_id,
             "request": self.request.to_dict(),
             "data": self.data,
         }
-        if self.continuation is not None:
-            payload["continuation"] = self.continuation.to_dict()
-        else:
-            pass
-        return payload
 
     @classmethod
     def from_dict(cls, data: Mapping[str, object]) -> "StagePayload":
@@ -107,9 +95,4 @@ class StagePayload:
             request_id=data.get("request_id", ""),
             request=request_obj,
             data=data.get("data"),
-            continuation=(
-                ContinuationToken.from_dict(data["continuation"])
-                if data.get("continuation") is not None
-                else None
-            ),
         )
