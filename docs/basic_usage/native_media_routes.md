@@ -29,7 +29,7 @@ With `warmup_mode: server` in the generation stage's `server_args_overrides`, th
 
 | Cost against warmup off | Typical | At most |
 | --- | --- | --- |
-| Time until `/health` answers 200 | +14 s, 11 s of them native's automatic residency probe | +20 s |
+| Time until `/health` answers 200 | About +16 s (measured 95% interval +13 s to +19 s), 11 s of them native's automatic residency probe | +20 s |
 | Energy of the generation GPU until ready | +9 kJ | +12 kJ |
 | Energy of each other visible GPU until ready, idle during the longer startup | +1.3 kJ | +2.5 kJ |
 | GPU memory in use from readiness until the first request | +5.4 GiB | +5.5 GiB |
