@@ -351,13 +351,13 @@ def generation_options(request: OmniRequest) -> dict[str, object]:
         return options
 
 
-def check_media_policy(
-    messages: list[dict[str, object]], options: dict[str, object]
-) -> None:
-    """Refuse client media the server media policy refuses, before any turn.
+def check_media_policy(options: dict[str, object]) -> None:
+    """Refuse generation media paths the server media policy refuses, before
+    any turn.
 
-    Chat media parts and generation path options are checked without being
-    read. The stages that read them apply the same policy again.
+    The paths are checked without being read, and the generation stage
+    applies the same policy when it reads them. The Reasoner stage applies
+    the policy to chat media before native SGLang loads any.
     """
     connector = get_global_resource_connector()
     if not media_policy_configured(connector):
@@ -365,16 +365,6 @@ def check_media_policy(
     else:
         pass
     sources: list[tuple[str, object]] = []
-    for message in messages:
-        content = message.get("content")
-        for part in content if isinstance(content, list) else []:
-            kind = part.get("type") if isinstance(part, dict) else None
-            if isinstance(kind, str) and kind.endswith("_url"):
-                reference = part.get(kind)
-                url = reference.get("url") if isinstance(reference, dict) else None
-                sources.append((kind, url))
-            else:
-                pass
     for name, value in options.items():
         if name.endswith("_path"):
             items = value if isinstance(value, list) else [value]
@@ -512,7 +502,7 @@ class Cosmos3UMMAdapter:
         else:
             messages.insert(0, {"role": "system", "content": SYSTEM_INSTRUCTION})
         options = generation_options(context.request)
-        check_media_policy(messages, options)
+        check_media_policy(options)
         generations = (context.remaining_dispatches - 1) // 2
         history = Cosmos3History(
             reasons_left=generations + 1,

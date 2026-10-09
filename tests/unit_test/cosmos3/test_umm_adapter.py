@@ -365,9 +365,8 @@ def test_admitted_requests_never_exceed_retained_bytes_through_model_output(
 
 
 @pytest.mark.parametrize("inside", [True, False])
-@pytest.mark.parametrize("where", ["chat", "generation"])
-def test_client_media_follows_the_server_media_policy(
-    tmp_path, monkeypatch, where, inside
+def test_generation_media_paths_follow_the_server_media_policy(
+    tmp_path, monkeypatch, inside
 ):
     allowed = tmp_path / "media"
     allowed.mkdir()
@@ -375,15 +374,9 @@ def test_client_media_follows_the_server_media_policy(
     image.write_bytes(b"image")
     connector = MultiModalResourceConnector(allowed_local_media_path=allowed)
     monkeypatch.setattr(resource_connector, "_global_connector", connector)
-    if where == "chat":
-        inputs, params = {"messages": [{"role": "user", "content": "x"}]}, {}
-        inputs["images"] = [str(image)]
-    else:
-        inputs, params = "x", {
-            "stage_params": {"generation": {"image_path": str(image)}}
-        }
+    params = {"stage_params": {"generation": {"image_path": str(image)}}}
     umm = controller()
-    dispatched = submit(umm, inputs, params)
+    dispatched = submit(umm, "x", params)
     if inside:
         assert route_umm("r", dispatched) == "reasoner"
     else:
