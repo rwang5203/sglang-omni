@@ -246,9 +246,29 @@ async def test_completion_keeps_ordered_segments_with_their_data(stream):
     assert result.text == "Drawing.Finished."
 
 
-def test_legacy_chunk_serialization_does_not_add_segment_keys():
+class TextCoordinator(Coordinator):
+    async def submit(self, request_id, request):
+        return {"text": "hello", "finish_reason": "stop"}
+
+    async def stream(self, request_id, request):
+        yield StreamMessage(request_id, "decode", {"text": "hello"}, modality="text")
+        yield CompleteMessage(
+            request_id, "decode", True, result=await self.submit(request_id, request)
+        )
+
+
+def test_ordinary_results_carry_no_segment_keys():
     assert "segment" not in GenerateChunk("r", text="hello").to_dict()
-    assert "segments" not in GenerateChunk("r", text="hello").to_dict()
+    client = umm_app(TextCoordinator(), interleaved=False)
+    generated = client.post(
+        "/generate", json={"prompt": "hello", "return_logprob": False}
+    ).json()
+    assert generated["text"] == "hello" and "segments" not in generated
+    chat = {"model": "qwen3-omni", "messages": [{"role": "user", "content": "hi"}]}
+    message = client.post("/v1/chat/completions", json=chat).json()
+    assert "segments" not in message["choices"][0]["message"]
+    streamed = client.post("/v1/chat/completions", json={**chat, "stream": True})
+    assert '"segment"' not in streamed.text and "hello" in streamed.text
 
 
 @pytest.mark.parametrize("invalid", ["not_list", "wrong_execution", "reordered"])

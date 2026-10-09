@@ -1015,15 +1015,10 @@ async def chat_stream_events(
                 pass
 
             delta = ChatCompletionStreamDelta()
-            emit = False
-            if (
-                isinstance(chunk, UMMCompletionStreamChunk)
-                and chunk.segment is not None
-            ):
-                delta.segment = chunk.segment.to_dict()
-                emit = True
-            else:
-                pass
+            segment = (
+                chunk.segment if isinstance(chunk, UMMCompletionStreamChunk) else None
+            )
+            emit = segment is not None
 
             # Send role on first chunk
             if not role_sent:
@@ -1079,6 +1074,10 @@ async def chat_stream_events(
             data = stream_resp.model_dump(exclude_none=True)
             for choice in data.get("choices", []):
                 choice.setdefault("finish_reason", None)
+            if segment is not None:
+                data["choices"][0]["delta"]["segment"] = segment.to_dict()
+            else:
+                pass
             yield f"data: {json.dumps(data)}\n\n"
 
     # Finish chunk: empty delta + finish_reason.
@@ -1323,8 +1322,12 @@ def register_generate(app: FastAPI) -> None:
                 status_code=generation_error_status_code(exc), detail=str(exc)
             ) from exc
 
-        response = build_generate_response(req, result, audio_format)
-        return JSONResponse(content=response.model_dump())
+        content = build_generate_response(req, result, audio_format).model_dump()
+        if isinstance(result, UMMCompletionResult):
+            content["segments"] = [segment.to_dict() for segment in result.segments]
+        else:
+            pass
+        return JSONResponse(content=content)
 
 
 async def generate_stream(
@@ -1547,11 +1550,6 @@ def build_generate_response(
         text=result.text,
         audio=audio,
         media=result.media,
-        segments=(
-            [segment.to_dict() for segment in result.segments]
-            if isinstance(result, UMMCompletionResult)
-            else None
-        ),
         meta_info=meta_info,
     )
 
