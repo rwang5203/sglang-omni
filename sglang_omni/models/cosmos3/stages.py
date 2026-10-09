@@ -654,10 +654,11 @@ class NativeGenerationScheduler(SimpleScheduler):
                 results = [results]
             else:
                 pass
-            if not results and self.inline_media:
+            if not results and self.inline_media and not request.cancelled.is_set():
                 # Native reports a generation it refused or could not run,
                 # such as a guardrail block, as no output and logs why. The
-                # receiving stage decides how its request continues.
+                # receiving stage decides how its request continues. An
+                # aborted request ends here too, and its result is dropped.
                 logger.warning(
                     "Native generation returned no media for %s", payload.request_id
                 )

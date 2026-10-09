@@ -432,19 +432,34 @@ def inline_scheduler(tmp_path, generator=None):
     )
 
 
-@pytest.mark.parametrize("refused", [False, True])
+@pytest.mark.parametrize("refused", [False, True, "aborted"])
 def test_inline_output_is_owned_hashed_and_released_before_forwarding(
     tmp_path, refused
 ):
     keep = tmp_path / "keep"
     keep.write_text("keep")
     generator = SavedGenerator()
+    scheduler = inline_scheduler(tmp_path, generator)
     if refused:
-        # Native returns no output for a generation it refused.
-        generator.generate = lambda **_: None
+        # Native returns no output for a generation it refused or that an
+        # abort stopped, and only the refusal becomes a result.
+        def no_output(**_):
+            if refused == "aborted":
+                scheduler.cancel_native("r")
+            else:
+                pass
+            return None
+
+        generator.generate = no_output
     else:
         pass
-    scheduler = inline_scheduler(tmp_path, generator)
+    if refused == "aborted":
+        with pytest.raises(RuntimeError, match="no saved media"):
+            scheduler.generate(StagePayload("r", OmniRequest("cube"), None))
+        assert list(tmp_path.iterdir()) == [keep]
+        return
+    else:
+        pass
     result = scheduler.generate(StagePayload("r", OmniRequest("cube"), None))
     assert list(tmp_path.iterdir()) == [keep]
     assert not scheduler.native_requests
