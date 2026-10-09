@@ -233,19 +233,11 @@ def test_generation_decision_controls_prompt_and_modality_with_native_tuning(tmp
     assert params == original
 
 
-@pytest.mark.parametrize(
-    "diffusion, frames",
-    [({}, 33), ({"num_frames": 65}, 65), ({"num_frames": 1}, None)],
-)
+@pytest.mark.parametrize("diffusion, frames", [({}, 33), ({"num_frames": 65}, 65)])
 def test_video_decisions_use_native_frame_options(diffusion, frames):
-    umm = controller()
     video = reasoner_reply(modality="video")
-    if frames is None:
-        assert generate_turn(umm, video, {"diffusion": diffusion}) is None
-        assert "more than one frame" in rejection(umm)
-    else:
-        generation = generate_turn(umm, video, {"diffusion": diffusion})
-        assert generation.request.params["diffusion"]["num_frames"] == frames
+    generation = generate_turn(controller(), video, {"diffusion": diffusion})
+    assert generation.request.params["diffusion"]["num_frames"] == frames
 
 
 @pytest.mark.parametrize(
@@ -499,20 +491,15 @@ def test_umm_generation_preserves_sdk_seed(seed):
     assert native["seed"] == seed
 
 
-@pytest.mark.parametrize(
-    "diffusion, message",
-    [
-        ({"action_mode": "policy"}, "action-only"),
-        ({"action_mode": " POLICY "}, "action-only"),
-        ({"action_mode": "forward_dynamics"}, "forward_dynamics requires a video"),
-    ],
-)
-def test_action_modes_reject_before_visual_generation(diffusion, message):
+def test_forward_dynamics_offers_only_video_generations():
+    options = {"action_mode": "forward_dynamics", "action": [[0.0] * 8] * 4}
     umm = controller()
-    assert generate_turn(umm, params={"diffusion": diffusion}) is None
-    error = rejection(umm)
-    assert message in error
-    assert generation_error_status_code(RuntimeError(error)) == 400
+    dispatched = submit(umm, "Predict motion", {"diffusion": options})
+    schema = dispatched.request.params["response_format"]["json_schema"]["schema"]
+    generate = schema["anyOf"][1]["properties"]["generation"]["properties"]
+    assert generate["modality"]["enum"] == ["video"]
+    with pytest.raises(ValueError, match="requires a video decision"):
+        umm.advance(reply(dispatched, reasoner_reply(modality="image")))
 
 
 def test_forward_dynamics_video_keeps_the_known_actions():
@@ -526,20 +513,21 @@ def test_forward_dynamics_video_keeps_the_known_actions():
 
 
 @pytest.mark.parametrize(
-    "params",
+    "params, message",
     [
-        {"stage_params": {"reasoner": []}},
-        {"chat_template_kwargs": "invalid"},
-        {"return_logprob": True},
-        {"diffusion": []},
+        ({"stage_params": {"reasoner": []}}, "stage_params.reasoner"),
+        ({"chat_template_kwargs": "invalid"}, "chat_template_kwargs"),
+        ({"return_logprob": True}, "return_logprob"),
+        ({"diffusion": []}, "diffusion"),
+        ({"stage_params": {"generation": {"num_frames": 1}}}, "more than one frame"),
+        ({"diffusion": {"action_mode": " POLICY "}}, "action-only"),
     ],
 )
-def test_user_option_rejections_are_client_errors(params):
+def test_invalid_options_are_refused_before_any_turn(params, message):
+    # Refused even when the Reasoner would have answered without generating.
     umm = controller()
-    dispatched = submit(umm, "hello", params)
-    if dispatched is not None:
-        assert umm.advance(reply(dispatched, reasoner_reply())) is None
-    else:
-        pass
-    assert generation_error_status_code(RuntimeError(rejection(umm))) == 400
+    assert submit(umm, "hello", params) is None
+    error = rejection(umm)
+    assert message in error
+    assert generation_error_status_code(RuntimeError(error)) == 400
     assert not umm.contexts and not umm.adapter.histories

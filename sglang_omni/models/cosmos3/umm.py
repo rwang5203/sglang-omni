@@ -150,6 +150,7 @@ class Cosmos3History:
     reasons_left: int
     generations_left: int
     sampling: dict[str, object]
+    options: dict[str, object]
     messages: list[dict[str, object]] = field(default_factory=list)
     media_urls: list[tuple[int, str]] = field(default_factory=list)
     retained_bytes: int = 0
@@ -330,6 +331,29 @@ def decision_sampling(request: OmniRequest) -> dict[str, object]:
     return sampling
 
 
+def generation_options(request: OmniRequest) -> dict[str, object]:
+    """The client's native generation options, checked before any turn runs."""
+    try:
+        options = resolve_generation_options(deepcopy(request.params))
+    except ValueError as exc:
+        raise UMMRequestError(str(exc)) from exc
+    action_mode = options.get("action_mode")
+    frames = options.get("num_frames")
+    if action_mode is not None and (
+        not isinstance(action_mode, str)
+        or action_mode.strip().lower() != "forward_dynamics"
+    ):
+        raise UMMRequestError(
+            "Cosmos3 visual interleaving cannot return action-only results"
+        )
+    elif frames is not None and (type(frames) is not int or frames <= 1):
+        # Image decisions always generate one frame, so a client frame count
+        # applies to videos only.
+        raise UMMRequestError("Video interleaving requires more than one frame")
+    else:
+        return options
+
+
 def encoded_size(message: dict[str, object]) -> int:
     return len(json.dumps(message, ensure_ascii=False).encode("utf-8"))
 
@@ -452,6 +476,7 @@ class Cosmos3UMMAdapter:
             reasons_left=generations + 1,
             generations_left=generations,
             sampling=decision_sampling(context.request),
+            options=generation_options(context.request),
         )
         self.histories[context.execution_id] = history
         for message in messages:
@@ -474,7 +499,14 @@ class Cosmos3UMMAdapter:
         if context.remaining_dispatches < 3:
             schema = deepcopy(FINAL_DECISION)
         else:
-            schema = {"anyOf": [deepcopy(FINAL_DECISION), deepcopy(GENERATE_DECISION)]}
+            generate = deepcopy(GENERATE_DECISION)
+            if history.options.get("action_mode") is not None:
+                # Known actions condition a video, so only videos remain.
+                modality = generate["properties"]["generation"]["properties"]
+                modality["modality"]["enum"] = ["video"]
+            else:
+                pass
+            schema = {"anyOf": [deepcopy(FINAL_DECISION), generate]}
         params = {
             **deepcopy(history.sampling),
             "stream": False,
@@ -507,10 +539,15 @@ class Cosmos3UMMAdapter:
             outputs = (UMMOutput("text", decision.text),) if decision.text else ()
             if decision.kind == "final":
                 return UMMStep(outputs=outputs)
+            elif (
+                history.options.get("action_mode") is not None
+                and decision.generation["modality"] != "video"
+            ):
+                raise ValueError("Cosmos3 forward_dynamics requires a video decision")
             else:
                 history.decision = decision
                 self.remember(history, decision_message(decision))
-                request = self.generation_request(context, decision)
+                request = self.generation_request(history, decision)
                 return UMMStep(GENERATE, request, outputs)
         elif phase == GENERATE and history.decision is not None:
             decision = history.decision
@@ -551,36 +588,14 @@ class Cosmos3UMMAdapter:
         self.histories.pop(context.execution_id, None)
 
     @staticmethod
-    def generation_request(context: UMMContext, decision: Decision) -> OmniRequest:
-        try:
-            options = resolve_generation_options(deepcopy(context.request.params))
-        except ValueError as exc:
-            raise UMMRequestError(str(exc)) from exc
-        action_mode = options.get("action_mode")
-        if action_mode is not None and (
-            not isinstance(action_mode, str)
-            or action_mode.strip().lower() != "forward_dynamics"
-        ):
-            raise UMMRequestError(
-                "Cosmos3 visual interleaving cannot return action-only results"
-            )
-        else:
-            pass
+    def generation_request(history: Cosmos3History, decision: Decision) -> OmniRequest:
+        options = deepcopy(history.options)
         options["prompt"] = decision.generation["prompt"]
         options["num_outputs_per_prompt"] = 1
         if decision.generation["modality"] == "image":
-            if action_mode is not None:
-                raise UMMRequestError(
-                    "Cosmos3 forward_dynamics requires a video decision"
-                )
-            else:
-                options["num_frames"] = 1
+            options["num_frames"] = 1
         else:
             options.setdefault("num_frames", 33)
-            if type(options["num_frames"]) is not int or options["num_frames"] <= 1:
-                raise UMMRequestError("Video interleaving requires more than one frame")
-            else:
-                pass
         return OmniRequest(
             {"prompt": decision.generation["prompt"]},
             {"diffusion": options, "stream": False},
