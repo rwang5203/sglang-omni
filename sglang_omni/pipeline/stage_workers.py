@@ -4,7 +4,6 @@
 from __future__ import annotations
 
 import asyncio
-import atexit
 import gc
 import logging
 import multiprocessing
@@ -526,11 +525,6 @@ def stage_process_main(
     else:
         pass
     log = logging.getLogger(f"stage_workers.{spec.process_name}")
-    # Interpreter shutdown otherwise spends its final collections walking
-    # every tracked object of the stage import graph after its children
-    # are already joined. Freezing them right before finalization keeps
-    # every atexit handler unchanged and skips redundant collection passes.
-    atexit.register(gc.freeze)
 
     previous_sigterm = signal.getsignal(signal.SIGTERM)
     try:
