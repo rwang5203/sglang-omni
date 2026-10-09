@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import queue
 import threading
@@ -319,13 +320,14 @@ def test_unsupported_contracts_reject_before_dispatch(item):
         (True, "https://other.org/a.png", "refused"),
         (True, "https://example.com/a.png", "fetched"),
         (True, "https://example.com/unavailable.png", "server error"),
+        (True, "https://example.com/missing.png", "client error"),
         (True, "file://{allowed}/a%23b%3Fc%25d.mp4", "a#b?c%d.mp4"),
         (True, "{allowed}/a#b?c%d.mp4", "a#b?c%d.mp4"),
         (True, "{outside}/a.png", "refused"),
     ],
 )
 def test_chat_media_follows_the_server_media_policy(
-    monkeypatch, tmp_path, configured, reference, outcome
+    monkeypatch, tmp_path, caplog, configured, reference, outcome
 ):
     import httpx
 
@@ -337,7 +339,9 @@ def test_chat_media_follows_the_server_media_policy(
     connection.async_client = httpx.AsyncClient(
         transport=httpx.MockTransport(
             lambda request: httpx.Response(
-                503 if request.url.path == "/unavailable.png" else 200,
+                {"/unavailable.png": 503, "/missing.png": 404}.get(
+                    request.url.path, 200
+                ),
                 content=b"png",
                 headers={"content-type": "image/png"},
             )
@@ -360,11 +364,18 @@ def test_chat_media_follows_the_server_media_policy(
         assert message.type == "error"
         assert str(message.data).startswith(native_chat_scheduler.REQUEST_ERROR)
         assert not chat.calls
-    elif outcome == "server error":
-        # The shared classifier decides fetch failures, and an upstream
-        # failure is not the caller's error.
+    elif outcome.endswith("error"):
+        # The shared classifier decides fetch failures, an upstream failure
+        # is not the caller's error, and the stage logs a client error as one
+        # warning line.
+        status = 400 if outcome == "client error" else 500
         assert message.type == "error"
-        assert generation_error_status_code(message.data) == 500
+        assert generation_error_status_code(message.data) == status
+        assert [
+            (record.levelno, record.exc_info is not None)
+            for record in caplog.records
+            if record.levelno >= logging.WARNING
+        ] == [(logging.WARNING, False) if status == 400 else (logging.ERROR, True)]
         assert not chat.calls
     else:
         assert message.type == "result"
