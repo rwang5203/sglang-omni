@@ -19,7 +19,6 @@ from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3 import stages as cosmos3_stages
 from sglang_omni.models.cosmos3 import umm as cosmos3_umm
-from sglang_omni.models.cosmos3.reasoner import build_chat_fields
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
     NativeGenerationScheduler,
@@ -42,6 +41,7 @@ from sglang_omni.pipeline.umm import (
 from sglang_omni.preprocessing import resource_connector
 from sglang_omni.preprocessing.resource_connector import MultiModalResourceConnector
 from sglang_omni.proto import OmniRequest, StagePayload
+from sglang_omni.scheduling.native_chat_scheduler import build_chat_fields
 from sglang_omni.serve.openai_api import build_chat_generate_request
 from sglang_omni.serve.openai_errors import generation_error_status_code
 from sglang_omni.serve.protocol import ChatCompletionRequest
@@ -161,10 +161,12 @@ def test_decisions_keep_their_contract_and_only_explicit_client_sampling(
             "temperature",
             "top_k",
             "max_tokens",
+            "max_completion_tokens",
             "chat_template_kwargs",
             "n",
             "logprobs",
         },
+        "reasoner",
     )
     assert fields["stream"] is False
     assert fields["response_format"]["json_schema"]["strict"]
@@ -174,7 +176,7 @@ def test_decisions_keep_their_contract_and_only_explicit_client_sampling(
         "top_k"
     )
     # The decision schema alone bounds a decision, and none returns logprobs.
-    assert "max_tokens" not in fields and "logprobs" not in fields
+    assert not {"max_tokens", "max_completion_tokens", "logprobs"} & set(fields)
     assert fields["messages"][1]["content"][1]["image_url"]["url"].endswith("AAAA")
 
 

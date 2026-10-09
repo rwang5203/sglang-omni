@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import re
 
-from sglang_omni.admission import InvalidRequestError, QueueFullError
+from sglang_omni.admission import QueueFullError
 
 _BAD_REQUEST_MARKERS = (
     "Unsupported language:",
@@ -48,6 +48,7 @@ _BAD_REQUEST_MARKERS = (
     "Unsupported PersonaPlex audio input",
     "; packaged voices:",
     "Native generation request ",
+    "Native chat request rejected: ",
     "Invalid UMM request: ",
 )
 _BAD_REQUEST_PATTERNS = (
@@ -74,10 +75,6 @@ _BAD_REQUEST_PATTERNS = (
 
 
 def is_bad_request_error(exc: BaseException) -> bool:
-    if InvalidRequestError.matches(exc):
-        return True
-    else:
-        pass
     message = str(exc)
     return any(marker in message for marker in _BAD_REQUEST_MARKERS) or any(
         pattern.search(message) is not None for pattern in _BAD_REQUEST_PATTERNS

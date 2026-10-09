@@ -4,7 +4,12 @@
 from collections.abc import Mapping
 from typing import ClassVar
 
-from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
+from sglang_omni.config import (
+    EngineStageConfig,
+    FactoryArgs,
+    PipelineConfig,
+    StageConfig,
+)
 from sglang_omni.config.runtime import resolve_stage_typed_kwargs
 from sglang_omni.pipeline.umm import (
     CONTROLLER_FACTORY_PATH,
@@ -17,8 +22,7 @@ from sglang_omni.pipeline.umm import (
 
 class Cosmos3PipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
-    native_media_stage: ClassVar[str] = "generation"
-    native_media_factory_path: ClassVar[str] = (
+    native_media_factory: ClassVar[str] = (
         "sglang_omni.models.cosmos3.media.prepare_native_media_app"
     )
 
@@ -40,14 +44,22 @@ EntryClass = Cosmos3PipelineConfig
 
 
 class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
-    native_media_stage: ClassVar[str | None] = None
+    # The Reasoner has no generation stage, so it serves no native media routes.
+    native_media_factory: ClassVar[str | None] = None
+    # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "reasoner": EngineStageConfig
+    }
     stages: list[StageConfig] = [
-        StageConfig(
+        EngineStageConfig(
             name="reasoner",
             process="reasoner",
-            factory_path="sglang_omni.models.cosmos3.reasoner.create_reasoner_scheduler",
+            factory_path=(
+                "sglang_omni.scheduling.native_chat_scheduler."
+                "create_native_chat_scheduler"
+            ),
             allow_child_processes=True,
-            factory=FactoryArgs(),
+            factory=FactoryArgs(stage_name="reasoner"),
             gpu=0,
             terminal=True,
         )
@@ -62,8 +74,12 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
     native generation, which returns inline media to the orchestrator.
     """
 
-    native_media_stage: ClassVar[str | None] = None
-    native_media_factory_path: ClassVar[str | None] = None
+    # Generation returns media to the orchestrator, not to native routes.
+    native_media_factory: ClassVar[str | None] = None
+    # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
+    stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
+        "reasoner": EngineStageConfig
+    }
     entry_stage: str = "orchestrator"
     stages: list[StageConfig] = [
         StageConfig(
@@ -97,12 +113,15 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
             terminal=True,
             can_accept_stream_before_payload=True,
         ),
-        StageConfig(
+        EngineStageConfig(
             name="reasoner",
             process="reasoner",
-            factory_path="sglang_omni.models.cosmos3.reasoner.create_reasoner_scheduler",
+            factory_path=(
+                "sglang_omni.scheduling.native_chat_scheduler."
+                "create_native_chat_scheduler"
+            ),
             allow_child_processes=True,
-            factory=FactoryArgs(),
+            factory=FactoryArgs(stage_name="reasoner"),
             gpu=1,
             next="orchestrator",
         ),

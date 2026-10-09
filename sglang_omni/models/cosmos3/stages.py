@@ -9,6 +9,7 @@ import logging
 import multiprocessing
 import multiprocessing.connection
 import os
+import pickle
 import queue
 import shutil
 import stat
@@ -719,7 +720,10 @@ def create_generation_scheduler(
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, object] | None = None,
     inline_media: bool = False,
+    server_args_path: str | None = None,
 ) -> NativeGenerationScheduler:
+    """``server_args_path`` receives the resolved native server arguments,
+    which the native media routes of the Omni HTTP process load."""
     from sglang_omni.utils.device import resolve_concrete_device
 
     concrete_device = resolve_concrete_device(device, gpu_id)
@@ -774,13 +778,21 @@ def create_generation_scheduler(
     else:
         pass
     try:
-        return NativeGenerationScheduler(
+        scheduler = NativeGenerationScheduler(
             generator,
             output_dir,
             COMMON_REQUEST_FIELDS | model_request_fields(generator.server_args),
             cancellation_mode=mode,
             inline_media=inline_media,
         )
+        if server_args_path is not None:
+            staging = f"{server_args_path}.partial"
+            with open(staging, "wb") as handle:
+                pickle.dump(generator.server_args, handle)
+            os.replace(staging, server_args_path)
+        else:
+            pass
+        return scheduler
     except BaseException:
         generator.shutdown()
         raise

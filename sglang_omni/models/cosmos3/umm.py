@@ -11,7 +11,6 @@ import re
 from copy import deepcopy
 from dataclasses import dataclass, field
 
-from sglang_omni.models.cosmos3.reasoner import build_chat_messages
 from sglang_omni.models.cosmos3.stages import (
     INLINE_MEDIA_LIMIT_BYTES,
     check_media_source,
@@ -31,7 +30,9 @@ from sglang_omni.proto import (
     EXPLICIT_GENERATION_PARAMS_KEY,
     EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
     OmniRequest,
+    StagePayload,
 )
+from sglang_omni.scheduling.native_chat_scheduler import build_chat_fields
 
 # Adapter phase names, mapped to stages by the orchestrator's factory.phases.
 REASON = "reason"
@@ -489,7 +490,10 @@ class Cosmos3UMMAdapter:
 
     def start(self, context: UMMContext) -> UMMStep:
         try:
-            messages = build_chat_messages(context.request.inputs)
+            # The chat history in native form, as the Reasoner stage builds it.
+            request = OmniRequest(context.request.inputs, {}, context.request.metadata)
+            payload = StagePayload(context.execution_id, request, None)
+            messages = build_chat_fields(payload, "", set(), REASONER_STAGE)["messages"]
         except ValueError as exc:
             raise UMMRequestError(str(exc)) from exc
         if any(

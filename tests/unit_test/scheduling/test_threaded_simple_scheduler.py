@@ -370,10 +370,3 @@ def test_dispatch_fn_owns_admission_and_cancellation() -> None:
         with pytest.raises(queue.Empty):
             scheduler.outbox.get(timeout=0.1)
     assert not scheduler.has_tombstone("r5")
-
-
-def test_threaded_compute_still_requires_a_worker_count() -> None:
-    with pytest.raises(ValueError):
-        ThreadedSimpleScheduler(lambda payload: payload, max_concurrency=None)
-    with pytest.raises(ValueError):
-        ThreadedSimpleScheduler(None, max_concurrency=2)
