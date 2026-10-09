@@ -19,10 +19,13 @@ from sglang_omni.pipeline.stage.input import AggregatedInput
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.pipeline.stage.stream_queue import StreamQueue
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, construct_stage
-from sglang_omni.proto import DataReadyMessage, SubmitMessage
+from sglang_omni.proto import DataReadyMessage, ShutdownMessage, SubmitMessage
 from sglang_omni.scheduling import omni_scheduler as omni_scheduler_module
+from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.scheduling.omni_scheduler import OmniScheduler
 from sglang_omni.scheduling.session import SessionHooks, SessionScheduler
+from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
+from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 from tests.unit_test.fixtures.pipeline_fakes import (
     EventLog,
     FakeRelay,
@@ -293,6 +296,49 @@ def test_stage_starts_only_after_its_session_hooks_warm_the_scheduler_thread() -
         await stage_obj.stop()
 
     asyncio.run(run())
+
+
+@pytest.mark.parametrize("scheduler_kind", ["serial", "threaded-full"])
+def test_idle_stage_blocks_without_timed_polls_until_shutdown(
+    monkeypatch, scheduler_kind: str
+) -> None:
+    release = threading.Event()
+
+    def hold(payload: str) -> str:
+        release.wait(timeout=5.0)
+        return payload
+
+    if scheduler_kind == "serial":
+        scheduler = SimpleScheduler(lambda payload: payload)
+    else:
+        # The held request takes the only slot, so the scheduler waits for capacity.
+        scheduler = ThreadedSimpleScheduler(hold, max_concurrency=1)
+        scheduler.inbox.put(IncomingMessage("held", "new_request", "held"))
+    timed_reads: list[str] = []
+    for name, queue_obj in (("inbox", scheduler.inbox), ("outbox", scheduler.outbox)):
+
+        def record_timed_read(block=True, timeout=None, name=name, read=queue_obj.get):
+            if block and timeout is not None:
+                timed_reads.append(name)
+            return read(block, timeout)
+
+        monkeypatch.setattr(queue_obj, "get", record_timed_read)
+
+    async def run() -> None:
+        control_plane = RecordingStageControlPlane()
+        stage_obj = make_stage(scheduler=scheduler, control_plane=control_plane)
+        run_task = asyncio.create_task(stage_obj.run())
+        await asyncio.sleep(0.3)
+        assert timed_reads == []
+
+        control_plane.inbox.put_nowait(ShutdownMessage())
+        await asyncio.wait_for(run_task, timeout=2.0)
+        assert stage_obj.scheduler_thread is None
+
+    try:
+        asyncio.run(run())
+    finally:
+        release.set()
 
 
 def test_stage_stop_waits_for_scheduler_model_path_terminalization(

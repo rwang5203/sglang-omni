@@ -16,6 +16,7 @@ import os
 import queue as _queue_mod
 import threading
 from collections.abc import Iterable, Mapping
+from concurrent.futures import ThreadPoolExecutor
 from contextlib import suppress
 from dataclasses import replace
 from typing import Awaitable, Callable, Literal
@@ -60,7 +61,11 @@ from sglang_omni.proto import (
 )
 from sglang_omni.proto.session import find_session_operation
 from sglang_omni.relay.base import Relay
-from sglang_omni.scheduling.message import IncomingMessage, StageScheduler
+from sglang_omni.scheduling.message import (
+    IncomingMessage,
+    OutgoingMessage,
+    StageScheduler,
+)
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -183,6 +188,7 @@ class Stage:
         self.receive_tasks: set[asyncio.Task[None]] = set()
         self.receive_lane_tails: dict[tuple[str, str], asyncio.Future[None]] = {}
         self.scheduler_thread: threading.Thread | None = None
+        self.outbox_waiter: ThreadPoolExecutor | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.scheduler_crash_error: BaseException | None = None
         self.background_task_error: BaseException | None = None
@@ -292,6 +298,10 @@ class Stage:
 
     async def stop(self) -> None:
         self.running = False
+        if self.outbox_waiter is not None:
+            self.wake_outbox_drain()
+        else:
+            pass
         cleanup_error: Exception | None = None
 
         def _record_cleanup_error(component: str, exc: Exception) -> None:
@@ -1263,20 +1273,43 @@ class Stage:
     # ------------------------------------------------------------------
 
     async def drain_outbox(self) -> None:
-        if self.owns_external_io:
-            await self.drain_outbox_external()
-        else:
-            await self.drain_outbox_follower()
+        # note (Richard Wang): the private waiter blocks until the scheduler emits
+        # or the stage stops, so an idle stage never wakes and the wait never
+        # holds a thread of the shared default executor.
+        waiter = ThreadPoolExecutor(
+            max_workers=1, thread_name_prefix=f"outbox-{self.name}"
+        )
+        self.outbox_waiter = waiter
+        try:
+            if self.owns_external_io:
+                await self.drain_outbox_external()
+            else:
+                await self.drain_outbox_follower()
+        finally:
+            self.outbox_waiter = None
+            waiter.shutdown(wait=False)
+
+    async def wait_outbox_message(self) -> OutgoingMessage:
+        outbox = self.scheduler.outbox
+        loop = asyncio.get_running_loop()
+        try:
+            return await loop.run_in_executor(self.outbox_waiter, outbox.get)
+        except asyncio.CancelledError:
+            self.wake_outbox_drain()
+            raise
+
+    def wake_outbox_drain(self) -> None:
+        """Release the drain waiter from a get on an empty outbox.
+
+        Both drains skip the wakeup like any message type they do not route.
+        """
+        self.scheduler.outbox.put(OutgoingMessage(request_id="", type="wakeup"))
 
     async def drain_outbox_external(self) -> None:
         """Drain scheduler outbox and route results downstream."""
-        loop = asyncio.get_running_loop()
         outbox = self.scheduler.outbox
         while self.running or not outbox.empty():
-            try:
-                out = await loop.run_in_executor(None, lambda: outbox.get(timeout=0.1))
-            except _queue_mod.Empty:
-                continue
+            out = await self.wait_outbox_message()
 
             for batch_index in range(_OUTBOX_DRAIN_BATCH_SIZE):
                 if out.type == "admitted":
@@ -1342,14 +1375,8 @@ class Stage:
 
     async def drain_outbox_follower(self) -> None:
         """Drain follower outbox without emitting external stage traffic."""
-        loop = asyncio.get_running_loop()
         while self.running or not self.scheduler.outbox.empty():
-            try:
-                out = await loop.run_in_executor(
-                    None, lambda: self.scheduler.outbox.get(timeout=0.1)
-                )
-            except _queue_mod.Empty:
-                continue
+            out = await self.wait_outbox_message()
 
             if out.type == "result":
                 self.clear_request_state(out.request_id)
