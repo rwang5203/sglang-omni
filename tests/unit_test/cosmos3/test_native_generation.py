@@ -16,6 +16,7 @@ from sglang_omni.models.cosmos3.stages import (
 )
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.serve.openai_errors import generation_error_status_code
 
 
 def payload(inputs="A quiet lake", **params):
@@ -67,6 +68,8 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
         payload([1, 2]),
         payload({"seed": 1}),
         payload("A lake", diffusion=[]),
+        payload("A lake", stage_params=[]),
+        payload("A lake", stage_sampling={"generation": 1}),
         payload("A lake", stream=True),
         payload({"prompt": "A lake", "prompt_path": "prompts.txt"}),
         payload("A lake", diffusion={"output_path": "/unowned"}),
@@ -76,8 +79,9 @@ def test_preserves_native_parameters_and_owns_output_names(tmp_path):
 def test_invalid_request_is_rejected_before_native_dispatch(invalid_payload, tmp_path):
     generator = Generator(None)
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    with pytest.raises(ValueError):
+    with pytest.raises(ValueError) as refused:
         scheduler.generate(invalid_payload)
+    assert generation_error_status_code(refused.value) == 400
     assert not generator.calls
 
 

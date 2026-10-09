@@ -107,12 +107,14 @@ def resolve_generation_options(
     stage_sampling = request_params.get("stage_sampling")
     if stage_sampling is not None:
         if not isinstance(stage_sampling, dict):
-            raise ValueError("stage_sampling must be a mapping")
+            raise ValueError(f"{REQUEST_ERROR} stage_sampling must be a mapping")
         else:
             pass
         generation = stage_sampling.get("generation", {})
         if not isinstance(generation, dict):
-            raise ValueError("Generation stage sampling must be a mapping")
+            raise ValueError(
+                f"{REQUEST_ERROR} stage_sampling generation must be a mapping"
+            )
         else:
             pass
         if generation.get("seed") is not None:
@@ -123,19 +125,21 @@ def resolve_generation_options(
         pass
     overrides = request_params.get("diffusion", {})
     if not isinstance(overrides, dict):
-        raise ValueError("diffusion parameters must be a mapping")
+        raise ValueError(f"{REQUEST_ERROR} diffusion must be a mapping")
     else:
         pass
     params.update(overrides)
     stage_params = request_params.get("stage_params")
     if stage_params is not None:
         if not isinstance(stage_params, dict):
-            raise ValueError("stage_params must be a mapping")
+            raise ValueError(f"{REQUEST_ERROR} stage_params must be a mapping")
         else:
             pass
         generation = stage_params.get("generation", {})
         if not isinstance(generation, dict):
-            raise ValueError("Generation stage parameters must be a mapping")
+            raise ValueError(
+                f"{REQUEST_ERROR} stage_params generation must be a mapping"
+            )
         else:
             pass
         params.update(generation)
@@ -154,7 +158,9 @@ def build_sampling_params(
     if isinstance(inputs, str):
         inputs = {"prompt": inputs}
     elif not isinstance(inputs, dict):
-        raise ValueError("Generation inputs must be a prompt or native sampling fields")
+        raise ValueError(
+            f"{REQUEST_ERROR} inputs must be a prompt or native sampling fields"
+        )
     else:
         pass
     params = resolve_generation_options(payload.request.params, inputs)
@@ -168,11 +174,14 @@ def build_sampling_params(
     else:
         pass
     if not isinstance(params.get("prompt"), str) or not params["prompt"].strip():
-        raise ValueError("Generation requires a nonempty prompt")
+        raise ValueError(f"{REQUEST_ERROR} requires a nonempty prompt")
     else:
         pass
     if payload.request.params.get("stream"):
-        raise ValueError("Use the native realtime video API for streaming generation")
+        raise ValueError(
+            f"{REQUEST_ERROR} cannot stream. Use the native realtime video API "
+            "for streaming generation"
+        )
     else:
         pass
     outputs = params.get("num_outputs_per_prompt", 1)
