@@ -11,7 +11,6 @@ from concurrent.futures import Future
 from copy import deepcopy
 from typing import Any
 
-from sglang_omni.admission import InvalidRequestError
 from sglang_omni.client.types import SamplingParams
 from sglang_omni.proto import (
     EXPLICIT_GENERATION_PARAMS_KEY,
@@ -20,6 +19,9 @@ from sglang_omni.proto import (
 )
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+
+# Client errors carry this prefix, which the API maps to 400.
+REQUEST_ERROR = "Native chat request rejected: "
 
 # Omni fills every sampling field a caller omits with these placeholders.
 SAMPLING_PLACEHOLDERS = SamplingParams().to_dict()
@@ -264,7 +266,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
             )
             request = self.request_type(**fields)
         except ValueError as exc:
-            raise InvalidRequestError(str(exc)) from exc
+            raise ValueError(f"{REQUEST_ERROR}{exc}") from exc
         response = await self.serving_chat.handle_request(request, None)
         if hasattr(response, "body_iterator"):
             text_parts = []
@@ -324,7 +326,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
             data = response_dict(response)
             if "error" in data or "choices" not in data:
                 if getattr(response, "status_code", None) == 400:
-                    raise InvalidRequestError(str(data.get("message", data)))
+                    raise ValueError(f"{REQUEST_ERROR}{data.get('message', data)}")
                 else:
                     pass
                 raise ValueError(str(data.get("error", data)))
