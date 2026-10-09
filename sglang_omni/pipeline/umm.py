@@ -10,9 +10,9 @@ import threading
 import time
 import uuid
 from dataclasses import asdict, dataclass, field, replace
-from typing import Any, Callable, Literal, Protocol, TypeAlias, TypedDict
+from typing import Callable, Literal, Protocol, TypeAlias, TypedDict
 
-from sglang_omni.admission import InvalidRequestError, QueueFullError
+from sglang_omni.admission import QueueFullError
 from sglang_omni.proto.continuation import ContinuationToken, UMMSegment
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
@@ -83,11 +83,27 @@ class UMMLimits:
             pass
 
 
-def budget_error(name: str, limit: int) -> InvalidRequestError:
-    return InvalidRequestError(
+class UMMRequestError(ValueError):
+    """A client-caused UMM rejection, reported to the client as a bad request.
+
+    The serving error classifier recognizes the message prefix, which
+    survives stage IPC as text.
+    """
+
+    PREFIX = "Invalid UMM request: "
+
+    def __init__(self, detail: str) -> None:
+        super().__init__(self.PREFIX + detail)
+
+
+def budget_error(name: str, limit: int, *, client: bool = False) -> Exception:
+    # Only the client's own input can exceed a bound before the first
+    # dispatch. Later breaches come from model output and are server errors.
+    detail = (
         f"UMM request exceeds {name}={limit}. "
         f"Raise stages.<orchestrator>.factory.{name} to allow more"
     )
+    return UMMRequestError(detail) if client else RuntimeError(detail)
 
 
 class UMMAdapter(Protocol):
@@ -236,7 +252,13 @@ class UMMController(SimpleScheduler):
         else:
             pass
 
-    def check_size(self, session: Session, stage_request: OmniRequest | None) -> None:
+    def check_size(
+        self,
+        session: Session,
+        stage_request: OmniRequest | None,
+        *,
+        client: bool = False,
+    ) -> None:
         state = {
             "request": session.request.to_dict(),
             "history": session.history,
@@ -250,11 +272,13 @@ class UMMController(SimpleScheduler):
             json.dumps(state, ensure_ascii=False, allow_nan=False).encode("utf-8")
         )
         if size > self.limits.max_context_bytes:
-            raise budget_error("max_context_bytes", self.limits.max_context_bytes)
+            raise budget_error(
+                "max_context_bytes", self.limits.max_context_bytes, client=client
+            )
         else:
             pass
 
-    def append_segment(self, session: Session, kind: str, data: Any) -> None:
+    def append_segment(self, session: Session, kind: str, data: JSONValue) -> None:
         if len(session.segments) >= self.limits.max_segments:
             raise budget_error("max_segments", self.limits.max_segments)
         else:
@@ -269,7 +293,13 @@ class UMMController(SimpleScheduler):
         )
 
     def dispatch(
-        self, request_id: str, session: Session, phase: str, request: OmniRequest
+        self,
+        request_id: str,
+        session: Session,
+        phase: str,
+        request: OmniRequest,
+        *,
+        client: bool = False,
     ) -> StagePayload:
         if not isinstance(request, OmniRequest):
             raise TypeError("UMM adapter must return an OmniRequest")
@@ -277,7 +307,7 @@ class UMMController(SimpleScheduler):
             pass
         # The controller streams accepted segments, so internal turns never do.
         request = replace(request, params={**request.params, "stream": False})
-        self.check_size(session, request)
+        self.check_size(session, request, client=client)
         self.check_deadline(session)
         session.expected = ContinuationToken(
             session_id=session.session_id,
@@ -292,7 +322,9 @@ class UMMController(SimpleScheduler):
             continuation=session.expected,
         )
 
-    def dispatch_reasoner(self, request_id: str, session: Session) -> StagePayload:
+    def dispatch_reasoner(
+        self, request_id: str, session: Session, *, client: bool = False
+    ) -> StagePayload:
         return self.dispatch(
             request_id,
             session,
@@ -302,6 +334,7 @@ class UMMController(SimpleScheduler):
                 session.request,
                 remaining_generation_turns=self.limits.max_turns - session.turn_index,
             ),
+            client=client,
         )
 
     def advance(self, payload: StagePayload) -> StagePayload | Discarded:
@@ -324,7 +357,7 @@ class UMMController(SimpleScheduler):
                 else:
                     pass
                 if SESSION_METADATA_KEY in payload.request.metadata:
-                    raise InvalidRequestError(
+                    raise UMMRequestError(
                         "UMM pipelines do not support session operations. "
                         "Submit ordinary requests instead"
                     )
@@ -352,7 +385,7 @@ class UMMController(SimpleScheduler):
             try:
                 self.check_deadline(session)
                 if token is None:
-                    result = self.dispatch_reasoner(request_id, session)
+                    result = self.dispatch_reasoner(request_id, session, client=True)
                 elif token.phase == "reasoner":
                     decision = self.adapter.interpret_reasoner(payload.data)
                     if not isinstance(decision, UMMDecision):

@@ -10,14 +10,21 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from sglang_omni.admission import InvalidRequestError, QueueFullError
+from sglang_omni.admission import QueueFullError
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, construct_stage
-from sglang_omni.pipeline.umm import UMMController, UMMDecision, UMMLimits, route_umm
+from sglang_omni.pipeline.umm import (
+    UMMController,
+    UMMDecision,
+    UMMLimits,
+    UMMRequestError,
+    route_umm,
+)
 from sglang_omni.proto.continuation import ContinuationToken
 from sglang_omni.proto.request import OmniRequest, StagePayload
 from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
+from sglang_omni.serve.openai_errors import generation_error_status_code
 from tests.unit_test.fixtures.pipeline_fakes import fake_factory_path
 from tests.unit_test.pipeline.helpers import make_stage, stage
 
@@ -170,13 +177,12 @@ def test_turn_bound_still_allows_final_reasoning_after_last_generation():
     generation = controller.advance(generate(reasoner))
     last_reasoner = controller.advance(reply(generation, {"url": "media"}))
     with pytest.raises(
-        InvalidRequestError,
+        RuntimeError,
         match=r"max_turns=1\. Raise stages\.<orchestrator>\.factory\.max_turns",
     ) as refused:
         controller.advance(generate(last_reasoner, "must not stream"))
-    assert isinstance(
-        QueueFullError.from_message(str(refused.value)), InvalidRequestError
-    )
+    # Model output, not client input, crossed the bound.
+    assert generation_error_status_code(RuntimeError(str(refused.value))) == 500
     assert controller.active_sessions == 0
 
 
@@ -214,7 +220,7 @@ def test_segment_budget_rejects_entire_transition_before_stream_publication():
     reasoner = controller.advance(request(stream=True))
     generation = controller.advance(generate(reasoner, "first"))
     assert controller.outbox.get_nowait().type == "stream"
-    with pytest.raises(InvalidRequestError, match="max_segments=1"):
+    with pytest.raises(RuntimeError, match="max_segments=1"):
         controller.advance(reply(generation, {"url": "media"}))
     assert controller.outbox.empty()
     assert controller.active_sessions == 0
@@ -222,15 +228,17 @@ def test_segment_budget_rejects_entire_transition_before_stream_publication():
 
 def test_retained_byte_budget_covers_initial_input_and_generated_media():
     small = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=10))
-    with pytest.raises(InvalidRequestError, match="max_context_bytes=10"):
+    with pytest.raises(UMMRequestError, match="max_context_bytes=10") as client:
         small.advance(request())
+    assert generation_error_status_code(RuntimeError(str(client.value))) == 400
     assert small.active_sessions == 0
 
     controller = UMMController(Adapter(), limits=UMMLimits(max_context_bytes=2048))
     reasoner = controller.advance(request())
     generation = controller.advance(generate(reasoner))
-    with pytest.raises(InvalidRequestError, match="max_context_bytes=2048"):
+    with pytest.raises(RuntimeError, match="max_context_bytes=2048") as model:
         controller.advance(reply(generation, {"url": "x" * 4096}))
+    assert generation_error_status_code(RuntimeError(str(model.value))) == 500
     assert controller.active_sessions == 0
 
 
@@ -251,8 +259,9 @@ def test_session_operations_are_refused_before_a_session_exists():
     controller = UMMController(Adapter())
     payload = request()
     payload.request.metadata[SESSION_METADATA_KEY] = {"operation": "open"}
-    with pytest.raises(InvalidRequestError, match="session operations"):
+    with pytest.raises(UMMRequestError, match="session operations") as refused:
         controller.advance(payload)
+    assert generation_error_status_code(RuntimeError(str(refused.value))) == 400
     assert controller.active_sessions == 0
 
 
