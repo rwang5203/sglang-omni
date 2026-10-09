@@ -19,8 +19,10 @@ from sglang_omni.config.schema import (
     CustomVoiceConfig,
     EndpointsConfig,
     PipelineConfig,
+    ProcessConfig,
     StageConfig,
 )
+from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.pipeline.stage_workers import StageLaunchConfig, StageWorkerProcessSpec
 from sglang_omni.profiler.event_recorder import get_recorder
 from tests.unit_test.fixtures.pipeline_fakes import FakeMpContext, FakeRelay
@@ -314,6 +316,30 @@ async def test_mp_runner_startup_failure_includes_child_factory_traceback(
         await runner.start(timeout=30.0)
 
     assert list(tmp_path.iterdir()) == []
+
+
+@pytest.mark.parametrize(
+    ("entry_limit", "expected_max_in_flight"), [(None, None), (3, 6)]
+)
+def test_coordinator_cap_follows_an_entry_stage_that_admits_requests(
+    tmp_path: Path, entry_limit: int | None, expected_max_in_flight: int | None
+) -> None:
+    class EntryAdmitsConfig(PipelineConfig):
+        def entry_stage_admission_limit(self) -> int | None:
+            return entry_limit
+
+    config = EntryAdmitsConfig(
+        **{
+            **make_config(tmp_path).model_dump(),
+            "processes": {"pipeline": ProcessConfig(num_replicas=2)},
+        }
+    )
+    plan, _ = compile_logical_processes(config)
+
+    assert (
+        mp_runner.resolve_coordinator_max_in_flight(config, logical_process_plan=plan)
+        == expected_max_in_flight
+    )
 
 
 @pytest.mark.asyncio
