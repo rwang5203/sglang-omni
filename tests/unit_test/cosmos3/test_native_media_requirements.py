@@ -6,7 +6,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import FastAPI
 
-from sglang_omni.native_generation.media import build_native_media_app
+from sglang_omni.native_generation.media import NativeMediaFrontend
 
 
 @pytest.mark.parametrize("supported", [False, True])
@@ -35,9 +35,9 @@ def test_native_owner_failure_contract_is_required(monkeypatch, supported):
         or SimpleNamespace(pipeline_config=pipeline),
     )
     if supported:
-        assert isinstance(build_native_media_app({}), FastAPI)
+        assert isinstance(NativeMediaFrontend.build({}).app, FastAPI)
         assert len(built) == 1
     else:
         with pytest.raises(RuntimeError, match="worker_failure"):
-            build_native_media_app({})
+            NativeMediaFrontend.build({})
         assert built == []

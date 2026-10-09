@@ -489,9 +489,9 @@ async def run_server(
         # The native routes check their strict ports while they build, so the
         # build finishes before the generation stage binds the same ports.
         build = import_string(native_media_factory)(pipeline_config, port=port)
-        native_media_app = await asyncio.to_thread(build)
+        native_media = await asyncio.to_thread(build)
     else:
-        native_media_app = None
+        native_media = None
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
@@ -575,15 +575,14 @@ async def run_server(
             timeout_keep_alive=120,
         )
         server = PipelineUvicornServer(config)
-        runtime_failure = mp_runner.wait_failed()
-        if native_media_app is not None:
-            from sglang_omni.native_generation.media import mount_native_media_app
-
-            runtime_failure = asyncio.ensure_future(runtime_failure)
-            mount_native_media_app(app, native_media_app, runtime_failure)
+        runtime_watchers = [mp_runner.wait_failed()]
+        if native_media is not None:
+            runtime_watchers[0] = asyncio.ensure_future(runtime_watchers[0])
+            native_media.mount(app, runtime_watchers[0])
+            runtime_watchers.append(native_media.wait_failed())
         else:
             pass
-        await serve_with_failure_watch(server, [runtime_failure])
+        await serve_with_failure_watch(server, runtime_watchers)
     finally:
         logger.info("Shutting down pipeline …")
         await mp_runner.stop()

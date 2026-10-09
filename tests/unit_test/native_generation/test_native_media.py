@@ -1,80 +1,108 @@
 # SPDX-License-Identifier: Apache-2.0
+import asyncio
 from contextlib import asynccontextmanager
+from types import SimpleNamespace
 
+import httpx
 import pytest
 from fastapi import FastAPI
-from fastapi.testclient import TestClient
 
 from sglang_omni.native_generation import media
-from sglang_omni.native_generation.media import mount_native_media_app
+from sglang_omni.serve import create_app
 from sglang_omni.utils.imports import import_string
 
 
-def test_native_routes_and_lifetime_are_composed_without_a_proxy():
-    events = []
+class RunningClient:
+    def health(self):
+        return {"running": True}
 
+
+@pytest.fixture
+def native(monkeypatch):
+    """Native runtime pieces the frontend calls, without a scheduler."""
+    from sglang.multimodal_gen.runtime import (
+        scheduler_client,
+        server_args,
+        server_warmup,
+    )
+
+    native = SimpleNamespace(events=[], warmup=None)
+    args = SimpleNamespace(
+        enable_metrics=False,
+        prompt_enhancer_config=None,
+        warmup_resolutions=None,
+        pipeline_config=SimpleNamespace(
+            supports_action_endpoint=lambda: True,
+            supports_openpi_endpoint=lambda: True,
+        ),
+    )
+
+    def initialize(self, server_args, *, worker_failure=None):
+        native.events.append("initialize")
+
+    def close(self):
+        native.events.append("close")
+
+    monkeypatch.setattr(server_args.ServerArgs, "from_kwargs", lambda **kw: args)
+    monkeypatch.setattr(server_args, "set_global_server_args", lambda args: None)
+    monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
+    monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "close", close)
+    monkeypatch.setattr(
+        server_warmup,
+        "should_run_synthetic_server_warmup",
+        lambda args: native.warmup is not None,
+    )
+
+    async def warm_up(args, forward, *, fail_open):
+        await native.warmup()
+
+    monkeypatch.setattr(server_warmup, "run_async_client_warmup", warm_up)
+    return native
+
+
+def serve(omni, frontend, check):
+    """Run check(client, runtime_failure) against omni inside its lifespan."""
+
+    async def run():
+        runtime_failure = asyncio.get_running_loop().create_future()
+        frontend.mount(omni, runtime_failure)
+        async with omni.router.lifespan_context(omni):
+            transport = httpx.ASGITransport(app=omni)
+            async with httpx.AsyncClient(
+                transport=transport, base_url="http://omni"
+            ) as client:
+                await check(client, runtime_failure)
+        runtime_failure.cancel()
+
+    asyncio.run(run())
+
+
+def test_native_routes_and_lifetime_are_composed_without_a_proxy(native):
     @asynccontextmanager
     async def omni_lifespan(app):
-        events.append("omni_start")
+        native.events.append("omni_start")
         yield
-        events.append("omni_stop")
-
-    @asynccontextmanager
-    async def native_lifespan(app):
-        events.append("native_start")
-        app.state.ready = True
-        yield
-        events.append("native_stop")
+        native.events.append("omni_stop")
 
     omni = FastAPI(lifespan=omni_lifespan)
-    native = FastAPI(lifespan=native_lifespan)
 
     @omni.get("/health")
     def health():
         return {"owner": "omni"}
 
-    @native.get("/health")
-    def native_health():
+    frontend = media.NativeMediaFrontend.build({})
+
+    @frontend.app.get("/v1/images/owner")
+    def owner():
         return {"owner": "native"}
 
-    @native.post("/v1/images/generations")
-    def generate():
-        assert native.state.ready
-        return {"owner": "native"}
+    async def check(client, runtime_failure):
+        assert native.events == ["omni_start", "initialize"]
+        assert (await client.get("/health")).json() == {"owner": "omni"}
+        assert (await client.get("/v1/images/owner")).json() == {"owner": "native"}
 
-    mount_native_media_app(omni, native, object())
-    with TestClient(omni) as client:
-        assert events == ["omni_start", "native_start"]
-        assert client.get("/health").json() == {"owner": "omni"}
-        assert client.post("/v1/images/generations").json() == {"owner": "native"}
-    assert events == ["omni_start", "native_start", "native_stop", "omni_stop"]
-
-
-def test_health_reports_warming_until_the_native_warmup_finishes():
-    import asyncio
-
-    from sglang_omni.serve import create_app
-
-    class RunningClient:
-        def health(self):
-            return {"running": True}
-
-    @asynccontextmanager
-    async def native_lifespan(app):
-        app.state.server_warmup_done = asyncio.Event()
-        yield
-
-    native = FastAPI(lifespan=native_lifespan)
-    omni = create_app(RunningClient(), model_name="native-media")
-    mount_native_media_app(omni, native, object())
-    with TestClient(omni) as client:
-        warming = client.get("/health")
-        assert warming.status_code == 503
-        assert warming.json()["status"] == "warming"
-        native.state.server_warmup_done.set()
-        ready = client.get("/health")
-        assert ready.status_code == 200
-        assert ready.json()["status"] == "healthy"
+    serve(omni, frontend, check)
+    assert native.events == ["omni_start", "initialize", "close", "omni_stop"]
 
 
 # Native create_app also serves these, none of them behind Omni's admin key.
@@ -97,45 +125,65 @@ NATIVE_CONTROL_ROUTES = [
 ]
 
 
-def test_only_native_media_routes_are_served(monkeypatch):
-    from types import SimpleNamespace
-
-    from sglang.multimodal_gen.runtime import scheduler_client, server_args
-
-    from sglang_omni.serve import create_app
-
-    class RunningClient:
-        def health(self):
-            return {"running": True}
-
-    def initialize(self, server_args, *, worker_failure=None):
-        pass
-
-    pipeline = SimpleNamespace(
-        supports_action_endpoint=lambda: True, supports_openpi_endpoint=lambda: True
-    )
-    native_args = SimpleNamespace(enable_metrics=False, pipeline_config=pipeline)
-    monkeypatch.setattr(
-        server_args.ServerArgs, "from_kwargs", lambda **kwargs: native_args
-    )
-    monkeypatch.setattr(server_args, "set_global_server_args", lambda args: None)
-    monkeypatch.setattr(scheduler_client.AsyncSchedulerClient, "initialize", initialize)
+def test_only_native_media_routes_are_served(native):
     omni = create_app(RunningClient(), model_name="native", admin_api_key="secret")
-    mount_native_media_app(omni, media.build_native_media_app({}), object())
-    client = TestClient(omni)
-    for method, path in NATIVE_CONTROL_ROUTES:
-        assert getattr(client, method)(path).status_code == 404, path
-    assert client.get("/v1/videos").json()["object"] == "list"
-    assert client.post("/v1/images/generations", json={}).status_code == 422
+
+    async def check(client, runtime_failure):
+        for method, path in NATIVE_CONTROL_ROUTES:
+            response = await getattr(client, method)(path)
+            assert response.status_code == 404, path
+        assert (await client.get("/v1/videos")).json()["object"] == "list"
+        response = await client.post("/v1/images/generations", json={})
+        assert response.status_code == 422
+
+    serve(omni, media.NativeMediaFrontend.build({}), check)
+
+
+@pytest.mark.parametrize("warmup_fails", [False, True])
+def test_native_warmup_gates_readiness_and_fails_startup(native, warmup_fails):
+    finish = asyncio.Event()
+
+    async def warmup():
+        await finish.wait()
+        if warmup_fails:
+            raise RuntimeError("warmup request failed")
+        else:
+            pass
+
+    native.warmup = warmup
+    frontend = media.NativeMediaFrontend.build({})
+
+    async def check(client, runtime_failure):
+        failed = asyncio.ensure_future(frontend.wait_failed())
+        health = await client.get("/health")
+        assert (health.status_code, health.json()["status"]) == (503, "warming")
+        # Requests answer at once instead of waiting on warmup.
+        assert (await client.get("/v1/videos")).status_code == 503
+        finish.set()
+        if warmup_fails:
+            with pytest.raises(RuntimeError, match="warmup failed"):
+                await asyncio.wait_for(failed, 5)
+            assert (await client.get("/v1/videos")).status_code == 503
+        else:
+            while frontend.warming:
+                await asyncio.sleep(0)
+            assert (await client.get("/health")).status_code == 200
+            assert (await client.get("/v1/videos")).status_code == 200
+            assert not failed.done()
+            failed.cancel()
+
+    serve(create_app(RunningClient(), model_name="native"), frontend, check)
 
 
 def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
 
     built = []
-    app = FastAPI()
+    frontend = object()
     monkeypatch.setattr(
-        media, "build_native_media_app", lambda kwargs: built.append(kwargs) or app
+        media.NativeMediaFrontend,
+        "build",
+        lambda kwargs: built.append(kwargs) or frontend,
     )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
     prepare = import_string(Cosmos3PipelineConfig.native_media_factory)
@@ -150,7 +198,7 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     assert {"scheduler_port", "master_port", "output_path"} <= set(overrides)
     assert 19000 not in {overrides["scheduler_port"], overrides["master_port"]}
     assert built == []
-    assert build() is app
+    assert build() is frontend
     assert built[0]["model_path"] == "checkpoint" and built[0]["base_gpu_id"] == 0
     assert built[0]["host"] == "127.0.0.1"
 
@@ -161,8 +209,6 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
 
 
 def test_native_frontend_builds_before_stage_startup(monkeypatch):
-    import asyncio
-
     from sglang_omni.serve import launcher
 
     events = []
