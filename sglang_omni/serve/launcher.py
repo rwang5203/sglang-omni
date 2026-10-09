@@ -586,7 +586,6 @@ async def run_server(
         if native_media is not None:
             runtime_watchers[0] = asyncio.ensure_future(runtime_watchers[0])
             native_media.mount(app, runtime_watchers[0])
-            runtime_watchers.append(native_media.wait_failed())
         else:
             pass
         await serve_with_failure_watch(server, runtime_watchers)
