@@ -30,6 +30,7 @@ from sglang_omni.proto import (
 )
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+from sglang_omni.serve.openai_errors import generation_error_status_code
 
 if TYPE_CHECKING:
     from sglang import Engine
@@ -545,7 +546,9 @@ class NativeChatScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
         }
 
     def log_failure(self, request_id: str, exc: BaseException) -> None:
-        if str(exc).startswith(REQUEST_ERROR):
+        # The API takes the status from the shared classifier, so a failure it
+        # answers with 400 is the caller's error and logs one warning line.
+        if generation_error_status_code(exc) == 400:
             logger.warning("Native chat request %s failed: %s", request_id, exc)
         else:
             super().log_failure(request_id, exc)
