@@ -70,7 +70,7 @@ def set_sampling_fields(values: dict, explicit: object) -> dict:
 
 
 async def police_media_reference(
-    source: str, max_bytes: int | None, fetched: list[Path]
+    source: str, kind: str, max_bytes: int | None, fetched: list[Path]
 ) -> str:
     """Apply the server media policy to one chat media reference.
 
@@ -82,7 +82,10 @@ async def police_media_reference(
     media itself into a temporary file, listed in fetched for the caller to
     remove, and hands native that file. A refused URL is the caller's error,
     and the shared error classifier decides other fetch failures, as it does
-    for every other model.
+    for every other model. Native's image and audio loaders open a resolved
+    local path as given, while its video loader parses a plain path as a URL
+    and misreads a name that holds #, ? or %, so a resolved local video goes
+    to native as a file URL, which it reads back exactly.
     """
     connector = get_global_resource_connector()
     url = urlparse(source)
@@ -112,16 +115,19 @@ async def police_media_reference(
     elif url.scheme == "file" and url.netloc not in ("", "localhost"):
         raise MediaPolicyError(f"File URL netloc is not supported: {url.netloc}")
     elif url.scheme == "file":
-        return str(
-            resolve_local_file(
-                url2pathname(url.path),
-                allowed_local_media_path=connector.allowed_local_media_path,
-            )
+        resolved = resolve_local_file(
+            url2pathname(url.path),
+            allowed_local_media_path=connector.allowed_local_media_path,
         )
     elif url.scheme:
         raise MediaPolicyError(f"Unsupported media URL scheme: {url.scheme}")
+    elif connector.allowed_local_media_path is None:
+        return source
     else:
-        return str(connector.local_media_path(source))
+        resolved = resolve_local_file(
+            source, allowed_local_media_path=connector.allowed_local_media_path
+        )
+    return resolved.as_uri() if kind == "video_url" else str(resolved)
 
 
 async def police_chat_media(
@@ -139,10 +145,12 @@ async def police_chat_media(
             reference = part.get(kind)
             if isinstance(reference, dict) and isinstance(reference.get("url"), str):
                 reference["url"] = await police_media_reference(
-                    reference["url"], max_bytes, fetched
+                    reference["url"], kind, max_bytes, fetched
                 )
             elif isinstance(reference, str):
-                part[kind] = await police_media_reference(reference, max_bytes, fetched)
+                part[kind] = await police_media_reference(
+                    reference, kind, max_bytes, fetched
+                )
             else:
                 raise ValueError(f"{kind} needs a url")
 
