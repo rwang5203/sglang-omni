@@ -100,7 +100,7 @@ class ThreadedSimpleScheduler(Generic[ComputeInput, ComputeResult]):
         *,
         max_concurrency: int | None = 8,
         abort_callback: Callable[[str], None] | None = None,
-        dispatch_fn: Callable[[ComputeInput], Future] | None = None,
+        dispatch_fn: Callable[[ComputeInput], Future[ComputeResult]] | None = None,
     ):
         self.lock = threading.Lock()
         self.inbox: CountingInbox = CountingInbox()

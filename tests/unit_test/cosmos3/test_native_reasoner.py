@@ -12,6 +12,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fastapi.responses import JSONResponse
 
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
@@ -136,19 +137,28 @@ class Chat:
                 await asyncio.sleep(2)
 
             return SimpleNamespace(body_iterator=frames(), background=background)
-        return {
-            "choices": [
-                {
-                    "message": {"content": "你好"},
-                    "finish_reason": "length",
-                    "response_token_ids": [1, 2],
-                    "meta_info": {
-                        "output_token_logprobs": [[-0.1, 1, "你"], [-0.2, 2, "好"]]
-                    },
-                }
-            ],
-            "usage": {"prompt_tokens": 8, "completion_tokens": 2, "total_tokens": 10},
-        }
+        return JSONResponse(
+            {
+                "choices": [
+                    {
+                        "message": {"content": "你好"},
+                        "finish_reason": "length",
+                        "response_token_ids": [1, 2],
+                        "meta_info": {
+                            "output_token_logprobs": [
+                                [-0.1, 1, "你"],
+                                [-0.2, 2, "好"],
+                            ]
+                        },
+                    }
+                ],
+                "usage": {
+                    "prompt_tokens": 8,
+                    "completion_tokens": 2,
+                    "total_tokens": 10,
+                },
+            }
+        )
 
 
 @contextmanager

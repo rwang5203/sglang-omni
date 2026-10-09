@@ -13,7 +13,7 @@ import threading
 from concurrent.futures import Future
 from copy import deepcopy
 from pathlib import Path
-from typing import Any
+from typing import TYPE_CHECKING
 from urllib.parse import urlparse
 from urllib.request import url2pathname
 
@@ -30,6 +30,17 @@ from sglang_omni.proto import (
 )
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
+
+if TYPE_CHECKING:
+    from sglang import Engine
+    from sglang.srt.entrypoints.openai.protocol import (
+        ChatCompletionRequest,
+        ChatCompletionResponse,
+    )
+    from sglang.srt.entrypoints.openai.serving_chat import OpenAIServingChat
+    from starlette.responses import Response, StreamingResponse
+else:
+    pass
 
 logger = logging.getLogger(__name__)
 
@@ -253,11 +264,7 @@ def build_chat_fields(payload: StagePayload, model: str, fields: set[str]) -> di
     return kwargs
 
 
-def response_dict(response: object) -> dict:
-    if isinstance(response, dict):
-        return response
-    else:
-        pass
+def response_dict(response: ChatCompletionResponse | Response) -> dict:
     if hasattr(response, "body"):
         return json.loads(response.body)
     else:
@@ -265,7 +272,7 @@ def response_dict(response: object) -> dict:
     return response.model_dump()
 
 
-def collect_response(response: object) -> dict:
+def collect_response(response: ChatCompletionResponse | Response) -> dict:
     data = response_dict(response)
     if "error" in data or "choices" not in data:
         if getattr(response, "status_code", None) == 400:
@@ -288,7 +295,7 @@ def collect_response(response: object) -> dict:
     }
 
 
-class NativeReasonerScheduler(ThreadedSimpleScheduler):
+class NativeReasonerScheduler(ThreadedSimpleScheduler[StagePayload, StagePayload]):
     """Submit every request to the native engine loop and let SRT own admission.
 
     Each request becomes one coroutine on the Engine event loop. No worker
@@ -298,9 +305,9 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
 
     def __init__(
         self,
-        engine: object,
-        serving_chat: object,
-        request_type: object,
+        engine: Engine,
+        serving_chat: OpenAIServingChat,
+        request_type: type[ChatCompletionRequest],
         max_concurrency: int | None = None,
         device: int | None = None,
     ):
@@ -339,7 +346,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
                 pass
             raise
 
-    def run_native_loop(self):
+    def run_native_loop(self) -> None:
         if self.device is not None:
             # The current device is per thread, and this thread runs every
             # native tokenizer coroutine, including its device work.
@@ -352,10 +359,10 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
         self.engine.loop.call_soon(self.ready.set)
         self.engine.loop.run_forever()
 
-    def dispatch(self, payload: StagePayload) -> Future:
+    def dispatch(self, payload: StagePayload) -> Future[StagePayload]:
         with self.native_lock:
             if self.closed:
-                cancelled: Future = Future()
+                cancelled: Future[StagePayload] = Future()
                 cancelled.cancel()
                 return cancelled
             else:
@@ -409,7 +416,9 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
                 pass
         return payload
 
-    async def collect_stream(self, request_id: str, response: object) -> dict:
+    async def collect_stream(
+        self, request_id: str, response: StreamingResponse
+    ) -> dict:
         text_parts = []
         usage = None
         finish_reason = "stop"
@@ -463,7 +472,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
         else:
             super().log_failure(request_id, exc)
 
-    async def cancel_native_tasks(self):
+    async def cancel_native_tasks(self) -> None:
         self.engine.tokenizer_manager.abort_request(abort_all=True)
         tasks = [
             task for task in asyncio.all_tasks() if task is not asyncio.current_task()
@@ -472,7 +481,7 @@ class NativeReasonerScheduler(ThreadedSimpleScheduler):
             task.cancel()
         await asyncio.gather(*tasks, return_exceptions=True)
 
-    def stop(self):
+    def stop(self) -> None:
         super().stop()
         with self.native_lock:
             if self.closed:
@@ -574,7 +583,7 @@ def create_reasoner_scheduler(
     gpu_id: int | None = None,
     max_concurrency: int | None = None,
     runtime_gpu_ids: list[int] | None = None,
-    server_args_overrides: dict[str, Any] | None = None,
+    server_args_overrides: dict[str, object] | None = None,
     total_gpu_memory_fraction: float | None = None,
 ) -> NativeReasonerScheduler:
     from sglang_omni.utils.device import resolve_concrete_device
