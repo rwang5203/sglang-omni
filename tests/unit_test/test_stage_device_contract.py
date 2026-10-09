@@ -13,6 +13,7 @@ import pytest
 from huggingface_hub.errors import LocalEntryNotFoundError, RepositoryNotFoundError
 
 import sglang_omni.platforms as platforms
+from sglang_omni.models.registry import resolve_variant
 from sglang_omni.utils.imports import import_string
 
 MODELS_DIR = Path(importlib.import_module("sglang_omni.models").__file__).parent
@@ -34,7 +35,8 @@ def iter_stages():
         if getattr(module, "EntryClass", None) is not None:
             topologies["default"] = module.EntryClass
         topologies.update(getattr(module, "Variants", None) or {})
-        for label, config_cls in topologies.items():
+        for label, variant in topologies.items():
+            config_cls = resolve_variant(variant)
             for stage in config_cls(model_path="unused").stages:
                 yield model, label, stage
 
@@ -639,7 +641,7 @@ def test_every_model_routes_each_process_replica_to_its_own_gpu(
         topologies["default"] = module.EntryClass
     topologies.update(getattr(module, "Variants", None) or {})
     config, replicated_stages = config_with_one_replicated_process(
-        topologies[label], model
+        resolve_variant(topologies[label]), model
     )
     if config is None:
         pytest.skip("no tp_size=1 GPU process to replicate")

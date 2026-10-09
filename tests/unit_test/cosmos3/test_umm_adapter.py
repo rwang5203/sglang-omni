@@ -498,15 +498,26 @@ def test_inline_byte_bounds_fail_and_release_only_owned_directory(
     assert not scheduler.native_requests
 
 
-def test_umm_variant_wires_the_controller_and_inline_generation():
+def test_umm_variant_wires_the_controller_and_inline_generation(monkeypatch):
+    from sglang_omni.config import manager
     from sglang_omni.config.runtime import resolve_stage_typed_kwargs
-    from sglang_omni.models.cosmos3.config import Cosmos3UMMPipelineConfig, Variants
+    from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
+    from sglang_omni.models.cosmos3.umm_config import Cosmos3UMMPipelineConfig
+    from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
     from sglang_omni.pipeline.umm import create_umm_controller
     from tests.unit_test.pipeline.helpers import build_compiled_process_topology
 
-    config = Cosmos3UMMPipelineConfig(model_path="checkpoint")
+    # Both ways of selecting the variant reach the lazily imported class.
+    monkeypatch.setattr(
+        manager, "resolve_config_cls_for_model_path", lambda _: Cosmos3PipelineConfig
+    )
+    config = manager.ConfigManager.from_model_path("checkpoint", "umm").config
+    assert type(config) is Cosmos3UMMPipelineConfig
+    assert (
+        PIPELINE_CONFIG_REGISTRY.get_config_cls_by_name("Cosmos3UMMPipelineConfig")
+        is Cosmos3UMMPipelineConfig
+    )
     build_compiled_process_topology(config)
-    assert Variants["umm"] is Cosmos3UMMPipelineConfig
     assert config.stage_factory_kwargs("generation") == {"inline_media": True}
     args = {
         **resolve_stage_typed_kwargs(config.stage_named("orchestrator")),
