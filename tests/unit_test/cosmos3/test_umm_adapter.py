@@ -16,6 +16,7 @@ import xgrammar as xgr
 from sglang.srt.constrained.json_schema_validation import validate_xgrammar_json_schema
 from xgrammar.testing import _is_grammar_accept_string
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.client.client import Client
 from sglang_omni.client.types import GenerateRequest, SamplingParams
 from sglang_omni.models.cosmos3 import stages as cosmos3_stages
@@ -572,7 +573,7 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
     assert ("anyOf" in schema) is offered
     # The first measurement plans again: c's queued generation, a younger one
     # running ahead of it, and its final answer must still end by 3600, or c
-    # ends now with the deadline error instead of at its deadline.
+    # ends now with the capacity error instead of failing at its deadline.
     umm.expire()
     assert ("c" in umm.contexts) is not ended
     if ended:
@@ -581,7 +582,10 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
             ("c", "admitted"),
             ("c", "error"),
         ]
-        assert "deadline" in str(notices[1].data)
+        # The client gets the error the coordinator rebuilds from its text.
+        error = QueueFullError.from_message(str(notices[1].data))
+        assert generation_error_status_code(error) == 503
+        assert "cannot finish it in time" in str(error)
     else:
         pass
     # The new request plans 8 generations behind those still planned for a

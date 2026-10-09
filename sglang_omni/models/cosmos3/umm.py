@@ -215,7 +215,7 @@ class GenerationBacklogError(QueueFullError):
     """A request that admitted generation work cannot finish in time (HTTP 503)."""
 
     def __init__(self, detail: str) -> None:
-        RuntimeError.__init__(self, f"{QueueFullError.MESSAGE} {detail}")
+        super().__init__(f"{QueueFullError.MESSAGE} {detail}")
 
 
 class RecentMaximum:
@@ -707,7 +707,12 @@ class Cosmos3UMMAdapter:
         """Requests not being ended, in the generation stage's service order."""
         histories = tuple(self.histories.values())
         return sorted(
-            (h for h in histories if h.context.deadline > now), key=lambda h: h.order
+            (
+                h
+                for h in histories
+                if h.context.deadline > now and not h.context.shedding
+            ),
+            key=lambda h: h.order,
         )
 
     def admit(self, context: UMMContext, now: float, generations: int) -> None:
@@ -726,7 +731,7 @@ class Cosmos3UMMAdapter:
         ahead = sum(
             times.planned_seconds(h)
             for h in tuple(self.histories.values())
-            if h.context.deadline > now
+            if h.context.deadline > now and not h.context.shedding
         )
         fits = times.most_generations(context.deadline - now, ahead, None, generations)
         if fits < generations:
@@ -746,9 +751,9 @@ class Cosmos3UMMAdapter:
         most generations that end by its deadline behind the generations just
         planned for the requests ahead of it, never more than before. A
         request that cannot finish even its pending generation and a final
-        answer, or its Reasoner turn in flight, ends now: its deadline moves
-        to now, and the controller's deadline sweep fails it and aborts its
-        queued or running generation. reason ends current, the request in
+        answer, or its Reasoner turn in flight, is shed: the controller's
+        deadline sweep fails it with the capacity error and aborts its queued
+        or running generation. reason ends current, the request in
         transition, if not even its next turn fits.
         """
         times = self.measured(now)
@@ -769,7 +774,7 @@ class Cosmos3UMMAdapter:
                 pending is not None
                 or history.dispatched_at + times.reasoning > context.deadline
             ):
-                context.deadline = now
+                context.shed()
             else:
                 pass
             ahead += times.planned_seconds(history)
@@ -871,9 +876,13 @@ class Cosmos3UMMAdapter:
         now = self.clock()
         reasoning = self.reason_times.maximum(now, self.window_s)
         if reasoning is not None and now + reasoning > context.deadline:
-            # Not even this turn can end in time, so the request ends now:
-            # the controller's deadline check after this step fails it.
-            context.deadline = now
+            # Not even this turn can end in time, so the request ends now with
+            # the capacity error instead of dispatching a turn to be aborted.
+            raise QueueFullError(
+                f"{QueueFullError.MESSAGE} Reasoner turns measured at up to "
+                f"{reasoning:.1f} s leave this Cosmos3 request no time for its "
+                "next turn before its deadline. Retry later"
+            )
         else:
             pass
         # A generation and the Reasoner turn that inspects it need two more
