@@ -827,10 +827,7 @@ async def chat_non_stream(
             status_code=generation_error_status_code(exc), detail=str(exc)
         ) from exc
     except Exception as exc:
-        if generation_error_status_code(exc) == 500:
-            logger.exception("Error generating response for request %s", request_id)
-        else:
-            pass
+        logger.exception("Error generating response for request %s", request_id)
         raise HTTPException(
             status_code=generation_error_status_code(exc), detail=str(exc)
         ) from exc
@@ -1321,10 +1318,7 @@ def register_generate(app: FastAPI) -> None:
         except ValueError as exc:
             raise HTTPException(status_code=400, detail=str(exc)) from exc
         except Exception as exc:
-            if generation_error_status_code(exc) == 500:
-                logger.exception("Error generating rollout for request %s", request_id)
-            else:
-                pass
+            logger.exception("Error generating rollout for request %s", request_id)
             raise HTTPException(
                 status_code=generation_error_status_code(exc), detail=str(exc)
             ) from exc
@@ -1364,12 +1358,14 @@ async def generate_stream(
                 yield f"event: {event}\ndata: {json.dumps(data)}\n\n"
     except Exception as exc:
         status = generation_error_status_code(exc)
-        # Like the speech routes, log a traceback only for unexpected
-        # errors, not for admission refusals under load.
+        # As in chat_stream, a traceback only for unexpected errors.
         if status == 500:
-            logger.exception(f"Error streaming generation for request {request_id}")
+            logger.exception(f"Generate stream failed for request {request_id}")
         else:
-            pass
+            logger.warning(
+                f"Generate stream for request {request_id} failed with "
+                f"status {status}. {exc}"
+            )
         data = {
             "error": {
                 "message": str(exc),
