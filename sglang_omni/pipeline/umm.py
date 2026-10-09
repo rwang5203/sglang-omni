@@ -37,7 +37,7 @@ logger = logging.getLogger(__name__)
 JSONValue: TypeAlias = (
     str | int | float | bool | None | list["JSONValue"] | dict[str, "JSONValue"]
 )
-CloseReason = Literal["completed", "failed", "aborted", "expired", "shutdown"]
+CloseReason = Literal["completed", "failed", "aborted", "expired", "shed", "shutdown"]
 # Request metadata key of the Continuation each controller output carries.
 CONTINUATION_METADATA_KEY = "omni_continuation"
 # A phase result reports context it produced under this data key, and the
@@ -138,8 +138,9 @@ class UMMLimits:
 class UMMContext:
     """Per-request view passed to every adapter callback.
 
-    Adapters read execution_id, request, deadline, remaining_dispatches, and
-    outputs. The other fields belong to the controller.
+    Adapters read execution_id, request, deadline, remaining_dispatches,
+    outputs, and shedding without changing them, and end a request early
+    only through shed. The other fields belong to the controller.
     """
 
     execution_id: str
@@ -152,6 +153,20 @@ class UMMContext:
     expected: Continuation | None = None
     busy: bool = False
     closed: CloseReason | None = None
+    shedding: bool = False
+
+    def shed(self) -> None:
+        """End this request because the deployment cannot finish it in time.
+
+        For an adapter whose plan shows the request can no longer finish
+        before its deadline, usually a waiting request other than the one it
+        advances. The controller's deadline sweep settles it once no
+        transition of it runs: the client gets the capacity error (HTTP 503,
+        which says to retry later), the stages abort its queued and running
+        phase work, and close runs once with reason shed. A request that
+        completes or closes first is unaffected.
+        """
+        self.shedding = True
 
 
 @runtime_checkable
@@ -285,6 +300,15 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             "Raise stages.<orchestrator>.factory.timeout_s for longer requests"
         )
 
+    def shed_error(self) -> QueueFullError:
+        # Starts with QueueFullError.MESSAGE, so it classifies as a full queue.
+        return QueueFullError(
+            f"{QueueFullError.MESSAGE} The UMM request was ended before its "
+            f"timeout_s={self.limits.timeout_s} deadline because this deployment "
+            "cannot finish it in time at its current load. Retry it later, or "
+            "raise stages.<orchestrator>.factory.timeout_s or add serving capacity"
+        )
+
     def check_deadline(self, context: UMMContext) -> None:
         if self.clock() >= context.deadline:
             raise self.deadline_error()
@@ -292,20 +316,23 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
             pass
 
     def expire(self) -> None:
+        """Fail each waiting request that reached its deadline or was shed."""
         now = self.clock()
         with self.lock:
-            expired = [
-                request_id
+            ended = [
+                (request_id, context)
                 for request_id, context in self.contexts.items()
-                if not context.busy and now >= context.deadline
+                if not context.busy and (now >= context.deadline or context.shedding)
             ]
-        for request_id in expired:
-            if self.release(request_id, "expired"):
+        for request_id, context in ended:
+            shed = context.shedding
+            if self.release(request_id, "shed" if shed else "expired"):
                 # The request waits at a phase stage, so this stage stopped
                 # tracking it. Admitting it again lets the stage report the
                 # failure, which aborts the phase everywhere.
                 self.outbox.put(OutgoingMessage(request_id, "admitted"))
-                self.emit_error(request_id, self.deadline_error(), self.outbox)
+                error = self.shed_error() if shed else self.deadline_error()
+                self.emit_error(request_id, error, self.outbox)
             else:
                 pass
 

@@ -144,7 +144,16 @@ bytes of the adapter's retained state, and `close` releases that state once
 per request. Phase names are the model's own: the orchestrator's
 `factory.phases` maps each one to a stage, and two phases may share a stage.
 Each dispatch carries a continuation in its request metadata, so phase stages
-only need to return the request they received.
+only need to return the request they received. Every callback receives the
+request's `UMMContext`, whose `execution_id`, `request`, `deadline`,
+`remaining_dispatches`, `outputs`, and `shedding` the adapter only reads. An
+adapter that finds a request it cannot finish before its deadline, usually
+while it plans another one, calls `shed()` on that request's context. The
+controller's deadline sweep then fails it with the capacity error (HTTP 503,
+which tells the client to retry later), the pipeline aborts its queued and
+running phase work, and the request closes once with reason `shed`, just as a
+request that reaches its deadline fails with the `timeout_s` error (HTTP 500)
+and closes with reason `expired`.
 
 A pipeline config subclasses `UMMPipelineConfig` and declares an
 `orchestrator` stage (factory `create_umm_controller`, route_fn `route_umm`,

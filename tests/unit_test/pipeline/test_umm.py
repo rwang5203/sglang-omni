@@ -13,6 +13,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
+from sglang_omni.admission import QueueFullError
 from sglang_omni.comm.data_ref import DataRef
 from sglang_omni.config.schema import FactoryArgs
 from sglang_omni.pipeline.local_dispatch import LocalStageDispatcher
@@ -773,10 +774,25 @@ async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage(
 
 
 @pytest.mark.asyncio
-async def test_waiting_controller_reports_its_deadline_through_its_stage():
+@pytest.mark.parametrize("ending", ["deadline", "shed"])
+async def test_waiting_controller_reports_its_deadline_through_its_stage(ending):
     clock = [0.0]
+    waiting = []
+
+    class Planner(SplitAdapter):
+        def start(self, context):
+            if ending == "shed":
+                # The plan for a new request leaves no time for a waiting one.
+                for other in waiting:
+                    other.shed()
+            else:
+                pass
+            waiting.append(context)
+            return super().start(context)
+
+    adapter = Planner()
     controller = make_controller(
-        SplitAdapter(), limits=limits(timeout_s=1), clock=lambda: clock[0]
+        adapter, limits=limits(timeout_s=1), clock=lambda: clock[0]
     )
     orchestrator = make_stage(
         name="orchestrator", get_next=route_umm, scheduler=controller
@@ -784,16 +800,31 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage():
     orchestrator.send_to_stage = AsyncMock()
     orchestrator.active_requests.add("req")
     await orchestrator.execute(initial())
-    controller.emit_result(
-        "req", controller.advance(controller.inbox.get_nowait().data), controller.outbox
-    )
+    dispatched = controller.advance(controller.inbox.get_nowait().data)
+    controller.emit_result("req", dispatched, controller.outbox)
     await orchestrator.drain_outbox_external()
     # The dispatch left the stage, which no longer tracks the request.
     assert orchestrator.send_to_stage.await_count == 1
     assert not orchestrator.active_requests
-    clock[0] = 2.0
+    if ending == "shed":
+        controller.advance(initial("other"))
+    else:
+        clock[0] = 2.0
+    controller.expire()
     controller.expire()
     await orchestrator.drain_outbox_external()
+    # The failure makes the coordinator abort the request's queued phase work.
     (failure,) = orchestrator.control_plane.completions
     assert not failure.success and "timeout_s=1" in failure.error
     assert not orchestrator.active_requests and "req" in orchestrator.aborted
+    # The coordinator rebuilds the failure from its text for the client.
+    error = QueueFullError.from_message(failure.error)
+    status, wording, reason = {
+        "deadline": (500, "deadline exceeded", "expired"),
+        "shed": (503, "Retry it later", "shed"),
+    }[ending]
+    assert generation_error_status_code(error) == status and wording in str(error)
+    assert adapter.closed == [reason]
+    assert list(controller.contexts) == ([] if ending == "deadline" else ["other"])
+    with pytest.raises(RuntimeError, match="inactive request"):
+        controller.advance(reply(dispatched, generate("late")))
