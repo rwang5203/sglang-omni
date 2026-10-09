@@ -331,7 +331,7 @@ def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
     # The native scheduler socket follows host, so it stays on loopback
     # whatever host the Omni HTTP server binds.
     assert overrides["host"] == "127.0.0.1" and overrides["port"] == 19000
-    assert overrides["strict_ports"] is True
+    assert overrides["strict_ports"] is True and overrides["input_save_path"] is None
     assert {"scheduler_port", "master_port", "output_path"} <= set(overrides)
     assert 19000 not in {overrides["scheduler_port"], overrides["master_port"]}
     assert built == []

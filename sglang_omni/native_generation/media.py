@@ -116,6 +116,9 @@ def prepare_native_media_app(
     # startup fails if another process takes one of them.
     kwargs.setdefault("scheduler_port", unused_port({port}))
     kwargs.setdefault("master_port", unused_port({port, kwargs["scheduler_port"]}))
+    # Native routes keep uploads in a temporary directory for their request
+    # or video job, instead of a directory that grows with every request.
+    kwargs.setdefault("input_save_path", None)
     output_dir = Path(getattr(stage.factory, "output_dir", None) or "outputs")
     kwargs.update(
         host=NATIVE_HOST,
