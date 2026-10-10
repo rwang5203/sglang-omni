@@ -303,7 +303,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         super().__init__(
             self.generate,
             abort_callback=self.cancel_native,
-            shutdown_callback=generator.shutdown,
+            shutdown_callback=self.shutdown_native,
         )
         self.requires_tp_work_fanout = False
         if self.workers:
@@ -319,6 +319,45 @@ class NativeGenerationScheduler(SimpleScheduler):
             f"Native generation worker {process.pid} exited "
             f"with code {process.exitcode}"
         )
+
+    def shutdown_native(self) -> None:
+        """Shut native generation down, waiting for its workers only while
+        they live.
+
+        Native shutdown asks the scheduler to stop and waits for its answer,
+        up to its own timeout. A worker that already exited, as on a signal
+        to the whole process group, never answers, so the stage stops waiting
+        once every worker exited, and the rest of the native shutdown, which
+        only joins those workers and closes the client, finishes on its own
+        thread.
+        """
+        reader, writer = multiprocessing.Pipe(duplex=False)
+        failure: list[BaseException] = []
+
+        def run() -> None:
+            try:
+                self.generator.shutdown()
+            except BaseException as exc:
+                failure.append(exc)
+            finally:
+                writer.close()
+
+        threading.Thread(target=run, name="native-shutdown", daemon=True).start()
+        waiting = [reader, *(process.sentinel for process in self.workers)]
+        try:
+            while reader in waiting and len(waiting) > 1:
+                for ready in multiprocessing.connection.wait(waiting):
+                    waiting.remove(ready)
+            if reader in waiting and not self.workers:
+                multiprocessing.connection.wait([reader])
+            else:
+                pass
+        finally:
+            reader.close()
+        if failure:
+            raise failure[0]
+        else:
+            pass
 
     def watch_workers(self) -> None:
         """Fail the stage on a native worker exit while idle, without polling."""

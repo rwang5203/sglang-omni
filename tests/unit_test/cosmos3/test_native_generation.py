@@ -383,3 +383,33 @@ def test_background_warmup_sends_one_step_while_the_stage_serves(tmp_path, monke
         time.sleep(0.01)
     # The warmup input goes once the step ends.
     assert list(tmp_path.iterdir()) == []
+
+
+def test_stop_stops_waiting_on_native_shutdown_once_workers_exited(tmp_path):
+    import multiprocessing
+
+    parent, child = multiprocessing.get_context("fork").Pipe()
+    worker = multiprocessing.get_context("fork").Process(target=child.recv)
+    worker.start()
+    release = threading.Event()
+
+    class StuckGenerator(Generator):
+        local_scheduler_process = [worker]
+
+        def shutdown(self):
+            super().shutdown()
+            # Native waits for the scheduler's answer, which a worker that
+            # already left never sends.
+            release.wait(30)
+
+    generator = StuckGenerator(None)
+    scheduler = NativeGenerationScheduler(generator, str(tmp_path))
+    threading.Timer(0.2, parent.send, args=("exit",)).start()
+    started = time.monotonic()
+    try:
+        scheduler.stop()
+        assert time.monotonic() - started < 10
+        assert generator.shutdown_count == 1
+    finally:
+        release.set()
+        worker.join(timeout=5)
