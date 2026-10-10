@@ -627,6 +627,9 @@ class UMMOutputRelay:
         self.outbox: queue.Queue[OutgoingMessage] = queue.Queue()
         self.running = False
 
+    def warm_up_serving_thread(self) -> None:
+        """Keep the scheduler contract. The relay has nothing to warm."""
+
     def start(self) -> None:
         self.running = True
         while self.running:
