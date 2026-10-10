@@ -8,7 +8,6 @@ import logging
 import multiprocessing
 import multiprocessing.connection
 import os
-import pickle
 import queue
 import shutil
 import tempfile
@@ -20,6 +19,10 @@ from urllib.parse import unquote, urlparse
 from uuid import uuid4
 
 from sglang_omni.native_generation import cancellation
+from sglang_omni.native_generation.media import (
+    NativeMediaApp,
+    native_media_server_kwargs,
+)
 from sglang_omni.preprocessing.resource_connector import (
     MediaPolicyError,
     get_global_resource_connector,
@@ -410,6 +413,10 @@ class NativeGenerationScheduler(SimpleScheduler):
                         exc_info=True,
                     )
 
+    def http_app(self) -> NativeMediaApp:
+        """Native SGLang's media routes, served from this stage's process."""
+        return NativeMediaApp(self.generator.server_args, self.request_fields)
+
     def signal_native_cancellation(self, request: GenerationRequest) -> None:
         """Mark a running request cancelled. Call with abort_lock held, so the
         marker lands before generate removes the request workspace."""
@@ -679,14 +686,14 @@ def create_generation_scheduler(
     output_dir: str = "outputs",
     runtime_gpu_ids: list[int] | None = None,
     server_args_overrides: dict[str, object] | None = None,
-    server_args_path: str | None = None,
 ) -> NativeGenerationScheduler:
-    """``server_args_path`` receives the resolved native server arguments,
-    which the native media routes of the Omni HTTP process load. When those
-    arguments select native's server warmup, the stage runs it before it
-    reports ready, as native's own server does, and keeps the warmup input in
-    the directory of ``server_args_path``, which the launcher removes when
-    the stages do not start."""
+    """Start native generation for this stage.
+
+    The native settings the media routes rely on are settled here, in the
+    stage process, before the native runtime starts, and the scheduler serves
+    those routes from this process. When the native server arguments select
+    native's server warmup, the stage runs it before it reports ready, as
+    native's own server does, with its input under output_dir."""
     from sglang_omni.utils.device import resolve_concrete_device
 
     concrete_device = resolve_concrete_device(device, gpu_id)
@@ -709,11 +716,14 @@ def create_generation_scheduler(
         should_run_synthetic_server_warmup,
     )
 
-    kwargs = native_server_kwargs(
-        model_path, gpu_id, server_args_overrides, runtime_gpu_ids
-    )
     output_dir = str(Path(output_dir).resolve())
     Path(output_dir).mkdir(parents=True, exist_ok=True)
+    kwargs = native_server_kwargs(
+        model_path,
+        gpu_id,
+        native_media_server_kwargs(server_args_overrides, output_dir=output_dir),
+        runtime_gpu_ids,
+    )
     # Native applies plugin hooks once per process, ahead of its server
     # arguments as DiffGenerator.from_pretrained does. Applying them here,
     # outside the activation below, keeps this host out of the hooks it arms
@@ -764,17 +774,8 @@ def create_generation_scheduler(
             generator.server_args
         ) and not should_run_explicit_client_warmup(generator.server_args):
             # A stage stopped during the warmup runs no finalizer, so its
-            # input goes with the launcher's handoff directory.
-            scheduler.warm_up(
-                None if server_args_path is None else os.path.dirname(server_args_path)
-            )
-        else:
-            pass
-        if server_args_path is not None:
-            staging = f"{server_args_path}.partial"
-            with open(staging, "wb") as handle:
-                pickle.dump(generator.server_args, handle)
-            os.replace(staging, server_args_path)
+            # input sits with the request workspaces of this stage.
+            scheduler.warm_up(output_dir)
         else:
             pass
         return scheduler

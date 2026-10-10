@@ -19,13 +19,13 @@ curl http://127.0.0.1:8000/v1/images/generations \
 
 - Only the routes above are served. Native weights, memory, LoRA, rollout, mesh, realtime, server info and stats routes are not, so use the Omni admin routes, which require the admin key when one is set.
 - The native scheduler listens on `127.0.0.1` whatever host the server binds. Startup fails if the generation stage's `server_args_overrides` set another `host`.
-- The routes start on the first request to them, which loads native SGLang's route modules into the server process once. That request takes several seconds longer, about 7 seconds with Cosmos3 Nano, and the server process keeps about 0.5 GiB more memory from then on. Requests that arrive meanwhile wait for the same start. A server whose clients never call these routes starts and runs as if they were absent.
-- If the routes cannot start, for example because the prompt enhancer config cannot be read, these routes answer 503 with the cause until the server restarts, and the other routes keep serving.
-- If the native scheduler or the generation stage stops, requests in flight and new requests on these routes get 503 at once, and the server stops when the generation stage fails.
+- The routes run in the generation stage's process, which already holds native SGLang, and start with that stage. The Omni server relays them to the stage over a local socket and imports no native module itself, so the first request to them pays no start and the server process keeps no native memory.
+- If the routes cannot start, for example because the prompt enhancer config cannot be read, the generation stage fails to start and the server reports the cause.
+- If the native scheduler stops, requests in flight and new requests on these routes get 503 at once. If the generation stage stops, these routes answer 503, and the server stops when the generation stage fails.
 
 ## Server warmup
 
-With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. The native routes still start on their first request. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. Two series of paired launches of Cosmos3 Nano on one H200, each launch with the warmup paired with one without it, measured these costs as the mean difference and its 95% interval:
+With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. Two series of paired launches of Cosmos3 Nano on one H200, each launch with the warmup paired with one without it, measured these costs as the mean difference and its 95% interval:
 
 | Cost against warmup off | First series | Second series, busier host |
 | --- | --- | --- |
