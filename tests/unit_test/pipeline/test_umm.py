@@ -43,7 +43,10 @@ from sglang_omni.proto.session import SESSION_METADATA_KEY
 from sglang_omni.relay.shm import ShmRelay
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.serve.openai_errors import generation_error_status_code
-from tests.unit_test.fixtures.pipeline_fakes import RecordingStageControlPlane
+from tests.unit_test.fixtures.pipeline_fakes import (
+    RecordingStageControlPlane,
+    block_on_inbox,
+)
 from tests.unit_test.pipeline.helpers import (
     build_compiled_process_topology,
     make_stage,
@@ -418,7 +421,13 @@ def test_deadline_fails_a_waiting_request_once_and_bounds_adapter_work():
     assert controller.outbox.empty() and not controller.contexts
 
 
-def test_scheduler_loop_sweeps_the_deadline_of_a_waiting_request():
+@pytest.mark.parametrize("wait", [None, block_on_inbox], ids=["shipped", "blocking"])
+def test_scheduler_loop_sweeps_the_deadline_of_a_waiting_request(monkeypatch, wait):
+    if wait is not None:
+        # A loop that waits for work, so only the controller can wake it.
+        wait(monkeypatch)
+    else:
+        pass
     controller = make_controller(SplitAdapter(), limits=limits(timeout_s=0.1))
     worker = threading.Thread(target=controller.start)
     worker.start()
@@ -432,6 +441,22 @@ def test_scheduler_loop_sweeps_the_deadline_of_a_waiting_request():
         controller.stop()
         worker.join(timeout=2)
     assert not worker.is_alive() and not controller.contexts
+
+
+def test_scheduler_loop_serves_requests_whose_deadline_outlasts_any_wait():
+    # The deadline lies past the longest timeout a wait accepts.
+    controller = make_controller(SplitAdapter(), limits=limits(timeout_s=1e12))
+    worker = threading.Thread(target=controller.start)
+    worker.start()
+    try:
+        for request_id in ("req", "other"):
+            message = IncomingMessage(request_id, "new_request", initial(request_id))
+            controller.inbox.put(message)
+            assert controller.outbox.get(timeout=2).type == "result"
+    finally:
+        controller.stop()
+        worker.join(timeout=2)
+    assert not worker.is_alive() and controller.outbox.empty()
 
 
 @pytest.mark.parametrize(
