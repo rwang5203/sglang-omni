@@ -495,7 +495,17 @@ async def run_server(
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
-    await mp_runner.start(timeout=startup_timeout)
+    try:
+        await mp_runner.start(timeout=startup_timeout)
+    except BaseException:
+        # A start that fails or is cancelled never calls the loader, and a
+        # SIGTERM then ends the server without the exit handler that would
+        # remove what the loader holds.
+        if load_native_media is not None:
+            load_native_media.discard()
+        else:
+            pass
+        raise
     coordinator = mp_runner.coordinator
 
     # Plans are resolved once inside ``mp_runner.start()`` (which applies

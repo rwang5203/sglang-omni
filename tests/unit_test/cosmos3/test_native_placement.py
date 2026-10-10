@@ -245,11 +245,14 @@ def test_generation_factory_selects_cooperative_cancellation(
     assert cancellation.ACTIVATION_ENV not in os.environ
     # Arguments that select native's server warmup run it in the stage before
     # it is ready, through the client every request uses, failing open as
-    # native does without explicit warmup resolutions, and its input goes.
+    # native does without explicit warmup resolutions, and its input goes. It
+    # lives in the handoff directory, which the launcher removes when a stage
+    # stopped during the warmup could not.
     if case == "native":
         [(warmup_args, forward)] = warmups
         assert forward == scheduler_client.sync_scheduler_client.forward
         assert warmup_args.resolved == case
+        assert os.path.dirname(warmup_args.input_save_path) == str(tmp_path)
         assert not os.path.exists(warmup_args.input_save_path)
         assert "Synthetic server warmup failed" in caplog.text
     else:

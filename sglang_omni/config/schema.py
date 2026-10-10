@@ -622,7 +622,7 @@ class PipelineConfig(BaseModel):
     """Import path of ``(config, *, port) -> loader`` for the native media
     routes of a native generation stage, see sglang_omni.native_generation.media.
     The launcher calls it before stages start and calls the loader once they
-    started."""
+    started, or the loader's ``discard`` when they do not start."""
     allow_audio_chunking: ClassVar[bool] = False
     max_native_clip_s: ClassVar[float | None] = None
     min_tail_s: ClassVar[float] = 0.5

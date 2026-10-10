@@ -25,18 +25,20 @@ curl http://127.0.0.1:8000/v1/images/generations \
 
 ## Server warmup
 
-With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. The native routes still start on their first request. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. With Cosmos3 Nano on one H200 it costs:
+With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. The native routes still start on their first request. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. Two series of paired launches of Cosmos3 Nano on one H200, each launch with the warmup paired with one without it, measured these costs as the mean difference and its 95% interval:
 
-| Cost against warmup off | Typical | At most |
+| Cost against warmup off | First series | Second series, busier host |
 | --- | --- | --- |
-| Time until `/health` answers 200 | +14 s, 11 s of them native's automatic residency probe | +20 s |
-| Energy of the generation GPU until ready | +9 kJ | +12 kJ |
-| Energy of each other visible GPU until ready, idle during the longer startup | +1.3 kJ | +2.5 kJ |
-| GPU memory in use from readiness until the first request | +5.4 GiB | +5.5 GiB |
-| Host memory at readiness, all of it in the native worker | +0.9 GiB | +1.5 GiB |
-| Host memory after the first request, all of it in the native worker | +0.1 GiB | +0.5 GiB |
+| Time until `/health` answers 200 | +16.2 s (+13.1 to +19.3 s) | +24.1 s (-17.9 to +66.2 s) |
+| Energy of the generation GPU until ready | +9.1 kJ (+8.7 to +9.4 kJ) | +10.0 kJ (+5.4 to +14.6 kJ) |
+| Energy of the other visible GPU until ready, idle during the longer startup | +1.3 kJ (+1.0 to +1.5 kJ) | +1.9 kJ (-1.4 to +5.1 kJ) |
+| GPU memory in use from readiness until the first request | +5568 MiB in every launch | +5568 MiB in every launch |
+| Native worker memory at readiness | PSS +873 MiB (+677 to +1069 MiB), RSS +859 MiB (+858 to +860 MiB) | PSS +745 MiB (+721 to +768 MiB), RSS +859 MiB (+856 to +862 MiB) |
+| Native worker memory after the first request | PSS +52 MiB (-18 to +121 MiB), RSS +80 MiB (+80 to +81 MiB) | PSS +115 MiB (-67 to +297 MiB), RSS +81 MiB (+78 to +83 MiB) |
 
-In return the first request after readiness runs about 1.7 s faster.
+Native SGLang's three warmup requests take about 14 s of the readiness difference, 11 s of them its automatic residency probe. Readiness, and with it the energy used until ready, also varies with how fast the weights load, which depends on the page cache and on other load on the host. In the second series the transformer load took 12 to 38 s per launch, and the readiness difference of single pairs ranged from -14.5 s to +44.7 s. GPU memory returns to its level without the warmup with the first request.
+
+In return the first request after readiness is faster: 1.2 s instead of 2.8 s in the first series (1.6 s less, 95% interval 1.1 to 2.2 s) and 0.9 s instead of 2.8 s in the second (1.9 s less, 1.5 to 2.3 s).
 
 ## Media policy
 
