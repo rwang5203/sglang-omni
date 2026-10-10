@@ -405,8 +405,18 @@ def test_coordinator_stream_early_close_aborts_and_cleans_state() -> None:
     asyncio.run(run())
 
 
-@pytest.mark.parametrize(("mode", "ended"), [("abort", True), ("in_place", False)])
-def test_abort_mode_pause_ends_in_flight_streams(mode: str, ended: bool) -> None:
+@pytest.mark.parametrize(
+    ("mode", "stages", "dropped", "ended"),
+    [
+        ("abort", None, [], True),
+        ("abort", ["decode"], ["req-1"], True),
+        ("abort", ["decode"], [], False),
+        ("in_place", None, [], False),
+    ],
+)
+def test_abort_mode_pause_ends_in_flight_streams(
+    mode: str, stages: list[str] | None, dropped: list[str], ended: bool
+) -> None:
     async def run() -> None:
         coordinator = Coordinator(
             "inproc://complete",
@@ -424,7 +434,7 @@ def test_abort_mode_pause_ends_in_flight_streams(mode: str, ended: bool) -> None
                 "action": "pause_generation",
                 "success": True,
                 "message": "",
-                "results": [],
+                "results": [{"data": {"aborted_request_ids": dropped}}],
             }
 
         coordinator.admin = paused
@@ -435,7 +445,7 @@ def test_abort_mode_pause_ends_in_flight_streams(mode: str, ended: bool) -> None
                 break
             await asyncio.sleep(0)
 
-        await coordinator.pause_generation({"mode": mode})
+        await coordinator.pause_generation({"mode": mode}, stages=stages)
         await asyncio.sleep(0)
 
         assert next_message.done() is ended

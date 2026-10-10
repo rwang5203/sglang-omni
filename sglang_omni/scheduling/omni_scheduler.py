@@ -2696,8 +2696,10 @@ class OmniScheduler(Generic[RequestDataT]):
             self.last_pause_mode = mode
             self.resolve_pending_async()
             num_paused = 0
+            aborted_request_ids: list[str] = []
             if mode == "abort":
-                num_paused = self.abort_all_requests()
+                aborted_request_ids = self.abort_all_requests()
+                num_paused = len(aborted_request_ids)
             elif mode == "retract":
                 num_paused = self.retract_running_requests()
             else:
@@ -2708,6 +2710,7 @@ class OmniScheduler(Generic[RequestDataT]):
             "data": {
                 "mode": mode,
                 "num_paused_requests": num_paused,
+                "aborted_request_ids": aborted_request_ids,
                 "engine_paused": self._engine_paused,  # noqa: leading-underscore
             },
         }
@@ -2767,7 +2770,7 @@ class OmniScheduler(Generic[RequestDataT]):
                 num_paused = 0
                 abort_all_requests = bool(payload.get("abort_all_requests", False))
                 if abort_all_requests:
-                    num_paused = self.abort_all_requests()
+                    num_paused = len(self.abort_all_requests())
                 else:
                     active_request_ids = self.active_request_ids()
                     if active_request_ids and not self.can_update_active_requests(
@@ -2918,7 +2921,7 @@ class OmniScheduler(Generic[RequestDataT]):
             data = self.model_worker.weights_checker(action)
         return {"success": True, "message": "ok", "data": data}
 
-    def abort_all_requests(self) -> int:
+    def abort_all_requests(self) -> list[str]:
         request_ids = self.active_request_ids()
         for request_id in request_ids:
             self.abort(request_id, defer_running_cleanup=False)
@@ -2935,7 +2938,7 @@ class OmniScheduler(Generic[RequestDataT]):
             else:
                 pass
         self.chunked_req = None
-        return len(request_ids)
+        return request_ids
 
     def active_request_ids(self) -> list[str]:
         request_ids: set[str] = set()

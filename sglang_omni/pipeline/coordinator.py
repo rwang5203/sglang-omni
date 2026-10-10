@@ -293,13 +293,23 @@ class Coordinator(CoordinatorSessions):
             stages=stages,
             timeout_s=timeout_s,
         )
-        # note (Richard Wang): in abort mode the stages drop their requests
-        # without telling anyone, so end those requests here too, or their
-        # clients wait for output that never comes.
+        # note (Richard Wang): in abort mode each paused stage drops the requests
+        # it holds without telling anyone, so end the ones they report here too,
+        # or their clients wait for output that never comes. A pause of every
+        # stage also ends every other request in flight, as SGLang does.
         mode = str((payload or {}).get("mode") or "abort")
         if response["success"] and mode == "abort":
+            dropped = {
+                request_id
+                for result in response["results"]
+                for request_id in result["data"].get("aborted_request_ids") or ()
+            }
+            if stages is None:
+                dropped.update(in_flight)
+            else:
+                pass
             await asyncio.gather(
-                *(self.abort(request_id) for request_id in in_flight),
+                *(self.abort(request_id) for request_id in sorted(dropped)),
                 return_exceptions=True,
             )
         else:
