@@ -54,6 +54,7 @@ from sglang_omni.proto.messages import StreamMessage
 from sglang_omni.serve.openai_api import create_app
 from sglang_omni.serve.protocol import DEFAULT_TTS_BATCH_MAX_ITEMS
 from sglang_omni.serve.realtime.manager import RealtimeDeployment
+from sglang_omni.serve.stage_routes import StageRoutes, export_server_port
 from sglang_omni.utils.gpu_compat import apply_gpu_compat_env_defaults
 from sglang_omni.utils.gpu_memory import (
     GpuDeviceInfo,
@@ -483,6 +484,7 @@ async def run_server(
     export_media_policy(allowed_local_media_path, allowed_media_domains)
     # 0. Check port availability before loading models
     port = find_available_port(host, port)
+    export_server_port(port)
 
     native_media_factory = type(pipeline_config).native_media_factory
     if native_media_factory is not None:
@@ -582,6 +584,14 @@ async def run_server(
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
         mount_profiler_routes(app, profiler_ctl, profiler_dir)
+        # Added last, so Omni's own routes keep their paths.
+        for stage_name, prefixes, socket_path in mp_runner.stage_http_routes:
+            app.router.routes.append(StageRoutes(stage_name, prefixes, socket_path))
+            logger.info(
+                "Stage %s serves %s from its own process",
+                stage_name,
+                ", ".join(prefixes),
+            )
 
         config = uvicorn.Config(
             app,
