@@ -17,6 +17,7 @@ from sglang_omni.models.cosmos3.stages import (
 from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.message import IncomingMessage
 from sglang_omni.serve.openai_errors import generation_error_status_code
+from tests.unit_test.fixtures.pipeline_fakes import block_on_inbox
 
 
 def payload(inputs="A quiet lake", **params):
@@ -134,11 +135,22 @@ def test_native_failure_cannot_become_empty_success(result, tmp_path):
         scheduler.generate(payload())
 
 
-@pytest.mark.parametrize("in_flight", [False, True])
-def test_dead_native_worker_fails_the_owning_stage(tmp_path, in_flight):
+@pytest.mark.parametrize(
+    "in_flight, wait",
+    [(False, None), (True, None), (False, block_on_inbox)],
+    ids=["idle", "in-flight", "idle-blocking-loop"],
+)
+def test_dead_native_worker_fails_the_owning_stage(
+    tmp_path, monkeypatch, in_flight, wait
+):
     import multiprocessing
     import time
 
+    if wait is not None:
+        # A loop that waits for work, so only the stage can wake it.
+        wait(monkeypatch)
+    else:
+        pass
     worker = multiprocessing.get_context("spawn").Process(
         target=time.sleep, args=(60,), daemon=True
     )
@@ -154,30 +166,34 @@ def test_dead_native_worker_fails_the_owning_stage(tmp_path, in_flight):
     generator = BlockedGenerator(None)
     generator.local_scheduler_process = [worker]
     scheduler = NativeGenerationScheduler(generator, str(tmp_path))
-    failures = queue.Queue()
+    crashes = queue.Queue()
 
-    def run_request():
+    def run_loop():
+        # The stage stops once its scheduler loop raises.
         try:
-            scheduler.generate(payload())
+            scheduler.start()
         except RuntimeError as exc:
-            failures.put(exc)
+            crashes.put(exc)
 
-    if in_flight:
-        threading.Thread(target=run_request, daemon=True).start()
-        assert entered.wait(5)
-    else:
-        pass
-    worker.kill()
-    worker.join(5)
-    if in_flight:
-        assert f"{worker.pid} exited" in str(failures.get(timeout=5))
-    else:
-        pass
-    deadline = time.monotonic() + 5
-    while scheduler.worker_failure is None and time.monotonic() < deadline:
-        time.sleep(0.01)
-    with pytest.raises(RuntimeError, match=f"{worker.pid} exited"):
-        scheduler.next_message()
+    loop = threading.Thread(target=run_loop, daemon=True)
+    loop.start()
+    try:
+        if in_flight:
+            scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload()))
+            assert entered.wait(5)
+        else:
+            pass
+        worker.kill()
+        worker.join(5)
+        if in_flight:
+            failed = scheduler.outbox.get(timeout=5)
+            assert failed.type == "error" and f"{worker.pid} exited" in str(failed.data)
+        else:
+            pass
+        assert f"{worker.pid} exited" in str(crashes.get(timeout=5))
+    finally:
+        scheduler.stop()
+        loop.join(5)
     assert list(tmp_path.iterdir()) == []
 
 
