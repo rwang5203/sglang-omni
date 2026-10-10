@@ -94,9 +94,15 @@ def umm_app(coordinator=None, *, interleaved=True):
     return TestClient(app)
 
 
-def test_generate_and_chat_keep_ordered_terminal_manifest():
+# Stop strings never apply to an interleaved request, so its text matches
+# its segments whether or not the client sets one.
+@pytest.mark.parametrize("stop", [None, ["Fin"]])
+def test_generate_and_chat_keep_ordered_terminal_manifest(stop):
     client = umm_app()
-    generated = client.post("/generate", json={"prompt": "Draw then describe"})
+    generated = client.post(
+        "/generate",
+        json={"prompt": "Draw then describe", "sampling_params": {"stop": stop}},
+    )
     assert generated.status_code == 200
     assert generated.json()["segments"] == [s.to_dict() for s in SEGMENTS]
     assert generated.json()["text"] == "Drawing.Finished."
@@ -105,6 +111,7 @@ def test_generate_and_chat_keep_ordered_terminal_manifest():
         json={
             "model": "cosmos3",
             "messages": [{"role": "user", "content": "Draw then describe"}],
+            "stop": stop,
         },
     )
     assert chat.status_code == 200
@@ -156,7 +163,8 @@ def test_only_interleaved_pipelines_stream_generate(interleaved):
         assert coordinator.submitted == []
 
 
-def test_chat_sse_exposes_media_segment_without_duplicate_text():
+@pytest.mark.parametrize("stop", [None, ["Fin"]])
+def test_chat_sse_exposes_media_segment_without_duplicate_text(stop):
     client = umm_app()
     response = client.post(
         "/v1/chat/completions",
@@ -164,6 +172,7 @@ def test_chat_sse_exposes_media_segment_without_duplicate_text():
             "model": "cosmos3",
             "messages": [{"role": "user", "content": "Draw then describe"}],
             "stream": True,
+            "stop": stop,
         },
     )
     messages = [

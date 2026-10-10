@@ -256,7 +256,13 @@ class Client:
             pass
 
         full_text = "".join(text_parts)
-        stop_start = stop_string_start(full_text, request.sampling.stop)
+        # Stop strings never apply to an interleaved result, whose text the
+        # adapter builds from its decisions, so the text matches the segments.
+        stop_start = (
+            None
+            if isinstance(last_chunk, UMMGenerateChunk)
+            else stop_string_start(full_text, request.sampling.stop)
+        )
         if stop_start is not None:
             full_text = full_text[:stop_start]
         else:
@@ -351,7 +357,12 @@ class Client:
                         pass
                 else:
                     pass
-                if stop_trimmer is not None and chunk.modality == "text" and text:
+                if (
+                    stop_trimmer is not None
+                    and chunk.modality == "text"
+                    and text
+                    and not isinstance(chunk, UMMGenerateChunk)
+                ):
                     text = stop_trimmer.push(text) or None
                 else:
                     pass
