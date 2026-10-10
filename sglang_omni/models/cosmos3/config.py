@@ -9,13 +9,11 @@ from sglang_omni.config import (
     PipelineConfig,
     StageConfig,
 )
+from sglang_omni.native_generation import ROUTE_PREFIXES
 
 
 class Cosmos3PipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
-    native_media_factory: ClassVar[str] = (
-        "sglang_omni.models.cosmos3.media.prepare_native_media_app"
-    )
 
     model_path: str
     stages: list[StageConfig] = [
@@ -27,6 +25,8 @@ class Cosmos3PipelineConfig(PipelineConfig):
             factory=FactoryArgs(),
             gpu=0,
             terminal=True,
+            # The stage serves native SGLang's media routes from its own process.
+            http_routes=list(ROUTE_PREFIXES),
         )
     ]
 
@@ -35,8 +35,6 @@ EntryClass = Cosmos3PipelineConfig
 
 
 class Cosmos3ReasonerPipelineConfig(Cosmos3PipelineConfig):
-    # The Reasoner has no generation stage, so it serves no native media routes.
-    native_media_factory: ClassVar[str | None] = None
     # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "reasoner": EngineStageConfig

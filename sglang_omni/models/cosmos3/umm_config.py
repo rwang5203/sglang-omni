@@ -24,8 +24,6 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
     native generation, which returns inline media to the orchestrator.
     """
 
-    # Generation returns media to the orchestrator, not to native routes.
-    native_media_factory: ClassVar[str | None] = None
     # engine.* keys and --mem-fraction-static reach the native SRT ServerArgs.
     stage_config_types: ClassVar[dict[str, type[StageConfig]]] = {
         "reasoner": EngineStageConfig
@@ -84,6 +82,8 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
             allow_child_processes=True,
             factory=FactoryArgs(),
             gpu=0,
+            # Generation returns media to the orchestrator and serves no
+            # native routes.
             next="orchestrator",
         ),
     ]

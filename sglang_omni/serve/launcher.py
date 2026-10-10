@@ -54,6 +54,7 @@ from sglang_omni.proto.messages import StreamMessage
 from sglang_omni.serve.openai_api import create_app
 from sglang_omni.serve.protocol import DEFAULT_TTS_BATCH_MAX_ITEMS
 from sglang_omni.serve.realtime.manager import RealtimeDeployment
+from sglang_omni.serve.stage_routes import StageRoutes, export_server_port
 from sglang_omni.utils.gpu_compat import apply_gpu_compat_env_defaults
 from sglang_omni.utils.gpu_memory import (
     GpuDeviceInfo,
@@ -483,29 +484,11 @@ async def run_server(
     export_media_policy(allowed_local_media_path, allowed_media_domains)
     # 0. Check port availability before loading models
     port = find_available_port(host, port)
-
-    native_media_factory = type(pipeline_config).native_media_factory
-    if native_media_factory is not None:
-        # Settles native settings the generation stage reads when it starts.
-        load_native_media = import_string(native_media_factory)(
-            pipeline_config, port=port
-        )
-    else:
-        load_native_media = None
+    export_server_port(port)
 
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
-    try:
-        await mp_runner.start(timeout=startup_timeout)
-    except BaseException:
-        # A start that fails or is cancelled never calls the loader, and a
-        # SIGTERM then ends the server without the exit handler that would
-        # remove what the loader holds.
-        if load_native_media is not None:
-            load_native_media.discard()
-        else:
-            pass
-        raise
+    await mp_runner.start(timeout=startup_timeout)
     coordinator = mp_runner.coordinator
 
     # Plans are resolved once inside ``mp_runner.start()`` (which applies
@@ -530,12 +513,6 @@ async def run_server(
     )
 
     try:
-        if load_native_media is not None:
-            # Reads what the generation stage resolved, without native imports,
-            # since the routes start on their first request.
-            native_media = load_native_media()
-        else:
-            native_media = None
         cl_kwargs = client_kwargs or {}
         client = Client(coordinator, **cl_kwargs)
         deployment_factory = type(pipeline_config).realtime_deployment_factory
@@ -583,6 +560,14 @@ async def run_server(
         profiler_dir = os.environ.get("SGLANG_TORCH_PROFILER_DIR")
         profiler_ctl = ProfilerControlClient(mp_runner.stage_control_endpoints)
         mount_profiler_routes(app, profiler_ctl, profiler_dir)
+        # Added last, so Omni's own routes keep their paths.
+        for stage_name, prefixes, socket_path in mp_runner.stage_http_routes:
+            app.router.routes.append(StageRoutes(stage_name, prefixes, socket_path))
+            logger.info(
+                "Stage %s serves %s from its own process",
+                stage_name,
+                ", ".join(prefixes),
+            )
 
         config = uvicorn.Config(
             app,
@@ -592,13 +577,7 @@ async def run_server(
             timeout_keep_alive=120,
         )
         server = PipelineUvicornServer(config)
-        runtime_watchers = [mp_runner.wait_failed()]
-        if native_media is not None:
-            runtime_watchers[0] = asyncio.ensure_future(runtime_watchers[0])
-            native_media.mount(app, runtime_watchers[0])
-        else:
-            pass
-        await serve_with_failure_watch(server, runtime_watchers)
+        await serve_with_failure_watch(server, [mp_runner.wait_failed()])
     finally:
         logger.info("Shutting down pipeline …")
         await mp_runner.stop()

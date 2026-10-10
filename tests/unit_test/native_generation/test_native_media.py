@@ -1,27 +1,18 @@
 # SPDX-License-Identifier: Apache-2.0
 import asyncio
 import os
-import pickle
-import signal
-from contextlib import asynccontextmanager
+import tempfile
 from types import SimpleNamespace
 
 import httpx
 import pytest
-from fastapi import FastAPI
 
-from sglang_omni.native_generation import media
-from sglang_omni.serve import create_app
-from sglang_omni.utils.imports import import_string
-
-
-def client_fields(server_args):
-    return frozenset({"control_path", "image_path", "prompt", "video_path"})
-
-
-class RunningClient:
-    def health(self):
-        return {"running": True}
+from sglang_omni.native_generation import ROUTE_PREFIXES, media
+from sglang_omni.serve.stage_routes import (
+    SERVER_PORT_ENV,
+    StageHttpServer,
+    StageRoutesError,
+)
 
 
 class NativePipeline:
@@ -33,8 +24,8 @@ class NativePipeline:
 
 
 @pytest.fixture
-def native(monkeypatch, tmp_path):
-    """Native runtime pieces the frontend calls, without a scheduler."""
+def native(monkeypatch):
+    """Native runtime pieces the routes call, without a scheduler."""
     from sglang.multimodal_gen.runtime import scheduler_client, server_args
 
     args = SimpleNamespace(
@@ -44,30 +35,15 @@ def native(monkeypatch, tmp_path):
         pipeline_config=NativePipeline(),
     )
     native = SimpleNamespace(args=args, events=[])
+    fields = frozenset({"control_path", "image_path", "prompt", "video_path"})
+    native.build = lambda: media.NativeMediaApp(native.args, fields)
 
-    def build():
-        # The generation stage saves its resolved arguments here.
-        handoff = tmp_path / "handoff"
-        handoff.mkdir()
-        path = handoff / "server_args.pickle"
-        path.write_bytes(pickle.dumps(native.args))
-        frontend = media.NativeMediaFrontend.load(str(path), client_fields)
-        assert not handoff.exists()
-        return frontend
-
-    native.build = build
-
-    def initialize(self, server_args, *, worker_failure=None):
+    def initialize(self, server_args):
         native.events.append("initialize")
 
     def close(self):
         native.events.append("close")
 
-    def query_devices(**kwargs):
-        raise AssertionError("native server arguments built in the HTTP process")
-
-    monkeypatch.setattr(server_args.ServerArgs, "from_kwargs", query_devices)
-    # Loading the arguments and routes runs once, when the routes start.
     monkeypatch.setattr(
         server_args,
         "set_global_server_args",
@@ -78,67 +54,38 @@ def native(monkeypatch, tmp_path):
     return native
 
 
-def serve(omni, frontend, check):
-    """Run check(client, runtime_failure) against omni inside its lifespan."""
+def serve(app, check):
+    """Run check(client, app) against the routes inside their lifespan."""
 
     async def run():
-        runtime_failure = asyncio.get_running_loop().create_future()
-        frontend.mount(omni, runtime_failure)
-        async with omni.router.lifespan_context(omni):
+        async with app.app.router.lifespan_context(app.app):
             # Native handlers past the checks under test may fail without a
             # scheduler, which then answers 500.
-            transport = httpx.ASGITransport(app=omni, raise_app_exceptions=False)
+            transport = httpx.ASGITransport(app=app, raise_app_exceptions=False)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://omni"
+                transport=transport, base_url="http://stage"
             ) as client:
-                await check(client, runtime_failure)
-        runtime_failure.cancel()
+                await check(client, app)
 
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("native_requests", [0, 3])
-def test_native_routes_and_lifetime_are_composed_without_a_proxy(
-    native, native_requests
-):
-    @asynccontextmanager
-    async def omni_lifespan(app):
-        native.events.append("omni_start")
-        yield
-        native.events.append("omni_stop")
+def test_native_routes_start_with_their_lifespan(native):
+    app = native.build()
+    assert native.events == ["build"]
 
-    omni = FastAPI(lifespan=omni_lifespan)
+    async def check(client, app):
+        assert native.events == ["build", "initialize"]
+        assert (await client.get("/v1/videos")).status_code == 200
 
-    @omni.get("/health")
-    def health():
-        return {"owner": "omni"}
+        @app.app.get("/v1/images/owner")
+        def owner():
+            return {"owner": "native"}
 
-    frontend = native.build()
+        assert (await client.get("/v1/images/owner")).json() == {"owner": "native"}
 
-    async def check(client, runtime_failure):
-        assert (await client.get("/health")).json() == {"owner": "omni"}
-        # Concurrent first requests wait for one start.
-        listed = await asyncio.gather(
-            *(client.get("/v1/videos") for _ in range(native_requests))
-        )
-        assert [response.status_code for response in listed] == [200] * len(listed)
-        if native_requests:
-            assert native.events == ["omni_start", "build", "initialize"]
-
-            @frontend.app.get("/v1/images/owner")
-            def owner():
-                return {"owner": "native"}
-
-            response = await client.get("/v1/images/owner")
-            assert response.json() == {"owner": "native"}
-        else:
-            pass
-
-    serve(omni, frontend, check)
-    # A server whose clients never call the native routes loads no native
-    # module and starts no native scheduler client.
-    started = ["build", "initialize", "close"] if native_requests else []
-    assert native.events == ["omni_start", *started, "omni_stop"]
+    serve(app, check)
+    assert native.events == ["build", "initialize", "close"]
 
 
 # Native create_app also serves these, none of them behind Omni's admin key.
@@ -162,9 +109,7 @@ NATIVE_CONTROL_ROUTES = [
 
 
 def test_only_native_media_routes_are_served(native):
-    omni = create_app(RunningClient(), model_name="native", admin_api_key="secret")
-
-    async def check(client, runtime_failure):
+    async def check(client, app):
         for method, path in NATIVE_CONTROL_ROUTES:
             response = await getattr(client, method)(path)
             assert response.status_code == 404, path
@@ -172,63 +117,29 @@ def test_only_native_media_routes_are_served(native):
         response = await client.post("/v1/images/generations", json={})
         assert response.status_code == 422
 
-    serve(omni, native.build(), check)
+    serve(native.build(), check)
 
 
-def test_failed_native_start_answers_503_until_restart(native, tmp_path):
+def test_routes_that_cannot_start_fail_the_stage_start(native, tmp_path):
     # A prompt enhancer config that cannot be read fails the native lifespan.
     native.args.prompt_enhancer_config = str(tmp_path / "missing-enhancer.json")
-    frontend = native.build()
-
-    async def check(client, runtime_failure):
-        for _ in range(2):
-            response = await client.get("/v1/videos")
-            assert response.status_code == 503
-            assert "missing-enhancer.json" in response.json()["detail"]
-            assert "restart the server" in response.json()["detail"]
-        # One start, whose scheduler client closed again, and other routes
-        # keep serving.
-        assert native.events == ["build", "initialize", "close"]
-        assert (await client.get("/health")).status_code == 200
-
-    serve(create_app(RunningClient(), model_name="native"), frontend, check)
+    with tempfile.TemporaryDirectory() as socket_dir:
+        server = StageHttpServer(
+            "generation", native.build(), os.path.join(socket_dir, "s")
+        )
+        with pytest.raises(StageRoutesError, match="missing-enhancer.json"):
+            server.start(timeout=30)
+    # The scheduler client that started closed again.
     assert native.events == ["build", "initialize", "close"]
 
 
-@pytest.mark.parametrize("installed", [False, True])
-def test_native_worker_failure_is_used_when_installed(native, monkeypatch, installed):
-    from sglang.multimodal_gen.runtime import scheduler_client
-
-    received = []
-
-    def legacy_initialize(self, server_args):
-        received.append(None)
-
-    def initialize(self, server_args, *, worker_failure=None):
-        received.append(worker_failure)
-
-    monkeypatch.setattr(
-        scheduler_client.AsyncSchedulerClient,
-        "initialize",
-        initialize if installed else legacy_initialize,
-    )
-
-    async def check(client, runtime_failure):
-        assert (await client.get("/v1/videos")).status_code == 200
-        assert received == [runtime_failure if installed else None]
-
-    serve(FastAPI(), native.build(), check)
-
-
-@pytest.mark.parametrize("cause", ["scheduler", "stage"])
-def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
+def test_in_flight_native_request_fails_when_the_scheduler_is_lost(native):
     import zmq
 
     context = zmq.Context()
     scheduler = context.socket(zmq.ROUTER)
     port = scheduler.bind_to_random_port("tcp://127.0.0.1")
     native.args.scheduler_endpoints = [f"tcp://127.0.0.1:{port}"]
-    frontend = native.build()
     entered = asyncio.Event()
 
     async def waiting():
@@ -236,29 +147,24 @@ def test_in_flight_native_request_fails_when_generation_is_lost(native, cause):
         entered.set()
         await asyncio.Event().wait()
 
-    async def check(client, runtime_failure):
-        assert (await client.get("/v1/videos")).status_code == 200
-        frontend.app.post("/v1/images/generations-waiting")(waiting)
+    async def check(client, app):
+        app.app.post("/v1/images/generations-waiting")(waiting)
 
         async def connected():
-            while list(frontend.scheduler_events.values()) != [zmq.EVENT_CONNECTED]:
+            while list(app.scheduler_events.values()) != [zmq.EVENT_CONNECTED]:
                 await asyncio.sleep(0.01)
 
         await asyncio.wait_for(connected(), 5)
         pending = asyncio.ensure_future(client.post("/v1/images/generations-waiting"))
         await asyncio.wait_for(entered.wait(), 5)
-        if cause == "scheduler":
-            scheduler.close(linger=0)
-        else:
-            runtime_failure.set_exception(RuntimeError("generation stage died"))
-            runtime_failure.exception()
+        scheduler.close(linger=0)
         response = await asyncio.wait_for(pending, 5)
         assert response.status_code == 503
         response = await client.post("/v1/images/generations-waiting")
         assert response.status_code == 503
 
     try:
-        serve(FastAPI(), frontend, check)
+        serve(native.build(), check)
     finally:
         scheduler.close(linger=0)
         context.term()
@@ -356,7 +262,7 @@ def test_native_requests_follow_the_server_media_policy(
         ),
     ]
 
-    async def check(client, runtime_failure):
+    async def check(client, app):
         # Native resolves relative paths against the server working
         # directory, so the requests run with it outside and inside the
         # allowed directory.
@@ -378,94 +284,24 @@ def test_native_requests_follow_the_server_media_policy(
         response = await client.post("/v1/videos", json=url)
         assert ("refused" in response.text) is configured
 
-    serve(FastAPI(), native.build(), check)
+    serve(native.build(), check)
 
 
-def test_cosmos3_resolves_native_settings_before_building(monkeypatch):
+def test_cosmos3_generation_stage_serves_and_settles_native_routes(monkeypatch):
     from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
+    from sglang_omni.models.cosmos3.stages import NativeGenerationScheduler
 
-    built = []
-    frontend = object()
-    monkeypatch.setattr(
-        media.NativeMediaFrontend,
-        "load",
-        lambda path, request_fields: built.append(path) or frontend,
-    )
     config = Cosmos3PipelineConfig(model_path="checkpoint")
-    prepare = import_string(Cosmos3PipelineConfig.native_media_factory)
-    build = prepare(config, port=19000)
-    overrides = config.stages[0].factory.server_args_overrides
-    # Stage processes read these overrides when they spawn, so they must be
-    # resolved before the native runtime is imported or the app is built.
+    assert config.stages[0].http_routes == list(ROUTE_PREFIXES)
+    assert callable(NativeGenerationScheduler.http_app)
+    monkeypatch.setenv(SERVER_PORT_ENV, "19000")
+    kwargs = media.native_media_server_kwargs({}, output_dir="/srv/out")
     # The native scheduler socket follows host, so it stays on loopback
-    # whatever host the Omni HTTP server binds.
-    assert overrides["host"] == "127.0.0.1" and overrides["port"] == 19000
-    assert overrides["strict_ports"] is True and overrides["input_save_path"] is None
-    assert {"scheduler_port", "master_port", "output_path"} <= set(overrides)
-    assert 19000 not in {overrides["scheduler_port"], overrides["master_port"]}
-    # The stage saves its resolved native server arguments where the routes
-    # load them, in a directory only this user can write.
-    path = config.stages[0].factory.server_args_path
-    assert os.stat(os.path.dirname(path)).st_mode & 0o777 == 0o700
-    assert built == []
-    assert build() is frontend
-    assert built == [path]
-
-    config = Cosmos3PipelineConfig(model_path="checkpoint")
-    config.stages[0].factory.server_args_overrides = {"host": "0.0.0.0"}
+    # whatever host the Omni HTTP server binds, and its ports avoid the
+    # HTTP port the server binds once its stages started.
+    assert kwargs["host"] == "127.0.0.1" and kwargs["port"] == 19000
+    assert kwargs["strict_ports"] is True and kwargs["input_save_path"] is None
+    assert kwargs["output_path"] == "/srv/out"
+    assert 19000 not in {kwargs["scheduler_port"], kwargs["master_port"]}
     with pytest.raises(ValueError, match="loopback"):
-        prepare(config, port=19000)
-
-
-@pytest.mark.parametrize("sigterm", [False, True])
-def test_native_frontend_builds_after_stage_startup(monkeypatch, sigterm):
-    from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig
-    from sglang_omni.serve import launcher
-
-    events = []
-    config = Cosmos3PipelineConfig(model_path="checkpoint")
-
-    class Runner:
-        def __init__(self, config):
-            self.coordinator = None
-            self.prep = SimpleNamespace(
-                placement_plan=SimpleNamespace(gpus={}), process_plan=None
-            )
-
-        async def start(self, timeout):
-            events.append("startup")
-            if sigterm:
-                signal.raise_signal(signal.SIGTERM)
-                await asyncio.sleep(0)
-
-        async def stop(self):
-            events.append("stopped")
-
-    def fail(path, request_fields):
-        events.append("frontend")
-        raise RuntimeError("frontend build failed")
-
-    def passed_on(signal_number, frame):
-        # The default action would end the server here, without exit handlers.
-        handoff = os.path.dirname(config.stages[0].factory.server_args_path)
-        events.append(f"sigterm passed on, handoff left: {os.path.exists(handoff)}")
-
-    monkeypatch.setattr(launcher, "MultiProcessPipelineRunner", Runner)
-    monkeypatch.setattr(launcher, "find_available_port", lambda host, port: port)
-    monkeypatch.setattr(launcher, "apply_gpu_compat_env_defaults", lambda: None)
-    monkeypatch.setattr(launcher, "placement_log_summary", lambda *args: {})
-    monkeypatch.setattr(media.NativeMediaFrontend, "load", fail)
-    previous = signal.signal(signal.SIGTERM, passed_on)
-    try:
-        with pytest.raises(asyncio.CancelledError if sigterm else RuntimeError):
-            launcher.launch_server(config)
-    finally:
-        signal.signal(signal.SIGTERM, previous)
-    # The frontend loads what the generation stage resolved while starting,
-    # and a frontend failure still stops the stages. A SIGTERM during the
-    # stage start loads nothing, and the handoff goes before the signal
-    # ends the server.
-    if sigterm:
-        assert events == ["startup", "sigterm passed on, handoff left: False"]
-    else:
-        assert events == ["startup", "frontend", "stopped"]
+        media.native_media_server_kwargs({"host": "0.0.0.0"}, output_dir="/srv")

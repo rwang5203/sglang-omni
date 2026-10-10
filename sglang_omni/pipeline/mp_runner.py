@@ -263,6 +263,7 @@ def build_stage_groups(
                 base_factory_kwargs=base_factory_kwargs,
                 typed_kwargs=typed_kwargs,
                 stage_kwargs=stage_kwargs,
+                http_socket_path=endpoints.get(f"http_{stage_cfg.name}"),
             )
         else:
             specs = build_tp_stage_specs(
@@ -275,6 +276,7 @@ def build_stage_groups(
                 base_factory_kwargs=base_factory_kwargs,
                 typed_kwargs=typed_kwargs,
                 stage_kwargs=stage_kwargs,
+                http_socket_path=endpoints.get(f"http_{stage_cfg.name}"),
             )
             process_specs = [
                 StageWorkerProcessSpec(
@@ -447,6 +449,7 @@ def build_single_stage_spec(
     base_factory_kwargs: Mapping[str, object],
     typed_kwargs: Mapping[str, object],
     stage_kwargs: StageLaunchKwargs,
+    http_socket_path: str | None = None,
 ) -> StageLaunchConfig:
     comm_config = resolve_comm_config(stage_cfg, gpu_id=gpu_id)
     return StageLaunchConfig(
@@ -464,6 +467,7 @@ def build_single_stage_spec(
         **stage_byte_budget_kwargs(stage_cfg),
         comm_config=comm_config,
         recv_endpoint=recv_endpoint,
+        http_socket_path=http_socket_path,
         **stage_kwargs,
     )
 
@@ -479,6 +483,7 @@ def build_tp_stage_specs(
     base_factory_kwargs: Mapping[str, object],
     typed_kwargs: Mapping[str, object],
     stage_kwargs: StageLaunchKwargs,
+    http_socket_path: str | None = None,
 ) -> list[StageLaunchConfig]:
     follower_work_queues = [ctx.Queue() for _ in range(stage_cfg.tp_size - 1)]
     follower_abort_queues = [ctx.Queue() for _ in range(stage_cfg.tp_size - 1)]
@@ -518,6 +523,7 @@ def build_tp_stage_specs(
                     follower_work_queues=follower_work_queues,
                     follower_abort_queues=follower_abort_queues,
                     follower_admin_result_queues=follower_admin_result_queues,
+                    http_socket_path=http_socket_path,
                     **stage_kwargs,
                 )
             )
@@ -674,6 +680,21 @@ class MultiProcessPipelineRunner:
         for group in self.groups:
             endpoints.update(group.stage_control_endpoints)
         return endpoints
+
+    @property
+    def stage_http_routes(self) -> list[tuple[str, tuple[str, ...], str]]:
+        """Each stage that serves HTTP routes: its name, path prefixes, and
+        Unix socket. Valid only after :meth:`start`."""
+        if not self.started:
+            raise RuntimeError("Runner not started")
+        else:
+            pass
+        prep = self.prep
+        return [
+            (stage.name, tuple(stage.http_routes), prep.endpoints[f"http_{stage.name}"])
+            for stage in prep.stages_cfg
+            if stage.http_routes
+        ]
 
     async def start(self, timeout: float = 120.0) -> None:
         if self.started:
