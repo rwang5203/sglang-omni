@@ -213,6 +213,8 @@ def test_generation_factory_selects_cooperative_cancellation(
     monkeypatch.setattr(
         server_warmup, "should_run_explicit_client_warmup", lambda server_args: False
     )
+    monkeypatch.setattr(server_warmup, "supports_synthetic_warmup", lambda args: True)
+    monkeypatch.setattr(server_warmup, "is_realtime_serving", lambda args: False)
     warmups = []
 
     def warm_up(server_args, forward):
@@ -254,3 +256,6 @@ def test_generation_factory_selects_cooperative_cancellation(
         assert "Synthetic server warmup failed" in caplog.text
     else:
         assert warmups == []
+    # Without the server warmup, the stage warms in the background once it
+    # serves.
+    assert scheduler.warm_in_background is (case != "native")
