@@ -404,12 +404,14 @@ class NativeGenerationScheduler(SimpleScheduler):
         )
 
     def watch_workers(self) -> None:
-        """Record a native worker exit while idle, without polling."""
+        """Fail the stage on a native worker exit while idle, without polling."""
         sentinels = {process.sentinel: process for process in self.workers}
         ready = multiprocessing.connection.wait(list(sentinels))
         if not self.closing and self.worker_failure is None:
             self.worker_failure = self.worker_exit(sentinels[ready[0]])
             logger.error("%s, stopping the generation stage", self.worker_failure)
+            # Wake a scheduler loop that waits for work, so it raises the failure.
+            self.inbox.put(IncomingMessage("", "wakeup"))
         else:
             pass
 
