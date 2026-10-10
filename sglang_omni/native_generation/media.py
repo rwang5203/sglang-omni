@@ -149,8 +149,9 @@ class NativeMediaLoader:
 
     The stage saves its native server arguments in a private directory,
     which goes once they are loaded, when discard is called, or at
-    interpreter exit. The launcher calls discard when the stages do not
-    start, because a SIGTERM during startup ends the server without exit
+    interpreter exit. The stage also keeps its warmup input there while it
+    starts. The launcher calls discard when the stages do not start, because
+    a SIGTERM during startup ends the server and the stage without exit
     handlers.
     """
 

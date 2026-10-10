@@ -372,7 +372,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         else:
             return outcome.get("result")
 
-    def warm_up(self) -> None:
+    def warm_up(self, directory: str | None = None) -> None:
         """Run native's synthetic server warmup, before the stage reports ready.
 
         These are the requests, shapes and residency probe that native's own
@@ -380,14 +380,17 @@ class NativeGenerationScheduler(SimpleScheduler):
         every request of this stage uses. Native fails open without explicit
         warmup resolutions, the only case this runs in, so a failed warmup is
         logged and startup continues, while a worker exit fails the start. The
-        warmup image goes to a directory removed afterwards, because native
-        writes it to a new temporary directory it never removes when
-        input_save_path is None.
+        warmup image goes to a directory inside ``directory`` (the temporary
+        directory by default) removed afterwards, because native writes it to
+        a new temporary directory it never removes when input_save_path is
+        None.
         """
         from sglang.multimodal_gen.runtime.scheduler_client import sync_scheduler_client
         from sglang.multimodal_gen.runtime.server_warmup import run_sync_client_warmup
 
-        with tempfile.TemporaryDirectory(prefix="sglang-omni-native-warmup-") as inputs:
+        with tempfile.TemporaryDirectory(
+            prefix="sglang-omni-native-warmup-", dir=directory
+        ) as inputs:
             server_args = copy.copy(self.generator.server_args)
             server_args.input_save_path = inputs
             kwargs = {
@@ -679,7 +682,9 @@ def create_generation_scheduler(
     """``server_args_path`` receives the resolved native server arguments,
     which the native media routes of the Omni HTTP process load. When those
     arguments select native's server warmup, the stage runs it before it
-    reports ready, as native's own server does."""
+    reports ready, as native's own server does, and keeps the warmup input in
+    the directory of ``server_args_path``, which the launcher removes when
+    the stages do not start."""
     from sglang_omni.utils.device import resolve_concrete_device
 
     concrete_device = resolve_concrete_device(device, gpu_id)
@@ -756,7 +761,11 @@ def create_generation_scheduler(
         if should_run_synthetic_server_warmup(
             generator.server_args
         ) and not should_run_explicit_client_warmup(generator.server_args):
-            scheduler.warm_up()
+            # A stage stopped during the warmup runs no finalizer, so its
+            # input goes with the launcher's handoff directory.
+            scheduler.warm_up(
+                None if server_args_path is None else os.path.dirname(server_args_path)
+            )
         else:
             pass
         if server_args_path is not None:
