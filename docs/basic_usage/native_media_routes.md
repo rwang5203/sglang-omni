@@ -25,7 +25,7 @@ curl http://127.0.0.1:8000/v1/images/generations \
 
 ## Server warmup
 
-With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default. Two series of paired launches of Cosmos3 Nano on one H200, each launch with the warmup paired with one without it, measured these costs as the mean difference and its 95% interval:
+With `warmup_mode: server` in the generation stage's `server_args_overrides`, the generation stage runs native SGLang's server warmup before it reports ready, with the requests native SGLang's own server sends, so `/health` answers 200 only after it and the first request finds the generation stage warm. As in native SGLang, a warmup that fails without explicit `warmup_resolutions` is logged as a warning and startup continues. The warmup input image is removed afterwards. The warmup is off by default, and then the generation stage instead sends one step of the same synthetic request in the background once it serves, so readiness does not wait for it and a request that arrives meanwhile queues behind that step and then runs warm. Two series of paired launches of Cosmos3 Nano on one H200, each launch with the warmup paired with one without it, measured these costs as the mean difference and its 95% interval:
 
 | Cost against warmup off | First series | Second series, busier host |
 | --- | --- | --- |
