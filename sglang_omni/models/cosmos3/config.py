@@ -4,13 +4,11 @@
 from typing import ClassVar
 
 from sglang_omni.config import FactoryArgs, PipelineConfig, StageConfig
+from sglang_omni.native_generation import ROUTE_PREFIXES
 
 
 class Cosmos3PipelineConfig(PipelineConfig):
     architecture: ClassVar[str] = "Cosmos3ForConditionalGeneration"
-    native_media_factory: ClassVar[str] = (
-        "sglang_omni.models.cosmos3.media.prepare_native_media_app"
-    )
 
     model_path: str
     stages: list[StageConfig] = [
@@ -22,6 +20,8 @@ class Cosmos3PipelineConfig(PipelineConfig):
             factory=FactoryArgs(),
             gpu=0,
             terminal=True,
+            # The stage serves native SGLang's media routes from its own process.
+            http_routes=list(ROUTE_PREFIXES),
         )
     ]
 

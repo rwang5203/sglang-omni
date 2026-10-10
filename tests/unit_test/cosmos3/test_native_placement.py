@@ -1,5 +1,4 @@
 # SPDX-License-Identifier: Apache-2.0
-import pickle
 from types import SimpleNamespace
 
 import pytest
@@ -229,7 +228,6 @@ def test_generation_factory_selects_cooperative_cancellation(
             "checkpoint",
             output_dir=str(tmp_path),
             runtime_gpu_ids=[0, 1] if case == "two_gpus" else None,
-            server_args_path=str(tmp_path / "server_args.pickle"),
         )
     expected = {"native": "native", "plugin": "plugin"}.get(case)
     assert scheduler.cancellation_mode == expected
@@ -246,8 +244,7 @@ def test_generation_factory_selects_cooperative_cancellation(
     # Arguments that select native's server warmup run it in the stage before
     # it is ready, through the client every request uses, failing open as
     # native does without explicit warmup resolutions, and its input goes. It
-    # lives in the handoff directory, which the launcher removes when a stage
-    # stopped during the warmup could not.
+    # lives under the stage's output directory, with its request workspaces.
     if case == "native":
         [(warmup_args, forward)] = warmups
         assert forward == scheduler_client.sync_scheduler_client.forward
@@ -257,6 +254,3 @@ def test_generation_factory_selects_cooperative_cancellation(
         assert "Synthetic server warmup failed" in caplog.text
     else:
         assert warmups == []
-    # The native media routes load what the stage resolved.
-    with open(tmp_path / "server_args.pickle", "rb") as handle:
-        assert pickle.load(handle) == SimpleNamespace(resolved=case)

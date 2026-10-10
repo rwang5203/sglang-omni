@@ -486,28 +486,9 @@ async def run_server(
     port = find_available_port(host, port)
     export_server_port(port)
 
-    native_media_factory = type(pipeline_config).native_media_factory
-    if native_media_factory is not None:
-        # Settles native settings the generation stage reads when it starts.
-        load_native_media = import_string(native_media_factory)(
-            pipeline_config, port=port
-        )
-    else:
-        load_native_media = None
-
     mp_runner = MultiProcessPipelineRunner(pipeline_config)
     startup_timeout = float(os.environ.get("SGLANG_OMNI_STARTUP_TIMEOUT", "600"))
-    try:
-        await mp_runner.start(timeout=startup_timeout)
-    except BaseException:
-        # A start that fails or is cancelled never calls the loader, and a
-        # SIGTERM then ends the server without the exit handler that would
-        # remove what the loader holds.
-        if load_native_media is not None:
-            load_native_media.discard()
-        else:
-            pass
-        raise
+    await mp_runner.start(timeout=startup_timeout)
     coordinator = mp_runner.coordinator
 
     # Plans are resolved once inside ``mp_runner.start()`` (which applies
@@ -532,12 +513,6 @@ async def run_server(
     )
 
     try:
-        if load_native_media is not None:
-            # Reads what the generation stage resolved, without native imports,
-            # since the routes start on their first request.
-            native_media = load_native_media()
-        else:
-            native_media = None
         cl_kwargs = client_kwargs or {}
         client = Client(coordinator, **cl_kwargs)
         deployment_factory = type(pipeline_config).realtime_deployment_factory
@@ -601,13 +576,7 @@ async def run_server(
             timeout_keep_alive=120,
         )
         server = PipelineUvicornServer(config)
-        runtime_watchers = [mp_runner.wait_failed()]
-        if native_media is not None:
-            runtime_watchers[0] = asyncio.ensure_future(runtime_watchers[0])
-            native_media.mount(app, runtime_watchers[0])
-        else:
-            pass
-        await serve_with_failure_watch(server, runtime_watchers)
+        await serve_with_failure_watch(server, [mp_runner.wait_failed()])
     finally:
         logger.info("Shutting down pipeline …")
         await mp_runner.stop()
