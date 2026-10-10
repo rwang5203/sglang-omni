@@ -747,7 +747,13 @@ async def test_real_stages_loop_over_relays_and_stream_through_the_output_stage(
         },
     )
     relay = create_umm_output_stage()
-    relay_thread = threading.Thread(target=relay.start)
+
+    def serve_relay():
+        # The stage warms its scheduler on the serving thread, then starts it.
+        relay.warm_up_serving_thread()
+        relay.start()
+
+    relay_thread = threading.Thread(target=serve_relay)
     relay_thread.start()
     stages, crossed = real_stages(
         controller,
