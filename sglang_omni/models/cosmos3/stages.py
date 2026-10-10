@@ -297,6 +297,9 @@ class NativeGenerationScheduler(SimpleScheduler):
         self.workers = list(generator.local_scheduler_process or [])
         self.worker_failure: RuntimeError | None = None
         self.closing = False
+        # Set when native generation still runs its first request cold once
+        # the stage serves, see start.
+        self.warm_in_background = False
         super().__init__(
             self.generate,
             abort_callback=self.cancel_native,
@@ -412,6 +415,67 @@ class NativeGenerationScheduler(SimpleScheduler):
                         "Synthetic server warmup failed, continuing startup",
                         exc_info=True,
                     )
+
+    def start(self) -> None:
+        """Serve requests, first starting the background warmup when due.
+
+        Without native's server warmup before readiness, the first native
+        request would pay one time costs, such as loading kernels, that no
+        later request pays. The stage instead sends one step of native's
+        synthetic warmup request while it already serves, so readiness never
+        waits for it. A request that arrives meanwhile queues behind that step
+        in the native scheduler and then runs warm.
+        """
+        if self.warm_in_background:
+            self.warm_in_background = False
+            threading.Thread(
+                target=self.warm_up_in_background, name="native-warmup", daemon=True
+            ).start()
+        else:
+            pass
+        super().start()
+
+    def warm_up_in_background(self) -> None:
+        from sglang.multimodal_gen.runtime.scheduler_client import sync_scheduler_client
+        from sglang.multimodal_gen.runtime.server_warmup import (
+            build_client_warmup_reqs,
+            prepare_warmup_image_path,
+            should_include_warmup_image,
+        )
+
+        with tempfile.TemporaryDirectory(
+            prefix="sglang-omni-native-warmup-", dir=self.output_dir
+        ) as inputs:
+            server_args = copy.copy(self.generator.server_args)
+            server_args.input_save_path = inputs
+            try:
+                image = (
+                    prepare_warmup_image_path(server_args)
+                    if should_include_warmup_image(
+                        server_args, server_based_warmup=True
+                    )
+                    else None
+                )
+                for req in build_client_warmup_reqs(
+                    server_args, warmup_input_path=image, step_limit=1
+                ):
+                    if self.closing:
+                        return
+                    else:
+                        pass
+                    error = sync_scheduler_client.forward(req).error
+                    if error is not None:
+                        raise RuntimeError(error)
+                    else:
+                        pass
+            except Exception:
+                if not self.closing:
+                    logger.warning(
+                        "Background warmup failed, the first request runs cold",
+                        exc_info=True,
+                    )
+                else:
+                    pass
 
     def http_app(self) -> NativeMediaApp:
         """Native SGLang's media routes, served from this stage's process."""
@@ -712,8 +776,10 @@ def create_generation_scheduler(
     from sglang.multimodal_gen.runtime.platforms.plugins import apply_plugin_hooks
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
     from sglang.multimodal_gen.runtime.server_warmup import (
+        is_realtime_serving,
         should_run_explicit_client_warmup,
         should_run_synthetic_server_warmup,
+        supports_synthetic_warmup,
     )
 
     output_dir = str(Path(output_dir).resolve())
@@ -770,14 +836,16 @@ def create_generation_scheduler(
             cancellation_mode=mode,
         )
         # With explicit warmup resolutions DiffGenerator already warmed up.
-        if should_run_synthetic_server_warmup(
-            generator.server_args
-        ) and not should_run_explicit_client_warmup(generator.server_args):
+        if should_run_explicit_client_warmup(generator.server_args):
+            pass
+        elif should_run_synthetic_server_warmup(generator.server_args):
             # A stage stopped during the warmup runs no finalizer, so its
             # input sits with the request workspaces of this stage.
             scheduler.warm_up(output_dir)
         else:
-            pass
+            scheduler.warm_in_background = supports_synthetic_warmup(
+                generator.server_args
+            ) and not is_realtime_serving(generator.server_args)
         return scheduler
     except BaseException:
         if scheduler is None:
