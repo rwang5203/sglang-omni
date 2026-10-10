@@ -295,6 +295,8 @@ def test_cosmos3_generation_stage_serves_and_settles_native_routes(monkeypatch):
     assert config.stages[0].http_routes == list(ROUTE_PREFIXES)
     assert callable(NativeGenerationScheduler.http_app)
     monkeypatch.setenv(SERVER_PORT_ENV, "19000")
+    claims = iter([29500, 19000, 29502])
+    monkeypatch.setattr(media, "claim_tcp_port", lambda: next(claims))
     kwargs = media.native_media_server_kwargs({}, output_dir="/srv/out")
     # The native scheduler socket follows host, so it stays on loopback
     # whatever host the Omni HTTP server binds, and its ports avoid the
@@ -302,6 +304,7 @@ def test_cosmos3_generation_stage_serves_and_settles_native_routes(monkeypatch):
     assert kwargs["host"] == "127.0.0.1" and kwargs["port"] == 19000
     assert kwargs["strict_ports"] is True and kwargs["input_save_path"] is None
     assert kwargs["output_path"] == "/srv/out"
-    assert 19000 not in {kwargs["scheduler_port"], kwargs["master_port"]}
+    # Its ports are claimed across processes, skipping the HTTP port.
+    assert (kwargs["scheduler_port"], kwargs["master_port"]) == (29500, 29502)
     with pytest.raises(ValueError, match="loopback"):
         media.native_media_server_kwargs({"host": "0.0.0.0"}, output_dir="/srv")
