@@ -16,7 +16,6 @@ import asyncio
 import json
 import logging
 import os
-import socket
 from collections.abc import AsyncIterator, Iterator
 from contextlib import asynccontextmanager, suppress
 from urllib.parse import unquote, urlparse
@@ -33,6 +32,7 @@ from sglang_omni.preprocessing.resource_connector import (
     get_global_resource_connector,
 )
 from sglang_omni.serve.stage_routes import server_port
+from sglang_omni.utils.port_claim import claim_tcp_port
 
 logger = logging.getLogger(__name__)
 
@@ -62,16 +62,20 @@ INLINE_IMAGE_KEYS = frozenset({"b64_json", "base64", "data", "values"})
 EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
 
-def unused_port(exclude: set[int]) -> int:
-    for _ in range(100):
-        with socket.socket() as sock:
-            sock.bind((NATIVE_HOST, 0))
-            port = sock.getsockname()[1]
-        if port not in exclude:
+def claim_native_port(avoid: set[int]) -> int:
+    """A port claimed across processes for this one, outside ``avoid``.
+
+    A port read free and released is not reserved: on a busy host any
+    process, outgoing connections included, can take it before native's
+    strict check. Claimed ports sit below the ephemeral range and stay held
+    until this process exits, which outlives the native processes it starts.
+    """
+    while True:
+        port = claim_tcp_port()
+        if port not in avoid:
             return port
         else:
             pass
-    raise RuntimeError("Could not select distinct native runtime ports")
 
 
 def native_media_server_kwargs(
@@ -82,8 +86,8 @@ def native_media_server_kwargs(
     The native scheduler binds its request socket on loopback and unpickles
     what it receives, so it stays there whatever host the Omni server binds.
     Its ports are explicit and strict, so startup fails instead of native
-    moving to another port, and they avoid the Omni HTTP port, which the
-    server binds only after its stages started. Native routes keep uploads in
+    moving to another port. They are claimed across processes, and they avoid
+    the Omni HTTP port, which the server binds only after its stages started. Native routes keep uploads in
     a temporary directory for their request or video job instead of one that
     grows with every request, and save media under the stage's output
     directory.
@@ -98,8 +102,8 @@ def native_media_server_kwargs(
         pass
     http_port = server_port()
     taken = set() if http_port is None else {http_port}
-    kwargs.setdefault("scheduler_port", unused_port(taken))
-    kwargs.setdefault("master_port", unused_port(taken | {kwargs["scheduler_port"]}))
+    kwargs.setdefault("scheduler_port", claim_native_port(taken))
+    kwargs.setdefault("master_port", claim_native_port(taken))
     kwargs.setdefault("input_save_path", None)
     if http_port is not None:
         kwargs["port"] = http_port
