@@ -317,15 +317,25 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
         else:
             pass
 
-    def expire(self) -> None:
-        """Fail each waiting request that reached its deadline or was shed."""
+    def expire(self) -> float | None:
+        """Fail each waiting request that reached its deadline or was shed.
+
+        Returns the seconds until the earliest deadline of a request left
+        waiting, or None when no request waits.
+        """
         now = self.clock()
+        ended: list[tuple[str, UMMContext]] = []
+        earliest = math.inf
         with self.lock:
-            ended = [
-                (request_id, context)
-                for request_id, context in self.contexts.items()
-                if not context.busy and (now >= context.deadline or context.shedding)
-            ]
+            for request_id, context in self.contexts.items():
+                if context.busy:
+                    pass
+                elif now >= context.deadline or context.shedding:
+                    ended.append((request_id, context))
+                elif context.deadline < earliest:
+                    earliest = context.deadline
+                else:
+                    pass
         for request_id, context in ended:
             shed = context.shedding
             if self.release(request_id, "shed" if shed else "expired"):
@@ -337,10 +347,28 @@ class UMMController(SimpleScheduler[StagePayload, StagePayload | None]):
                 self.emit_error(request_id, error, self.outbox)
             else:
                 pass
+        return None if earliest == math.inf else earliest - now
 
     def next_message(self) -> IncomingMessage | None:
-        self.expire()
-        return super().next_message()
+        while True:
+            wait = self.expire()
+            if wait is None or self.pending_messages:
+                return super().next_message()
+            else:
+                pass
+            # The earliest deadline bounds the wait, so the sweep fails that
+            # request on time whether or not the scheduler loop polls. Waits
+            # stop at the longest timeout the platform accepts.
+            try:
+                return self.inbox.get(timeout=min(wait, threading.TIMEOUT_MAX))
+            except queue.Empty:
+                pass
+
+    def stop(self) -> None:
+        super().stop()
+        # A wait bounded by a deadline would otherwise last until that
+        # deadline, so stop releases it.
+        self.inbox.put(IncomingMessage("", "wakeup"))
 
     @staticmethod
     def emit_result(
