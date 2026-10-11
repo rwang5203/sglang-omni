@@ -388,6 +388,44 @@ def mpeg4_video(tmp_path: Path) -> Path:
     return path
 
 
+@pytest.mark.parametrize(
+    "over_budget",
+    [
+        # A minimum frame size that pushes the clip past the total budget.
+        lambda path: video.load_video_path(
+            path, fps=2, min_pixels=200704, total_pixels=200704
+        ),
+        lambda path: video.check_caller_video_budget(
+            max_frames=None,
+            min_pixels=video.qwen_vision.VIDEO_MAX_PIXELS + 1,
+            total_pixels=None,
+        ),
+        lambda path: video.check_caller_video_budget(
+            max_frames=video.qwen_vision.FPS_MAX_FRAMES + 2,
+            min_pixels=None,
+            total_pixels=None,
+        ),
+        lambda path: video.check_caller_video_budget(
+            max_frames=None,
+            min_pixels=None,
+            total_pixels=video.qwen_vision.VIDEO_TOTAL_PIXELS + 1,
+        ),
+    ],
+    ids=[
+        "min_pixels_past_total",
+        "caller_min_pixels",
+        "caller_max_frames",
+        "caller_total_pixels",
+    ],
+)
+def test_video_requests_over_the_server_budget_are_rejected(
+    mpeg4_video: Path, over_budget
+) -> None:
+    with pytest.raises(video.VideoBudgetError) as excinfo:
+        over_budget(mpeg4_video)
+    assert is_bad_request_error(excinfo.value)
+
+
 @pytest.mark.parametrize("tensor_index", [0, 1, 2])
 @pytest.mark.parametrize("extract_audio", [False, True])
 def test_a_processed_video_before_a_file_keeps_every_video_in_place(

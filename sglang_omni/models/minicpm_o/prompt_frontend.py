@@ -14,6 +14,7 @@ from PIL import Image
 from sglang_omni.models.minicpm_o.video_frontend import load_timed_video
 from sglang_omni.preprocessing.audio import ensure_audio_list_async
 from sglang_omni.preprocessing.image import ensure_image_list_async
+from sglang_omni.preprocessing.video import check_caller_video_budget
 
 IMAGE_PLACEHOLDER = "<image>./</image>"
 AUDIO_PLACEHOLDER = "<audio>./</audio>"
@@ -266,6 +267,11 @@ async def render_ordered_chat(
                             pass
                     else:
                         raise ValueError("video_url requires a media URL")
+                    check_caller_video_budget(
+                        max_frames=video_max_frames,
+                        min_pixels=video_min_pixels,
+                        total_pixels=video_total_pixels,
+                    )
                     video = await load_timed_video(
                         media_url,
                         use_audio=use_audio,
