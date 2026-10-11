@@ -12,7 +12,7 @@ from starlette.websockets import WebSocketState
 from typing_extensions import Unpack
 
 from sglang_omni.client import Client, GenerateRequest, Message, SamplingParams
-from sglang_omni.serve.realtime.audio_buffer import RealtimeAudioBuffer
+from sglang_omni.serve.realtime.audio_buffer import BufferOverflow, RealtimeAudioBuffer
 from sglang_omni.serve.realtime.events import (
     ClientEvent,
     ConversationItemTruncate,
@@ -29,6 +29,8 @@ from sglang_omni.serve.realtime.events import (
 from sglang_omni.serve.realtime.semantic_vad import SemanticEOUModel, SemanticVADConfig
 from sglang_omni.serve.realtime.turn_detector import TurnDetector, build_turn_detector
 from sglang_omni.serve.realtime.vad import (
+    VAD_FRAME_SAMPLES,
+    VAD_SAMPLE_RATE,
     Emit,
     StreamingVAD,
     VADConfig,
@@ -438,11 +440,46 @@ class RealtimeSession:
         return merged
 
     async def handle_audio_append(self, event: InputAudioBufferAppend) -> None:
-        decoded_len = self.audio_buffer.append_b64(event.audio)
+        try:
+            decoded_len = self.audio_buffer.append_b64(event.audio)
+        except BufferOverflow as exc:
+            await self.send_error(
+                "invalid_request_error", "audio_buffer_overflow", str(exc)
+            )
+            return
         new_bytes = self.audio_buffer.tail(decoded_len)
         emits = await asyncio.to_thread(self.vad.process, new_bytes)
         for emit in emits:
             await self.handle_vad_emit(emit)
+        self.trim_idle_prefix()
+
+    def trim_idle_prefix(self) -> None:
+        """Bound the buffer while no speech turn is open.
+
+        Audio between turns is never committed, so keeping only the turn
+        detector's prefix padding, plus a frame of slack for audio it has not
+        consumed yet, stops a long stretch without a turn, such as listening to
+        a long reply with the mic open, from growing into BufferOverflow.
+        """
+        padding_ms = getattr(
+            getattr(self.vad, "config", None), "prefix_padding_ms", None
+        )
+        if (
+            padding_ms is None
+            or self.utterance_start_byte is not None
+            or not self.speech_idle.is_set()
+        ):
+            return
+        else:
+            pass
+        keep_samples = padding_ms * VAD_SAMPLE_RATE // 1000 + 2 * VAD_FRAME_SAMPLES
+        drop_bytes = self.audio_buffer.num_bytes - 2 * keep_samples
+        drop_bytes -= drop_bytes % 2
+        if drop_bytes > 0:
+            self.audio_buffer.drop_prefix(drop_bytes)
+            self.buffer_origin_samples += drop_bytes // 2
+        else:
+            pass
 
     def absolute_sample(self, sample_offset: int) -> int:
         return self.vad_origin_samples + sample_offset

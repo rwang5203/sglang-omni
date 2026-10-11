@@ -13,7 +13,7 @@ from starlette.websockets import WebSocketState
 from sglang_omni.serve.realtime import session as session_module
 from sglang_omni.serve.realtime.events import InputAudioBufferAppend
 from sglang_omni.serve.realtime.session import RealtimeSession
-from sglang_omni.serve.realtime.vad import Emit, VADEvent
+from sglang_omni.serve.realtime.vad import Emit, VADConfig, VADEvent
 
 
 class RecordingWebSocket:
@@ -43,6 +43,59 @@ class StopStartVAD:
 
     def reset(self) -> None:
         self.reset_calls += 1
+
+
+class SilentVAD:
+    config = VADConfig()
+
+    def process(self, pcm: bytes) -> list[Emit]:
+        return []
+
+    def reset(self) -> None:
+        pass
+
+
+class EndlessSpeechVAD(SilentVAD):
+    def __init__(self) -> None:
+        self.started = False
+
+    def process(self, pcm: bytes) -> list[Emit]:
+        if self.started:
+            return []
+        else:
+            self.started = True
+            return [Emit(VADEvent.SPEECH_STARTED, 0)]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("speaking", [False, True])
+async def test_seventy_seconds_without_a_committed_turn_keep_the_session(
+    monkeypatch: pytest.MonkeyPatch, speaking: bool
+) -> None:
+    vad = EndlessSpeechVAD() if speaking else SilentVAD()
+    monkeypatch.setattr(session_module, "StreamingVAD", lambda config: vad)
+    websocket = RecordingWebSocket()
+    session = RealtimeSession(
+        websocket,  # type: ignore[arg-type]
+        client=object(),  # type: ignore[arg-type]
+        model_name="qwen3-omni",
+        supports_audio_output=True,
+    )
+    chunk = base64.b64encode(bytes(3200)).decode()
+
+    for _ in range(700):
+        await session.handle_audio_append(
+            InputAudioBufferAppend(type="input_audio_buffer.append", audio=chunk)
+        )
+
+    errors = [event["error"] for event in websocket.events if event["type"] == "error"]
+    if speaking:
+        assert errors and errors[0]["code"] == "audio_buffer_overflow"
+    else:
+        assert errors == []
+        assert session.audio_buffer.num_bytes <= 2 * (300 * 16 + 2 * 512)
+    assert websocket.application_state is WebSocketState.CONNECTED
+    await session.teardown()
 
 
 @pytest.mark.asyncio
