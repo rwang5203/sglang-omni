@@ -184,7 +184,7 @@ def patch_thinker_startup(monkeypatch) -> list[dict[str, object]]:
 
     def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 8192
+        assert context_length is None
         assert overrides["sampling_backend"] == "pytorch"
         return SimpleNamespace(
             mem_fraction_static=overrides["mem_fraction_static"],
@@ -428,7 +428,7 @@ def test_qwen_thinker_threads_explicit_generation_batch_policy(
 
     def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 8192
+        assert context_length is None
         build_calls.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=0.85,
@@ -495,7 +495,7 @@ def test_qwen_talker_ar_threads_explicit_generation_batch_policy(monkeypatch) ->
 
     def fake_server_args_builder(model_path, context_length, **overrides):
         assert model_path == "dummy"
-        assert context_length == 4096
+        assert context_length is None
         build_calls.append(dict(overrides))
         return SimpleNamespace(
             mem_fraction_static=0.55,
@@ -665,6 +665,18 @@ def test_thinker_decode_graph_stays_available_to_an_explicit_override(
     )
 
     assert overrides["disable_decode_cuda_graph"] is False
+
+
+@pytest.mark.parametrize(
+    "is_cuda, expected", [(True, "breakable"), (False, "disabled")]
+)
+def test_thinker_prefill_graph_defaults_to_breakable_on_cuda(
+    monkeypatch, is_cuda: bool, expected: str
+) -> None:
+    monkeypatch.setattr(current_platform, "is_cuda", lambda: is_cuda)
+    overrides = thinker_overrides(monkeypatch, allows=True)
+
+    assert overrides["cuda_graph_backend_prefill"] == expected
 
 
 def test_importing_the_stages_module_does_not_load_the_platform_layer() -> None:

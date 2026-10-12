@@ -9,7 +9,7 @@ from typing import Literal, Protocol
 
 # A consumer that stops puts a wakeup into its own queue to release a blocked get.
 IncomingMessageType = Literal[
-    "new_request", "stream_chunk", "stream_done", "abort", "wakeup"
+    "new_request", "stream_chunk", "stream_done", "abort", "admin", "wakeup"
 ]
 
 
@@ -37,6 +37,8 @@ class StageScheduler(Protocol):
 
     @property
     def outbox(self) -> Queue[OutgoingMessage]: ...
+
+    def warm_up_serving_thread(self) -> None: ...
 
     def start(self) -> None: ...
 
