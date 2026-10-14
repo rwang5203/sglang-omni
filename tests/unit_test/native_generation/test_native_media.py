@@ -260,6 +260,22 @@ def test_native_requests_follow_the_server_media_policy(
             {"data": {"prompt": "a"}, "files": {"video_path": (None, f'"{outside}"')}},
             configured,
         ),
+        # Native joins upload names below its upload directory.
+        (
+            "/v1/actions/generations",
+            {"data": {"id": "../r1"}, "files": {"image_reference": ("a.png", b"x")}},
+            True,
+        ),
+        (
+            "/v1/images/edits",
+            {"data": {"prompt": "a"}, "files": {"image": ("../../a.png", b"x")}},
+            True,
+        ),
+        (
+            "/v1/actions/generations",
+            {"data": {"id": "r1"}, "files": {"image_reference": ("a.png", b"x")}},
+            False,
+        ),
     ]
 
     async def check(client, app):

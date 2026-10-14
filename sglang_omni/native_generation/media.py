@@ -58,6 +58,9 @@ MEDIA_REFERENCE_FIELDS = frozenset(
 # Keys of the image payloads that the native action routes decode in memory
 # instead of opening a file.
 INLINE_IMAGE_KEYS = frozenset({"b64_json", "base64", "data", "values"})
+# Native names a saved upload after its file name, and an action upload after
+# the request id too, so a separator there would leave the upload directory.
+ACTION_UPLOAD_ID_FIELDS = frozenset({"request_id", "id"})
 # Containers native SGLang merges into a request, as JSON objects or strings.
 EXTRA_CONTAINERS = frozenset({"extra_args", "extra_body", "extra_json", "extra_params"})
 
@@ -222,6 +225,19 @@ class NativeMediaApp:
             fields: dict[str, list[object]] = {}
             for name, value in (await request.form()).multi_items():
                 fields.setdefault(name, []).append(value)
+                if isinstance(value, str):
+                    if (
+                        name in ACTION_UPLOAD_ID_FIELDS
+                        and "/" in value
+                        and request.url.path.startswith("/v1/actions/")
+                    ):
+                        raise refused_upload_name(name)
+                    else:
+                        pass
+                elif "/" in (value.filename or ""):
+                    raise refused_upload_name(name)
+                else:
+                    pass
             body: object = fields
         elif "msgpack" in content_type:
             import msgpack
@@ -347,6 +363,13 @@ class NativeMediaApp:
         else:
             # The response already started, so the connection just closes.
             pass
+
+
+def refused_upload_name(name: str) -> HTTPException:
+    return HTTPException(
+        status_code=400,
+        detail=f"{name} refused: an upload name cannot contain '/'.",
+    )
 
 
 def nested_too_deeply() -> HTTPException:
