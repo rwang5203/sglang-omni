@@ -81,6 +81,20 @@ def claim_native_port(avoid: set[int]) -> int:
             pass
 
 
+def claim_native_ports(count: int, avoid: set[int]) -> int:
+    """The first of ``count`` consecutive ports claimed for this process.
+
+    Claims count up from the bottom of their range, so a run cut short by a
+    port another process holds starts again after it. Ports passed over stay
+    claimed until this process exits.
+    """
+    run: list[int] = []
+    while len(run) < count:
+        port = claim_native_port(avoid)
+        run = run + [port] if run and port == run[-1] + 1 else [port]
+    return run[0]
+
+
 def native_media_server_kwargs(
     overrides: dict[str, object] | None, *, output_dir: str
 ) -> dict[str, object]:
@@ -89,11 +103,14 @@ def native_media_server_kwargs(
     The native scheduler binds its request socket on loopback and unpickles
     what it receives, so it stays there whatever host the Omni server binds.
     Its ports are explicit and strict, so startup fails instead of native
-    moving to another port. They are claimed across processes, and they avoid
-    the Omni HTTP port, which the server binds only after its stages started. Native routes keep uploads in
-    a temporary directory for their request or video job instead of one that
-    grows with every request, and save media under the stage's output
-    directory.
+    moving to another port. Native checks the HTTP port, one scheduler port
+    per replica counting up from scheduler_port, and the master port. Those
+    the overrides leave unset are claimed across processes, away from the set
+    ones. The HTTP port is the Omni server's, which it binds only after its
+    stages started, or a claimed one when no Omni server runs, since the stage
+    serves the routes itself. Native routes keep uploads in a temporary
+    directory for their request or video job instead of one that grows with
+    every request, and save media under the stage's output directory.
     """
     kwargs = dict(overrides or {})
     if kwargs.get("host", NATIVE_HOST) not in LOOPBACK_HOSTS:
@@ -104,14 +121,32 @@ def native_media_server_kwargs(
     else:
         pass
     http_port = server_port()
-    taken = set() if http_port is None else {http_port}
-    kwargs.setdefault("scheduler_port", claim_native_port(taken))
-    kwargs.setdefault("master_port", claim_native_port(taken))
-    kwargs.setdefault("input_save_path", None)
     if http_port is not None:
         kwargs["port"] = http_port
     else:
         pass
+    replicas = int(kwargs.get("dp_size") or 1)
+    taken = {
+        int(kwargs[name])
+        for name in ("port", "master_port")
+        if kwargs.get(name) is not None
+    }
+    if kwargs.get("scheduler_port") is None:
+        kwargs["scheduler_port"] = claim_native_ports(replicas, taken)
+    else:
+        pass
+    first = int(kwargs["scheduler_port"])
+    taken.update(range(first, first + replicas))
+    if "master_port" not in kwargs:
+        kwargs["master_port"] = claim_native_port(taken)
+        taken.add(kwargs["master_port"])
+    else:
+        pass
+    if kwargs.get("port") is None:
+        kwargs["port"] = claim_native_port(taken)
+    else:
+        pass
+    kwargs.setdefault("input_save_path", None)
     kwargs.update(host=NATIVE_HOST, strict_ports=True, output_path=output_dir)
     return kwargs
 
