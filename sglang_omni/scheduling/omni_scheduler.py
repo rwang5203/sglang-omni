@@ -3026,6 +3026,9 @@ class OmniScheduler(Generic[RequestDataT]):
                     request_ids.add(rid)
                 else:
                     pass
+        # note (Richard Wang): a request whose build waits for upstream chunks
+        # is owned here too, so abort all and the active request check see it.
+        request_ids.update(list(self.deferred_request_payloads))
         for batch in (
             self.running_batch,
             self.cur_batch,
