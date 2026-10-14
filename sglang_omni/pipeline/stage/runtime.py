@@ -189,6 +189,7 @@ class Stage:
         self.receive_lane_tails: dict[tuple[str, str], asyncio.Future[None]] = {}
         self.scheduler_thread: threading.Thread | None = None
         self.outbox_waiter: ThreadPoolExecutor | None = None
+        self.outbox_task: asyncio.Task[None] | None = None
         self.loop: asyncio.AbstractEventLoop | None = None
         self.scheduler_crash_error: BaseException | None = None
         self.background_task_error: BaseException | None = None
@@ -298,10 +299,6 @@ class Stage:
 
     async def stop(self) -> None:
         self.running = False
-        if self.outbox_waiter is not None:
-            self.wake_outbox_drain()
-        else:
-            pass
         cleanup_error: Exception | None = None
 
         def _record_cleanup_error(component: str, exc: Exception) -> None:
@@ -357,6 +354,7 @@ class Stage:
                 pass
         else:
             pass
+        await self.finish_outbox_drain()
         try:
             self.control_plane.close()
         except Exception as exc:
@@ -383,6 +381,7 @@ class Stage:
 
         abort_task = asyncio.create_task(self.abort_listener())
         outbox_task = asyncio.create_task(self.drain_outbox())
+        self.outbox_task = outbox_task
         abort_task.add_done_callback(
             lambda task: self.on_background_task_done(task, "abort listener")
         )
@@ -1304,6 +1303,29 @@ class Stage:
         Both drains skip the wakeup like any message type they do not route.
         """
         self.scheduler.outbox.put(OutgoingMessage(request_id="", type="wakeup"))
+
+    async def finish_outbox_drain(self) -> None:
+        """Route what the stopped scheduler published, then end the drain.
+
+        Stop calls this after the scheduler stopped and its thread ended, and
+        before the transports close. A result published later is dropped, as
+        its request ends with the stage.
+        """
+        task = self.outbox_task
+        if task is None or task.done() or self.outbox_waiter is None:
+            return
+        else:
+            pass
+        self.wake_outbox_drain()
+        done, _ = await asyncio.wait({task}, timeout=_SCHEDULER_THREAD_JOIN_TIMEOUT_S)
+        if not done:
+            logger.warning(
+                "Stage %s outbox drain did not finish within %gs",
+                self.name,
+                _SCHEDULER_THREAD_JOIN_TIMEOUT_S,
+            )
+        else:
+            pass
 
     async def drain_outbox_external(self) -> None:
         """Drain scheduler outbox and route results downstream."""

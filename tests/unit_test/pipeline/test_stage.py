@@ -6,6 +6,7 @@ import asyncio
 import logging
 import pickle
 import threading
+import time
 
 import pytest
 import torch
@@ -298,18 +299,32 @@ def test_stage_starts_only_after_its_session_hooks_warm_the_scheduler_thread() -
     asyncio.run(run())
 
 
-@pytest.mark.parametrize("scheduler_kind", ["serial", "threaded-full"])
+@pytest.mark.parametrize(
+    "scheduler_kind", ["serial", "serial-finishing", "threaded-full"]
+)
 def test_idle_stage_blocks_without_timed_polls_until_shutdown(
     monkeypatch, scheduler_kind: str
 ) -> None:
     release = threading.Event()
+    held = threading.Event()
 
     def hold(payload: str) -> str:
+        held.set()
         release.wait(timeout=5.0)
         return payload
 
     if scheduler_kind == "serial":
         scheduler = SimpleScheduler(lambda payload: payload)
+    elif scheduler_kind == "serial-finishing":
+        # The request finishes while the stage waits for its stopped scheduler.
+        scheduler = SimpleScheduler(hold)
+        stop = scheduler.stop
+
+        def stop_then_finish() -> None:
+            stop()
+            threading.Timer(0.2, release.set).start()
+
+        monkeypatch.setattr(scheduler, "stop", stop_then_finish)
     else:
         # The held request takes the only slot, so the scheduler waits for capacity.
         scheduler = ThreadedSimpleScheduler(hold, max_concurrency=1)
@@ -328,12 +343,34 @@ def test_idle_stage_blocks_without_timed_polls_until_shutdown(
         control_plane = RecordingStageControlPlane()
         stage_obj = make_stage(scheduler=scheduler, control_plane=control_plane)
         run_task = asyncio.create_task(stage_obj.run())
+        if scheduler_kind == "serial-finishing":
+            control_plane.inbox.put_nowait(
+                SubmitMessage(
+                    request_id="late", data=make_stage_payload(request_id="late")
+                )
+            )
+            assert await asyncio.to_thread(held.wait, 5.0)
+        else:
+            pass
         await asyncio.sleep(0.3)
         assert timed_reads == []
 
         control_plane.inbox.put_nowait(ShutdownMessage())
         await asyncio.wait_for(run_task, timeout=2.0)
         assert stage_obj.scheduler_thread is None
+        # A result published while the scheduler stopped still completes.
+        assert [c.request_id for c in control_plane.completions] == (
+            ["late"] if scheduler_kind == "serial-finishing" else []
+        )
+        # The drain's waiter thread ends with the stage.
+        deadline = time.monotonic() + 2.0
+        while time.monotonic() < deadline and any(
+            thread.name.startswith("outbox-stage") for thread in threading.enumerate()
+        ):
+            await asyncio.sleep(0.01)
+        assert not any(
+            thread.name.startswith("outbox-stage") for thread in threading.enumerate()
+        )
 
     try:
         asyncio.run(run())
