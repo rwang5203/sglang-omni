@@ -17,12 +17,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from sglang_omni.config.schema import StageConfig
+from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.serve.stage_routes import (
     StageHttpServer,
     StageRoutes,
     StageRoutesError,
+    check_route_ownership,
 )
 
 
@@ -218,6 +219,26 @@ def test_routes_need_a_scheduler_that_provides_an_app_and_valid_prefixes():
     for bad in (["v1"], ["/"], ["/a", "/a/"]):
         with pytest.raises(ValueError):
             StageConfig(name="g", factory_path="f", http_routes=bad)
+    # Each path has one owner, among the stages and against Omni's own routes,
+    # whatever methods those serve.
+    with pytest.raises(ValueError, match="both declare http_routes"):
+        PipelineConfig(
+            model_path="m",
+            stages=[
+                StageConfig(name="a", factory_path="f", next="b", http_routes=["/v1"]),
+                StageConfig(
+                    name="b", factory_path="f", terminal=True, http_routes=["/v1/x"]
+                ),
+            ],
+        )
+    omni = [
+        Route("/v1/models", lambda request: None, methods=["GET"]),
+        Route("/files/{name:path}", lambda request: None, methods=["GET"]),
+    ]
+    for prefix in ("/v1/models", "/v1", "/files/x"):
+        with pytest.raises(StageRoutesError, match="already serves"):
+            check_route_ownership(omni, StageRoutes("gen", [prefix], "/unused"))
+    check_route_ownership(omni, StageRoutes("gen", ["/v1/videos"], "/unused"))
 
 
 def test_a_stop_that_cannot_finish_fails():

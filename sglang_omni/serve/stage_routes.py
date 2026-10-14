@@ -90,6 +90,33 @@ def covers(prefix: str, path: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+def check_route_ownership(routes: Iterable[BaseRoute], stage: StageRoutes) -> None:
+    """Refuse a stage prefix that reaches a route the Omni server serves itself.
+
+    Starlette serves a path through the first route that fully matches it, and
+    only then through the first one that matched the path with another method,
+    so a stage prefix over an Omni route would take that route's other methods.
+    The pipeline config already gives each stage prefix one owning stage.
+    """
+    for route in routes:
+        path = getattr(route, "path", None)
+        for prefix in stage.prefixes:
+            probes = [
+                {"type": kind, "path": prefix, "method": "GET", "headers": []}
+                for kind in DISCONNECT
+            ]
+            if (path is not None and covers(prefix, path)) or any(
+                route.matches(scope)[0] != Match.NONE for scope in probes
+            ):
+                raise StageRoutesError(
+                    f"Stage {stage.stage} http_routes entry {prefix!r} reaches "
+                    f"the route {path or route!r} that the server already serves. "
+                    "Give each path one owner."
+                )
+            else:
+                pass
+
+
 async def write_frame(writer: asyncio.StreamWriter, message: object) -> None:
     data = pickle.dumps(message, protocol=pickle.HIGHEST_PROTOCOL)
     writer.write(FRAME_HEADER.pack(len(data)) + data)
