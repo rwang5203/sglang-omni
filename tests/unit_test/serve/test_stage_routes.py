@@ -218,3 +218,36 @@ def test_routes_need_a_scheduler_that_provides_an_app_and_valid_prefixes():
     for bad in (["v1"], ["/"], ["/a", "/a/"]):
         with pytest.raises(ValueError):
             StageConfig(name="g", factory_path="f", http_routes=bad)
+
+
+def test_a_stop_that_cannot_finish_fails():
+    held, release = threading.Event(), threading.Event()
+
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            raise RuntimeError("no lifespan")
+        else:
+            pass
+        held.set()
+        # A handler that never yields keeps the server thread from stopping.
+        release.wait(10)
+        await JSONResponse({})(scope, receive, send)
+
+    with tempfile.TemporaryDirectory() as socket_dir:
+        socket_path = os.path.join(socket_dir, "http_gen.sock")
+        server = StageHttpServer("gen", app, socket_path)
+        server.start(timeout=10)
+        front = Starlette(routes=[StageRoutes("gen", ["/native"], socket_path)])
+
+        async def stop_while_held() -> None:
+            pending = asyncio.ensure_future(call(front, "GET", "/native/x"))
+            await asyncio.to_thread(held.wait, 10)
+            try:
+                with pytest.raises(StageRoutesError, match="did not stop"):
+                    await asyncio.to_thread(server.stop, 0.5)
+            finally:
+                release.set()
+                await pending
+
+        asyncio.run(stop_while_held())
+        server.stop(timeout=10)
