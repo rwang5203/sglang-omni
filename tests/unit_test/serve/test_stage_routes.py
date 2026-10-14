@@ -7,6 +7,7 @@ import asyncio
 import os
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -239,6 +240,40 @@ def test_routes_need_a_scheduler_that_provides_an_app_and_valid_prefixes():
         with pytest.raises(StageRoutesError, match="already serves"):
             check_route_ownership(omni, StageRoutes("gen", [prefix], "/unused"))
     check_route_ownership(omni, StageRoutes("gen", ["/v1/videos"], "/unused"))
+
+
+def test_idle_relay_connections_close_after_the_keep_alive():
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            raise RuntimeError("no lifespan")
+        else:
+            pass
+        await asyncio.sleep(0.3)
+        await JSONResponse({})(scope, receive, send)
+
+    with tempfile.TemporaryDirectory() as socket_dir:
+        socket_path = os.path.join(socket_dir, "http_gen.sock")
+        server = StageHttpServer("gen", app, socket_path)
+        server.start(timeout=10)
+        route = StageRoutes("gen", ["/native"], socket_path, keep_alive_s=0.5)
+        front = Starlette(routes=[route])
+
+        async def burst_then_idle() -> tuple[int, int]:
+            await asyncio.gather(*(call(front, "GET", "/native/x") for _ in range(4)))
+            parked = len(route.idle)
+            await asyncio.sleep(1.5)
+            return parked, len(route.idle)
+
+        try:
+            parked, left = asyncio.run(burst_then_idle())
+            # The stage side ends a connection once the relay closed it.
+            deadline = time.monotonic() + 5
+            while server.connections and time.monotonic() < deadline:
+                time.sleep(0.05)
+            serving = len(server.connections)
+        finally:
+            server.stop(timeout=10)
+    assert (parked, left, serving) == (4, 0, 0)
 
 
 def test_a_stop_that_cannot_finish_fails():
