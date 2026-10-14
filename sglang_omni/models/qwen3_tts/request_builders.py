@@ -86,13 +86,6 @@ _GENERATION_FIELDS = (
     "max_new_tokens",
 )
 
-_IMPLICIT_SAMPLING_DEFAULTS = {
-    "temperature": {1.0, 0.8},
-    "top_p": {1.0, 0.8},
-    "top_k": {-1, 30},
-    "repetition_penalty": {1.0, 1.1},
-}
-
 _QWEN3_TTS_SAMPLING_SEED_MASK = SAMPLING_SEED_MASK
 
 
@@ -458,6 +451,10 @@ def build_qwen3_tts_state(
     seed = tts_params["seed"] if "seed" in tts_params else params.get("seed")
     normalized_seed = normalize_qwen3_tts_seed(seed) if seed is not None else None
 
+    generation_kwargs = build_generation_kwargs(
+        params,
+        tts_engine_params=tts_engine_params,
+    )
     suppress_bootstrap_silence = resolve_bootstrap_silence_suppression(
         task_type=task_type,
         voice=voice,
@@ -466,6 +463,7 @@ def build_qwen3_tts_state(
         stream_codec_output=stream_codec_output,
         params=params,
         tts_params=tts_params,
+        generation_kwargs=generation_kwargs,
     )
 
     return Qwen3TTSState(
@@ -489,11 +487,7 @@ def build_qwen3_tts_state(
         non_streaming_mode=non_streaming_mode,
         stream_codec_output=stream_codec_output,
         suppress_bootstrap_silence=suppress_bootstrap_silence,
-        generation_kwargs=build_generation_kwargs(
-            params,
-            tts_params=tts_params,
-            tts_engine_params=tts_engine_params,
-        ),
+        generation_kwargs=generation_kwargs,
         seed=normalized_seed,
     )
 
@@ -667,11 +661,6 @@ QWEN3_TTS_BOOTSTRAP_SILENCE_LANGUAGES = frozenset({"english"})
 _BOOTSTRAP_SILENCE_SAMPLING_FIELDS = frozenset(
     name for name in _GENERATION_FIELDS if name != "max_new_tokens"
 )
-# note (luojiaxuan): the serving layer materializes a sampling value on every
-# request, so key presence cannot distinguish an operator override. The request
-# already carries explicit_generation_params, which names the fields the caller
-# actually set, so that is the discriminator rather than a second copy of the
-# defaults.
 
 
 def resolve_bootstrap_silence_suppression(
@@ -683,6 +672,7 @@ def resolve_bootstrap_silence_suppression(
     stream_codec_output: bool,
     params: dict[str, object],
     tts_params: dict[str, object],
+    generation_kwargs: Mapping[str, object],
 ) -> bool:
     for source in (params, tts_params):
         if "suppress_bootstrap_silence" in source:
@@ -713,13 +703,7 @@ def resolve_bootstrap_silence_suppression(
         return False
     else:
         pass
-    explicit = tts_params.get("explicit_generation_params")
-    explicit_fields = (
-        {str(field) for field in explicit}
-        if isinstance(explicit, (list, tuple, set))
-        else set()
-    )
-    if explicit_fields & _BOOTSTRAP_SILENCE_SAMPLING_FIELDS:
+    if _BOOTSTRAP_SILENCE_SAMPLING_FIELDS.intersection(generation_kwargs):
         return False
     else:
         pass
@@ -751,15 +735,8 @@ def resolve_x_vector_only_mode(
 def build_generation_kwargs(
     params: Mapping[str, object],
     *,
-    tts_params: dict[str, object],
     tts_engine_params: Mapping[str, object],
 ) -> dict[str, object]:
-    explicit_generation_params = tts_params.get("explicit_generation_params")
-    if isinstance(explicit_generation_params, (list, tuple, set)):
-        explicit_fields = {str(field) for field in explicit_generation_params}
-    else:
-        explicit_fields = set()
-
     selected_fields: dict[str, object] = {}
     for field in _GENERATION_FIELDS:
         stage_value = tts_engine_params.get(field)
@@ -771,13 +748,6 @@ def build_generation_kwargs(
         value = params.get(field)
         if value is None:
             continue
-        else:
-            pass
-        if field in _IMPLICIT_SAMPLING_DEFAULTS and field not in explicit_fields:
-            if value in _IMPLICIT_SAMPLING_DEFAULTS[field]:
-                continue
-            else:
-                pass
         else:
             pass
         selected_fields[field] = value
