@@ -313,7 +313,8 @@ def warm_up(
 
     Lazy kernel and encoder setup then runs at startup, as it does for sglang
     serve, instead of on the first client request. The native
-    skip_server_warmup flag turns it off.
+    skip_server_warmup flag turns it off. The request runs on the thread that
+    runs the engine loop, as every later native coroutine does.
     """
     if engine.server_args.skip_server_warmup:
         return
@@ -348,9 +349,9 @@ def warm_up(
         max_completion_tokens=8,
         temperature=0.0,
     )
-    response = engine.loop.run_until_complete(
-        serving_chat.handle_request(request, None)
-    )
+    response = asyncio.run_coroutine_threadsafe(
+        serving_chat.handle_request(request, None), engine.loop
+    ).result()
     if getattr(response, "status_code", 200) != 200:
         raise RuntimeError(
             f"The native chat warmup request failed: {response_dict(response)}"
@@ -690,8 +691,7 @@ def create_native_chat_scheduler(
         # native scheduler measures free memory shrinks its KV pool.
         current_platform.set_device(gpu_id)
         service = OpenAIServingChat(engine.tokenizer_manager, engine.template_manager)
-        warm_up(engine, service, ChatCompletionRequest)
-        return NativeChatScheduler(
+        scheduler = NativeChatScheduler(
             engine,
             service,
             ChatCompletionRequest,
@@ -702,3 +702,12 @@ def create_native_chat_scheduler(
     except BaseException:
         engine.shutdown()
         raise
+    # The first request off the main thread keeps native's crash handler, which
+    # kills the process tree when a native child fails, a process signal
+    # handler instead of a callback on the engine loop thread.
+    try:
+        warm_up(engine, service, ChatCompletionRequest)
+    except BaseException:
+        scheduler.stop()
+        raise
+    return scheduler
