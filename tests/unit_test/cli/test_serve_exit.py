@@ -5,6 +5,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+import pytest
+
 # note (Richard Wang): run_launcher stands in for a server that stopped. The
 # object in the script's globals reports interpreter teardown.
 SERVE_THAT_STOPS = """
@@ -24,9 +26,14 @@ class Teardown:
         with open(marker, "a") as fh:
             fh.write("teardown,")
 
+def fail():
+    raise RuntimeError("thread exit callback failed")
+
 def run_launcher(*args, **kwargs):
     threading.Thread(target=lambda: (time.sleep(0.2), note("thread,"))).start()
     atexit.register(note, "atexit,")
+    if sys.argv[2:] == ["failing"]:
+        threading._register_atexit(fail)
     sys.stdout.write("unflushed")
 
 teardown = Teardown()
@@ -35,13 +42,21 @@ serve.launch_server(None)
 """
 
 
-def test_serve_exits_without_interpreter_teardown(tmp_path: Path) -> None:
+@pytest.mark.parametrize("callbacks", ["passing", "failing"])
+def test_serve_exits_without_interpreter_teardown(
+    tmp_path: Path, callbacks: str
+) -> None:
     marker = tmp_path / "marker.txt"
-    command = [sys.executable, "-c", SERVE_THAT_STOPS, str(marker)]
+    command = [sys.executable, "-c", SERVE_THAT_STOPS, str(marker), callbacks]
 
     done = subprocess.run(command, capture_output=True, text=True, timeout=300)
 
+    # A failing thread exit callback is reported and keeps the exit code, as
+    # at a normal exit.
     assert done.returncode == 0, done.stderr
     assert "unflushed" in done.stdout
-    # Threads finish before the atexit callbacks, as at a normal exit.
-    assert marker.read_text() == "thread,atexit,"
+    if callbacks == "failing":
+        assert "thread exit callback failed" in done.stderr
+    else:
+        # Threads finish before the atexit callbacks, as at a normal exit.
+        assert marker.read_text() == "thread,atexit,"

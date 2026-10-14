@@ -7,6 +7,7 @@ import atexit
 import os
 import sys
 import threading
+import traceback
 from typing import NoReturn
 
 
@@ -21,7 +22,13 @@ def exit_without_teardown(code: int) -> NoReturn:
     release the process's memory at once.
     """
     # The standard library has no public spelling of these three steps.
-    threading._shutdown()  # noqa: leading-underscore
+    try:
+        threading._shutdown()  # noqa: leading-underscore
+    except BaseException:
+        # A normal exit reports a failing thread exit callback and keeps its
+        # exit code, as atexit._run_exitfuncs does for an atexit callback.
+        print("Exception ignored in thread shutdown:", file=sys.stderr)
+        traceback.print_exc()
     atexit._run_exitfuncs()  # noqa: leading-underscore
     for stream in (sys.stdout, sys.stderr):
         try:
