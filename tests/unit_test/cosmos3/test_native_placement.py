@@ -100,9 +100,6 @@ def test_native_runtime_cannot_share_a_process_with_another_stage(monkeypatch):
 def test_generation_factory_passes_resolved_device_to_native(
     monkeypatch, tmp_path, devices
 ):
-    from sglang.multimodal_gen.runtime.entrypoints.diffusion_generator import (
-        DiffGenerator,
-    )
     from sglang.multimodal_gen.runtime.server_args import ServerArgs
 
     from sglang_omni.models.cosmos3.stages import create_generation_scheduler
@@ -113,7 +110,6 @@ def test_generation_factory_passes_resolved_device_to_native(
         "resolve_concrete_device",
         lambda device, index: SimpleNamespace(index=3),
     )
-    monkeypatch.setattr(DiffGenerator, "supports_cancellation", True, raising=False)
 
     def startup(**kwargs):
         if devices is None:
@@ -146,9 +142,7 @@ def test_generation_factory_rejects_cpu_before_native_startup(monkeypatch):
         create_generation_scheduler("checkpoint", device="cpu")
 
 
-@pytest.mark.parametrize(
-    "case", ["native", "native_off", "plugin", "plugin_missing", "two_gpus"]
-)
+@pytest.mark.parametrize("case", ["plugin", "plugin_missing", "two_gpus"])
 def test_generation_factory_selects_cooperative_cancellation(
     monkeypatch, tmp_path, caplog, case
 ):
@@ -171,10 +165,6 @@ def test_generation_factory_selects_cooperative_cancellation(
         "resolve_concrete_device",
         lambda device, index: SimpleNamespace(index=0),
     )
-    if case.startswith("native"):
-        monkeypatch.setattr(DiffGenerator, "supports_cancellation", True, raising=False)
-    else:
-        monkeypatch.delattr(DiffGenerator, "supports_cancellation", raising=False)
     monkeypatch.delenv(cancellation.ACTIVATION_ENV, raising=False)
     activations = []
     applied = []
@@ -199,7 +189,6 @@ def test_generation_factory_selects_cooperative_cancellation(
             shutdown=lambda: None,
             local_scheduler_process=[],
             server_args=SimpleNamespace(resolved=case),
-            supports_cancellation=case == "native",
         )
 
     monkeypatch.setattr(ServerArgs, "from_kwargs", lambda **kwargs: kwargs)
@@ -208,7 +197,7 @@ def test_generation_factory_selects_cooperative_cancellation(
     monkeypatch.setattr(
         server_warmup,
         "should_run_synthetic_server_warmup",
-        lambda server_args: server_args.resolved == "native",
+        lambda server_args: server_args.resolved == "plugin",
     )
     monkeypatch.setattr(
         server_warmup, "should_run_explicit_client_warmup", lambda server_args: False
@@ -231,11 +220,11 @@ def test_generation_factory_selects_cooperative_cancellation(
             output_dir=str(tmp_path),
             runtime_gpu_ids=[0, 1] if case == "two_gpus" else None,
         )
-    expected = {"native": "native", "plugin": "plugin"}.get(case)
+    expected = "plugin" if case == "plugin" else None
     assert scheduler.cancellation_mode == expected
     assert ("keeps the generation stage busy" in caplog.text) is (expected is None)
-    # Only a single GPU stage without native cancellation arms its workers,
-    # and the handshake directory and the variable do not outlive startup.
+    # Only a single GPU stage arms its workers, and the handshake directory
+    # and the variable do not outlive startup.
     armed = case in ("plugin", "plugin_missing")
     assert (activations[0] is not None) is armed
     # Native applies hooks once per process, so the host's first application
@@ -247,7 +236,7 @@ def test_generation_factory_selects_cooperative_cancellation(
     # it is ready, through the client every request uses, failing open as
     # native does without explicit warmup resolutions, and its input goes. It
     # lives under the stage's output directory, with its request workspaces.
-    if case == "native":
+    if case == "plugin":
         [(warmup_args, forward)] = warmups
         assert forward == scheduler_client.sync_scheduler_client.forward
         assert warmup_args.resolved == case
@@ -258,7 +247,7 @@ def test_generation_factory_selects_cooperative_cancellation(
         assert warmups == []
     # Without the server warmup, the stage warms in the background once it
     # serves.
-    assert scheduler.warm_in_background is (case != "native")
+    assert scheduler.warm_in_background is (case != "plugin")
 
 
 def test_text_variant_serves_the_reasoner_as_an_engine_stage():
