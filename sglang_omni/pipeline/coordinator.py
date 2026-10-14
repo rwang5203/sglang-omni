@@ -805,8 +805,20 @@ class Coordinator(CoordinatorSessions):
         if not msg.success and AdminDroppedRequestError.matches(msg.error):
             # A stage dropped this request in an admin action, so it ends as an
             # abort, the same as a client or pause abort.
-            await self.abort(request_id)
-            return
+            try:
+                await self.abort(request_id)
+            except Exception:
+                # note (Richard Wang): an abort whose broadcast fails falls back
+                # to the failure path below, which keeps the request owned for a
+                # later abort and still ends it for its caller, so one request
+                # never stops this completion loop.
+                logger.warning(
+                    "Abort of admin-dropped request %s failed, ending it as failed",
+                    request_id,
+                    exc_info=True,
+                )
+            else:
+                return
         else:
             pass
 

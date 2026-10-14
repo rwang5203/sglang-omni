@@ -12,7 +12,7 @@ from sglang_omni.config import PipelineConfig, ProcessConfig
 from sglang_omni.config.topology import compile_logical_processes
 from sglang_omni.pipeline.coordinator import Coordinator
 from sglang_omni.pipeline.replicas import ReplicaTopology, expand_replica_stages
-from sglang_omni.proto import CompleteMessage, OmniRequest, StreamMessage
+from sglang_omni.proto import AbortMessage, CompleteMessage, OmniRequest, StreamMessage
 from tests.unit_test.fixtures.pipeline_fakes import RecordingCoordinatorControlPlane
 from tests.unit_test.pipeline.helpers import stage
 
@@ -466,7 +466,10 @@ def test_abort_mode_pause_ends_in_flight_streams(
     asyncio.run(run())
 
 
-def test_request_a_stage_dropped_in_an_admin_action_ends_as_an_abort() -> None:
+@pytest.mark.parametrize("broadcast_fails", [False, True])
+def test_request_a_stage_dropped_in_an_admin_action_ends_as_an_abort(
+    broadcast_fails: bool,
+) -> None:
     async def run() -> None:
         coordinator = Coordinator(
             "inproc://complete",
@@ -475,6 +478,16 @@ def test_request_a_stage_dropped_in_an_admin_action_ends_as_an_abort() -> None:
             terminal_stages=["decode"],
         )
         control_plane = RecordingCoordinatorControlPlane()
+        recorded_abort = control_plane.broadcast_abort
+        failing = [broadcast_fails]
+
+        async def broadcast_abort(msg: AbortMessage) -> None:
+            if failing[0]:
+                raise RuntimeError("abort socket closed")
+            else:
+                await recorded_abort(msg)
+
+        control_plane.broadcast_abort = broadcast_abort
         coordinator.control_plane = control_plane
         coordinator.register_stage("preprocess", "inproc://preprocess")
         stream = coordinator.stream("req-1", OmniRequest(inputs="hello"))
@@ -490,9 +503,17 @@ def test_request_a_stage_dropped_in_an_admin_action_ends_as_an_abort() -> None:
         await coordinator.handle_completion(dropped)
         await coordinator.handle_completion(dropped)
 
-        with pytest.raises(Exception, match="aborted"):
+        with pytest.raises(Exception, match="dropped" if broadcast_fails else "aborted"):
             await next_message
+        if broadcast_fails:
+            # The request stays owned until a later abort is delivered.
+            assert "req-1" in coordinator.requests
+            failing[0] = False
+            assert await coordinator.abort("req-1")
+        else:
+            pass
         assert [msg.request_id for msg in control_plane.aborts] == ["req-1"]
+        assert "req-1" not in coordinator.requests
 
     asyncio.run(run())
 
