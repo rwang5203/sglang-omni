@@ -61,6 +61,7 @@ from sglang_omni.serve.protocol import (
 from sglang_omni.serve.realtime.manager import RealtimeDeployment
 from sglang_omni.serve.server_warmup import TranscriptionWarmupRequest
 from sglang_omni.serve.stage_routes import (
+    KEEP_ALIVE_S,
     StageRoutes,
     check_route_ownership,
     export_server_port,
@@ -682,7 +683,7 @@ async def run_server(
             host=host,
             port=port,
             log_level=log_level,
-            timeout_keep_alive=120,
+            timeout_keep_alive=KEEP_ALIVE_S,
         )
         server = PipelineUvicornServer(config)
         # note (ratish): a wildcard bind address is not a destination, so the

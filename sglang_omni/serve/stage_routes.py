@@ -14,7 +14,9 @@ servers produce, a client disconnect reaches the stage app, and a stage that
 stops serving answers 503 on its routes.
 
 A connection carries one request at a time and returns to a pool of idle
-connections after it, so a request costs no connection setup. Every frame is a
+connections after it, so a request costs no connection setup. An idle
+connection closes after the keep-alive the Omni server gives idle client
+connections, which also ends its task on the stage side. Every frame is a
 4 byte big endian length and a pickled ASGI message. The HTTP side first sends
 the request scope, then the client's messages. The stage side answers with the
 app's messages and ends with an end frame, or an error frame when its app
@@ -69,6 +71,9 @@ DISCONNECT = {"http": "http.disconnect", "websocket": "websocket.disconnect"}
 # The port the Omni HTTP server serves on, handed to the stage processes it
 # spawns, since it binds that port only after they started.
 SERVER_PORT_ENV = "SGLANG_OMNI_SERVER_PORT"
+# Seconds the Omni HTTP server keeps an idle client connection open, which the
+# relay applies to its idle stage connections too.
+KEEP_ALIVE_S = 120
 
 
 def export_server_port(port: int) -> None:
@@ -158,12 +163,21 @@ class StageRoutes(BaseRoute):
     registered before this one, since it matches only the declared prefixes.
     """
 
-    def __init__(self, stage: str, prefixes: Iterable[str], socket_path: str) -> None:
+    def __init__(
+        self,
+        stage: str,
+        prefixes: Iterable[str],
+        socket_path: str,
+        keep_alive_s: float = KEEP_ALIVE_S,
+    ) -> None:
         self.stage = stage
         self.prefixes = normalize_route_prefixes(stage, prefixes)
         self.socket_path = socket_path
-        # Idle connections of the event loop that opened them.
+        self.keep_alive_s = keep_alive_s
+        # Idle connections of the event loop that opened them, each with the
+        # timer that closes it once it stayed idle for the keep-alive.
         self.idle: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
+        self.expiry: dict[asyncio.StreamWriter, asyncio.TimerHandle] = {}
         self.idle_loop: asyncio.AbstractEventLoop | None = None
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
@@ -181,17 +195,34 @@ class StageRoutes(BaseRoute):
         loop = asyncio.get_running_loop()
         if self.idle_loop is not loop:
             self.idle = []
+            self.expiry = {}
             self.idle_loop = loop
         else:
             pass
         while self.idle:
             reader, writer = self.idle.pop()
+            self.expiry.pop(writer).cancel()
             # A stage that stopped closed its idle connections.
             if reader.at_eof() or writer.is_closing():
                 writer.close()
             else:
                 return reader, writer
         return await asyncio.open_unix_connection(self.socket_path)
+
+    def park(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+        """Keep a connection for the next request until the keep-alive ends."""
+        self.idle.append((reader, writer))
+        self.expiry[writer] = asyncio.get_running_loop().call_later(
+            self.keep_alive_s, self.expire, reader, writer
+        )
+
+    def expire(
+        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
+    ) -> None:
+        self.expiry.pop(writer, None)
+        with contextlib.suppress(ValueError):
+            self.idle.remove((reader, writer))
+        writer.close()
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Serve one request through the stage's app."""
@@ -258,7 +289,7 @@ class StageRoutes(BaseRoute):
         finally:
             await close_upstream()
             if reusable and asyncio.get_running_loop() is self.idle_loop:
-                self.idle.append((reader, writer))
+                self.park(reader, writer)
             else:
                 writer.close()
 
