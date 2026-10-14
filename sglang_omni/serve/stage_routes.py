@@ -15,8 +15,8 @@ stops serving answers 503 on its routes.
 
 A connection carries one request at a time and returns to a pool of idle
 connections after it, so a request costs no connection setup. An idle
-connection closes after the keep-alive the Omni server gives idle client
-connections, which also ends its task on the stage side. Every frame is a
+connection closes after one to two keep-alive periods of the Omni server,
+which also ends its task on the stage side. Every frame is a
 4 byte big endian length and a pickled ASGI message. The HTTP side first sends
 the request scope, then the client's messages. The stage side answers with the
 app's messages and ends with an end frame, or an error frame when its app
@@ -28,6 +28,7 @@ and the socket sits in the pipeline's private runtime directory.
 from __future__ import annotations
 
 import asyncio
+import collections
 import contextlib
 import logging
 import os
@@ -174,10 +175,17 @@ class StageRoutes(BaseRoute):
         self.prefixes = normalize_route_prefixes(stage, prefixes)
         self.socket_path = socket_path
         self.keep_alive_s = keep_alive_s
-        # Idle connections of the event loop that opened them, each with the
-        # timer that closes it once it stayed idle for the keep-alive.
-        self.idle: list[tuple[asyncio.StreamReader, asyncio.StreamWriter]] = []
-        self.expiry: dict[asyncio.StreamWriter, asyncio.TimerHandle] = {}
+        # Idle connections of the event loop that opened them, oldest first.
+        # A request reuses the newest, so the oldest ones up to the fewest the
+        # pool held since the last sweep stayed idle all along. One timer per
+        # keep-alive, armed while any is idle, closes those, so a connection
+        # closes after one to two keep-alive periods idle and no request
+        # starts a timer.
+        self.idle: collections.deque[
+            tuple[asyncio.StreamReader, asyncio.StreamWriter]
+        ] = collections.deque()
+        self.untouched = 0
+        self.sweep: asyncio.TimerHandle | None = None
         self.idle_loop: asyncio.AbstractEventLoop | None = None
 
     def matches(self, scope: Scope) -> tuple[Match, Scope]:
@@ -194,14 +202,18 @@ class StageRoutes(BaseRoute):
     async def connect(self) -> tuple[asyncio.StreamReader, asyncio.StreamWriter]:
         loop = asyncio.get_running_loop()
         if self.idle_loop is not loop:
-            self.idle = []
-            self.expiry = {}
+            self.idle = collections.deque()
+            self.untouched = 0
+            self.sweep = None
             self.idle_loop = loop
         else:
             pass
         while self.idle:
             reader, writer = self.idle.pop()
-            self.expiry.pop(writer).cancel()
+            if len(self.idle) < self.untouched:
+                self.untouched = len(self.idle)
+            else:
+                pass
             # A stage that stopped closed its idle connections.
             if reader.at_eof() or writer.is_closing():
                 writer.close()
@@ -212,17 +224,26 @@ class StageRoutes(BaseRoute):
     def park(self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         """Keep a connection for the next request until the keep-alive ends."""
         self.idle.append((reader, writer))
-        self.expiry[writer] = asyncio.get_running_loop().call_later(
-            self.keep_alive_s, self.expire, reader, writer
-        )
+        if self.sweep is None:
+            loop = self.idle_loop
+            self.sweep = loop.call_later(self.keep_alive_s, self.close_idle, loop)
+        else:
+            pass
 
-    def expire(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        self.expiry.pop(writer, None)
-        with contextlib.suppress(ValueError):
-            self.idle.remove((reader, writer))
-        writer.close()
+    def close_idle(self, loop: asyncio.AbstractEventLoop) -> None:
+        """Close the connections that stayed idle since the last sweep."""
+        self.sweep = None
+        if loop is not self.idle_loop:
+            return
+        else:
+            pass
+        for _ in range(self.untouched):
+            self.idle.popleft()[1].close()
+        self.untouched = len(self.idle)
+        if self.idle:
+            self.sweep = loop.call_later(self.keep_alive_s, self.close_idle, loop)
+        else:
+            pass
 
     async def handle(self, scope: Scope, receive: Receive, send: Send) -> None:
         """Serve one request through the stage's app."""
