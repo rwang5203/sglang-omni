@@ -503,7 +503,9 @@ def test_request_a_stage_dropped_in_an_admin_action_ends_as_an_abort(
         await coordinator.handle_completion(dropped)
         await coordinator.handle_completion(dropped)
 
-        with pytest.raises(Exception, match="dropped" if broadcast_fails else "aborted"):
+        with pytest.raises(
+            Exception, match="dropped" if broadcast_fails else "aborted"
+        ):
             await next_message
         if broadcast_fails:
             # The request stays owned until a later abort is delivered.
