@@ -680,7 +680,7 @@ def real_stages(controller, relay, *, reasoner_script, generator_script):
         same_process_targets={"orchestrator"},
         **local,
     )
-    stages["output"].stream_queue = StreamQueue(max_pending=64)
+    stages["output"].stream_queue = StreamQueue()
     stages["output"].control_plane.send_stream = AsyncMock()
     dispatcher.register_many([stages["orchestrator"], stages["output"]])
     for name, script in (
