@@ -260,6 +260,22 @@ def test_native_requests_follow_the_server_media_policy(
             {"data": {"prompt": "a"}, "files": {"video_path": (None, f'"{outside}"')}},
             configured,
         ),
+        # Native joins upload names below its upload directory.
+        (
+            "/v1/actions/generations",
+            {"data": {"id": "../r1"}, "files": {"image_reference": ("a.png", b"x")}},
+            True,
+        ),
+        (
+            "/v1/images/edits",
+            {"data": {"prompt": "a"}, "files": {"image": ("../../a.png", b"x")}},
+            True,
+        ),
+        (
+            "/v1/actions/generations",
+            {"data": {"id": "r1"}, "files": {"image_reference": ("a.png", b"x")}},
+            False,
+        ),
     ]
 
     async def check(client, app):
@@ -306,5 +322,17 @@ def test_cosmos3_generation_stage_serves_and_settles_native_routes(monkeypatch):
     assert kwargs["output_path"] == "/srv/out"
     # Its ports are claimed across processes, skipping the HTTP port.
     assert (kwargs["scheduler_port"], kwargs["master_port"]) == (29500, 29502)
+    # Native checks an HTTP port without an Omni server too, and one
+    # scheduler port per replica, all apart from the ports already set.
+    monkeypatch.delenv(SERVER_PORT_ENV)
+    claims = iter([29600, 29601, 29603, 29604, 29605])
+    kwargs = media.native_media_server_kwargs(
+        {"dp_size": 2, "master_port": 29601}, output_dir="/srv/out"
+    )
+    assert (kwargs["scheduler_port"], kwargs["master_port"], kwargs["port"]) == (
+        29603,
+        29601,
+        29605,
+    )
     with pytest.raises(ValueError, match="loopback"):
         media.native_media_server_kwargs({"host": "0.0.0.0"}, output_dir="/srv")

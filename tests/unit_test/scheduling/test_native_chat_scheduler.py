@@ -566,13 +566,24 @@ def test_warmup_sends_the_request_sglang_serve_sends(model):
         hf_config=SimpleNamespace(architectures=["Cosmos3ForConditionalGeneration"]),
     )
     chat = Chat(engine)
+    threads = []
+    handle_request = chat.handle_request
+
+    async def recorded(request, raw_request):
+        threads.append(threading.current_thread())
+        return await handle_request(request, raw_request)
+
+    chat.handle_request = recorded
+    # Warmup runs on the loop thread the scheduler starts, off the main thread.
+    scheduler = NativeChatScheduler(engine, chat, NativeRequest, "chat")
     try:
         warm_up(engine, chat, NativeRequest)
     finally:
-        engine.loop.close()
+        scheduler.stop()
     if model == "skipped":
         assert not chat.calls
     else:
+        assert threads == [scheduler.loop_thread]
         (request,) = chat.calls
         assert (request.temperature, request.max_completion_tokens) == (0.0, 8)
         content = request.messages[0]["content"]
@@ -615,3 +626,38 @@ def test_factory_passes_resolved_device_to_native(monkeypatch, devices):
             gpu_id=None,
             runtime_gpu_ids=devices,
         )
+
+
+def test_factory_stops_its_scheduler_when_the_warmup_fails(monkeypatch):
+    import sglang
+    from sglang.srt.entrypoints.openai import serving_chat
+
+    from sglang_omni.platforms import current_platform
+    from sglang_omni.utils import device as device_utils
+
+    engine = Engine()
+    engine.server_args.skip_server_warmup = False
+    engine.tokenizer_manager.model_config = SimpleNamespace(
+        is_image_understandable_model=False
+    )
+    engine.template_manager = None
+
+    class FailingChat:
+        def __init__(self, tokenizer_manager, template_manager):
+            pass
+
+        async def handle_request(self, request, raw_request):
+            return JSONResponse({"error": "warmup"}, status_code=500)
+
+    monkeypatch.setattr(
+        device_utils,
+        "resolve_concrete_device",
+        lambda device, index: SimpleNamespace(index=0),
+    )
+    monkeypatch.setattr(current_platform, "set_device", lambda device: None)
+    monkeypatch.setattr(sglang, "Engine", lambda **kwargs: engine)
+    monkeypatch.setattr(serving_chat, "OpenAIServingChat", FailingChat)
+    with pytest.raises(RuntimeError, match="warmup request failed"):
+        create_native_chat_scheduler("checkpoint", stage_name="chat")
+    assert engine.shutdown_count == 1
+    assert engine.loop.is_closed()

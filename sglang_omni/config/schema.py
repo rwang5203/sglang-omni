@@ -970,6 +970,23 @@ class PipelineConfig(BaseModel):
             raise ValueError("Stage names must be unique")
         else:
             pass
+        # The server relays a path to the first stage whose prefix covers it.
+        claimed: list[tuple[str, str]] = []
+        for s in self.stages:
+            for prefix in s.http_routes:
+                for owner, other in claimed:
+                    if owner != s.name and (
+                        f"{prefix}/".startswith(f"{other}/")
+                        or f"{other}/".startswith(f"{prefix}/")
+                    ):
+                        raise ValueError(
+                            f"Stages {owner!r} and {s.name!r} both declare "
+                            f"http_routes over {min(prefix, other, key=len)!r}. "
+                            "Give each path prefix one stage."
+                        )
+                    else:
+                        pass
+                claimed.append((s.name, prefix))
         entry = self.resolved_entry_stage
         if entry not in names:
             raise ValueError(f"entry_stage {entry!r} is not defined")

@@ -373,8 +373,8 @@ class NativeGenerationScheduler(SimpleScheduler):
         cancellation_mode: str | None = None,
         inline_media: bool = False,
     ):
-        """``cancellation_mode`` is "native" when the native API cancels,
-        "plugin" when the Omni plugin runs in the native worker, else None."""
+        """``cancellation_mode`` is "plugin" when the Omni plugin runs in the
+        native worker, else None."""
         self.generator = generator
         self.output_dir = output_dir
         self.request_fields = request_fields
@@ -782,12 +782,7 @@ class NativeGenerationScheduler(SimpleScheduler):
         params["output_path"] = str(request.directory)
         kwargs = {"sampling_params_kwargs": params}
         armed = None
-        if (
-            self.cancellation_mode == "native"
-            and params.get("num_outputs_per_prompt", 1) == 1
-        ):
-            kwargs["cancellation_event"] = request.cancelled
-        elif self.cancellation_mode == "plugin":
+        if self.cancellation_mode == "plugin":
             armed = request.directory / cancellation.ARMED_MARKER
         else:
             pass
@@ -978,19 +973,15 @@ def create_generation_scheduler(
     # for its native workers.
     apply_plugin_hooks()
     server_args = ServerArgs.from_kwargs(**kwargs)
-    # A later SGLang that cancels natively takes precedence over the plugin.
-    native_api = hasattr(DiffGenerator, "supports_cancellation")
     handshake = (
         tempfile.mkdtemp(prefix="sglang-omni-native-")
-        if not native_api and kwargs["num_gpus"] == 1
+        if kwargs["num_gpus"] == 1
         else None
     )
     try:
         with cancellation.activation_environment(handshake):
             generator = DiffGenerator.from_server_args(server_args)
-        if native_api:
-            mode = "native" if generator.supports_cancellation else None
-        elif handshake is not None and os.path.exists(
+        if handshake is not None and os.path.exists(
             cancellation.handshake_path(handshake, 0)
         ):
             mode = "plugin"
@@ -1005,7 +996,7 @@ def create_generation_scheduler(
         logger.warning(
             "%s An aborted request keeps the generation stage busy until its "
             "native generation finishes.",
-            degraded_cancellation_reason(native_api, kwargs["num_gpus"]),
+            degraded_cancellation_reason(kwargs["num_gpus"]),
         )
     else:
         pass
@@ -1040,10 +1031,8 @@ def create_generation_scheduler(
         raise
 
 
-def degraded_cancellation_reason(native_api: bool, num_gpus: object) -> str:
-    if native_api:
-        return "This native configuration reports no cooperative cancellation."
-    elif num_gpus != 1:
+def degraded_cancellation_reason(num_gpus: object) -> str:
+    if num_gpus != 1:
         return (
             "Cooperative generation cancellation covers one native GPU, and "
             f"this stage runs {num_gpus}."

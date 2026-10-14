@@ -7,6 +7,7 @@ import asyncio
 import os
 import tempfile
 import threading
+import time
 from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
@@ -17,12 +18,13 @@ from starlette.requests import Request
 from starlette.responses import JSONResponse, StreamingResponse
 from starlette.routing import Route
 
-from sglang_omni.config.schema import StageConfig
+from sglang_omni.config.schema import PipelineConfig, StageConfig
 from sglang_omni.pipeline.stage.runtime import Stage
 from sglang_omni.serve.stage_routes import (
     StageHttpServer,
     StageRoutes,
     StageRoutesError,
+    check_route_ownership,
 )
 
 
@@ -218,3 +220,90 @@ def test_routes_need_a_scheduler_that_provides_an_app_and_valid_prefixes():
     for bad in (["v1"], ["/"], ["/a", "/a/"]):
         with pytest.raises(ValueError):
             StageConfig(name="g", factory_path="f", http_routes=bad)
+    # Each path has one owner, among the stages and against Omni's own routes,
+    # whatever methods those serve.
+    with pytest.raises(ValueError, match="both declare http_routes"):
+        PipelineConfig(
+            model_path="m",
+            stages=[
+                StageConfig(name="a", factory_path="f", next="b", http_routes=["/v1"]),
+                StageConfig(
+                    name="b", factory_path="f", terminal=True, http_routes=["/v1/x"]
+                ),
+            ],
+        )
+    omni = [
+        Route("/v1/models", lambda request: None, methods=["GET"]),
+        Route("/files/{name:path}", lambda request: None, methods=["GET"]),
+    ]
+    for prefix in ("/v1/models", "/v1", "/files/x"):
+        with pytest.raises(StageRoutesError, match="already serves"):
+            check_route_ownership(omni, StageRoutes("gen", [prefix], "/unused"))
+    check_route_ownership(omni, StageRoutes("gen", ["/v1/videos"], "/unused"))
+
+
+def test_idle_relay_connections_close_after_the_keep_alive():
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            raise RuntimeError("no lifespan")
+        else:
+            pass
+        await asyncio.sleep(0.3)
+        await JSONResponse({})(scope, receive, send)
+
+    with tempfile.TemporaryDirectory() as socket_dir:
+        socket_path = os.path.join(socket_dir, "http_gen.sock")
+        server = StageHttpServer("gen", app, socket_path)
+        server.start(timeout=10)
+        route = StageRoutes("gen", ["/native"], socket_path, keep_alive_s=0.5)
+        front = Starlette(routes=[route])
+
+        async def burst_then_idle() -> tuple[int, int]:
+            await asyncio.gather(*(call(front, "GET", "/native/x") for _ in range(4)))
+            parked = len(route.idle)
+            await asyncio.sleep(1.5)
+            return parked, len(route.idle)
+
+        try:
+            parked, left = asyncio.run(burst_then_idle())
+            # The stage side ends a connection once the relay closed it.
+            deadline = time.monotonic() + 5
+            while server.connections and time.monotonic() < deadline:
+                time.sleep(0.05)
+            serving = len(server.connections)
+        finally:
+            server.stop(timeout=10)
+    assert (parked, left, serving) == (4, 0, 0)
+
+
+def test_a_stop_that_cannot_finish_fails():
+    held, release = threading.Event(), threading.Event()
+
+    async def app(scope, receive, send):
+        if scope["type"] == "lifespan":
+            raise RuntimeError("no lifespan")
+        else:
+            pass
+        held.set()
+        # A handler that never yields keeps the server thread from stopping.
+        release.wait(10)
+        await JSONResponse({})(scope, receive, send)
+
+    with tempfile.TemporaryDirectory() as socket_dir:
+        socket_path = os.path.join(socket_dir, "http_gen.sock")
+        server = StageHttpServer("gen", app, socket_path)
+        server.start(timeout=10)
+        front = Starlette(routes=[StageRoutes("gen", ["/native"], socket_path)])
+
+        async def stop_while_held() -> None:
+            pending = asyncio.ensure_future(call(front, "GET", "/native/x"))
+            await asyncio.to_thread(held.wait, 10)
+            try:
+                with pytest.raises(StageRoutesError, match="did not stop"):
+                    await asyncio.to_thread(server.stop, 0.5)
+            finally:
+                release.set()
+                await pending
+
+        asyncio.run(stop_while_held())
+        server.stop(timeout=10)

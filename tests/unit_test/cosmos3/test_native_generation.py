@@ -239,8 +239,7 @@ def test_generate_route_parameters_reach_the_native_request(tmp_path):
     assert params["num_inference_steps"] == 35
 
 
-@pytest.mark.parametrize("mode", ["native", "plugin"])
-def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path, mode):
+def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path):
     from pathlib import Path
 
     from sglang_omni.native_generation import cancellation
@@ -255,22 +254,19 @@ def test_active_cancel_settles_native_work_and_removes_only_owned_files(tmp_path
             directory = Path(sampling_params_kwargs["output_path"])
             (directory / "partial.mp4").write_bytes(b"partial")
             started.set()
-            if mode == "native":
-                assert kwargs["cancellation_event"].wait(3)
-            else:
-                # The native worker stops once its stage marks the request.
-                assert (directory / cancellation.ARMED_MARKER).exists()
-                marker = directory / cancellation.CANCELLED_MARKER
-                deadline = time.monotonic() + 3
-                while not marker.exists() and time.monotonic() < deadline:
-                    time.sleep(0.01)
-                assert marker.exists()
+            # The native worker stops once its stage marks the request.
+            assert (directory / cancellation.ARMED_MARKER).exists()
+            marker = directory / cancellation.CANCELLED_MARKER
+            deadline = time.monotonic() + 3
+            while not marker.exists() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            assert marker.exists()
             settled.set()
             return None
 
     generator = CancellableGenerator(None)
     scheduler = NativeGenerationScheduler(
-        generator, str(tmp_path), cancellation_mode=mode
+        generator, str(tmp_path), cancellation_mode="plugin"
     )
     scheduler.inbox.put(IncomingMessage("request-1", "new_request", payload()))
     thread = threading.Thread(target=scheduler.start)
