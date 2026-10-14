@@ -34,12 +34,7 @@ from sglang_omni.pipeline.umm import (
     UMMStep,
 )
 from sglang_omni.preprocessing.resource_connector import get_global_resource_connector
-from sglang_omni.proto import (
-    EXPLICIT_GENERATION_PARAMS_KEY,
-    EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
-    OmniRequest,
-    StagePayload,
-)
+from sglang_omni.proto import OmniRequest, StagePayload
 from sglang_omni.scheduling.native_chat_scheduler import (
     build_chat_fields,
     set_sampling_fields,
@@ -438,11 +433,10 @@ def decision_sampling(request: OmniRequest) -> dict[str, object]:
 
     The adapter's defaults apply to fields the client did not set. The client
     sets fields at the top level, through stage_sampling.reasoner, or as
-    native fields in stage_params.reasoner. A top level field counts as set
-    by the native chat stage's rule: the request lists it, or its value
-    differs from the placeholder, as an SDK request's does.
+    native fields in stage_params.reasoner. A field counts as set when the
+    request carries it, since Omni leaves every unset sampling field out.
     """
-    params, metadata = request.params, request.metadata
+    params = request.params
     requested = [name for name in ROLLOUT_FIELDS if params.get(name)]
     if requested:
         raise UMMRequestError(
@@ -454,22 +448,16 @@ def decision_sampling(request: OmniRequest) -> dict[str, object]:
     sampling: dict[str, object] = dict(DECISION_SAMPLING)
     sampling.update(
         set_sampling_fields(
-            {name: params[name] for name in SAMPLING_FIELDS if name in params},
-            metadata.get(EXPLICIT_GENERATION_PARAMS_KEY),
+            {name: params[name] for name in SAMPLING_FIELDS if name in params}
         )
     )
     if params.get("seed") is not None:
         sampling["seed"] = params["seed"]
     else:
         pass
-    stage_sampling = stage_mapping(params, "stage_sampling")
-    explicit_stage = (metadata.get(EXPLICIT_STAGE_SAMPLING_PARAMS_KEY) or {}).get(
-        REASONER_STAGE
-    )
+    stage_sampling = set_sampling_fields(stage_mapping(params, "stage_sampling"))
     for name, value in stage_sampling.items():
-        if name in DECISION_OWNED_FIELDS or (
-            explicit_stage is not None and name not in explicit_stage
-        ):
+        if name in DECISION_OWNED_FIELDS:
             continue
         else:
             sampling[name] = value
@@ -933,10 +921,7 @@ class Cosmos3UMMAdapter:
                 **message,
                 "content": [text, {"type": part, part: {"url": url}}],
             }
-        # Every sampling field here is intended, so the Reasoner stage keeps the
-        # ones equal to its placeholders too.
-        metadata = {EXPLICIT_GENERATION_PARAMS_KEY: sorted(history.sampling)}
-        request = OmniRequest({"messages": messages}, params, metadata)
+        request = OmniRequest({"messages": messages}, params, {})
         history.dispatched_at = now
         return UMMStep(REASON, request, outputs)
 

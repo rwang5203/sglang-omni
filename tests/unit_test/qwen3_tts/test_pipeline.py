@@ -891,12 +891,6 @@ def test_qwen3_tts_maps_references_and_keeps_upstream_sampling_defaults() -> Non
             "text": "target",
             "references": [{"audio_path": "voice.wav", "text": "reference"}],
         },
-        params={
-            "temperature": 0.8,
-            "top_p": 0.8,
-            "top_k": 30,
-            "repetition_penalty": 1.1,
-        },
     )
 
     state = build_qwen3_tts_state(payload)
@@ -912,13 +906,13 @@ def test_qwen3_tts_maps_references_and_keeps_upstream_sampling_defaults() -> Non
 
 
 def test_qwen3_tts_preserves_explicit_default_like_sampling_values() -> None:
+    """A set temperature 0.8 or top_k 30 reaches the model instead of being dropped."""
     payload = make_payload(
         inputs={
             "text": "target",
             "references": [{"audio_path": "voice.wav", "text": "reference"}],
         },
-        params={"temperature": 0.8, "top_k": 30},
-        tts_params={"explicit_generation_params": ["temperature", "top_k"]},
+        params={"temperature": 0.8, "top_p": 1.0, "top_k": 30},
     )
 
     state = build_qwen3_tts_state(payload)
@@ -926,25 +920,9 @@ def test_qwen3_tts_preserves_explicit_default_like_sampling_values() -> None:
     assert state.generation_kwargs == {
         "max_new_tokens": 2048,
         "temperature": 0.8,
+        "top_p": 1.0,
         "top_k": 30,
     }
-
-
-def test_qwen3_tts_ignores_client_sampling_defaults() -> None:
-    payload = make_payload(
-        inputs="target",
-        params={
-            "temperature": 1.0,
-            "top_p": 1.0,
-            "top_k": -1,
-            "repetition_penalty": 1.0,
-        },
-        tts_params={"ref_audio": "voice.wav", "ref_text": "reference"},
-    )
-
-    state = build_qwen3_tts_state(payload)
-
-    assert state.generation_kwargs == {"max_new_tokens": 2048}
 
 
 def test_qwen3_tts_forwards_tts_engine_stage_sampling_params() -> None:
@@ -1985,8 +1963,6 @@ def test_qwen3_tts_bootstrap_silence_eligible_on_allowlisted_custom_voice() -> N
         {"voice": "Vivian"},
         {"language": "Chinese"},
         {"instructions": "Whisper softly."},
-        {"temperature": 0.9, "explicit_generation_params": ["temperature"]},
-        {"top_p": 0.7, "explicit_generation_params": ["top_p"]},
         {"stream_codec_output": False},
         {"suppress_bootstrap_silence": False},
     ],
@@ -2000,46 +1976,35 @@ def test_qwen3_tts_bootstrap_silence_ineligible_variants(
 
 
 @pytest.mark.parametrize(
-    "tts_params",
+    "params",
     [
-        {"temperature": 0.9},
-        {"top_p": 0.7},
-        {"top_k": 50, "repetition_penalty": 1.05},
+        {"temperature": 0.8},
+        {"top_p": 0.8},
+        {"top_k": 30, "repetition_penalty": 1.1},
+        {"stage_params": {"tts_engine": {"temperature": 0.8}}},
     ],
 )
-def test_qwen3_tts_bootstrap_silence_ignores_materialized_sampling(
-    tts_params: dict[str, object],
+def test_qwen3_tts_bootstrap_silence_ineligible_when_sampling_is_set(
+    params: dict[str, object],
 ) -> None:
-    """The serving layer materializes a sampling value on every request.
+    """A sampling field set at the top level or under tts_engine, even at a former placeholder value, disables bootstrap silence."""
+    state = build_qwen3_tts_state(bootstrap_eligible_payload(params=params))
 
-    Only explicit_generation_params distinguishes a caller override, so a
-    materialized value must not disqualify the stream on its own.
-    """
-    state = build_qwen3_tts_state(bootstrap_eligible_payload(tts_params=tts_params))
-
-    assert state.suppress_bootstrap_silence is True
+    assert state.suppress_bootstrap_silence is False
 
 
-def test_qwen3_tts_bootstrap_silence_ignores_max_new_tokens() -> None:
-    state = build_qwen3_tts_state(
-        bootstrap_eligible_payload(tts_params={"max_new_tokens": 512})
-    )
-
-    assert state.suppress_bootstrap_silence is True
-
-
-def test_qwen3_tts_bootstrap_silence_accepts_materialized_sampling_defaults() -> None:
-    state = build_qwen3_tts_state(
-        bootstrap_eligible_payload(
-            params={
-                "temperature": 0.8,
-                "top_p": 0.8,
-                "top_k": 30,
-                "repetition_penalty": 1.1,
-                "seed": 7,
-            }
-        )
-    )
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_new_tokens": 512},
+        {"seed": 7},
+        {"stage_params": {"tts_engine": {"max_new_tokens": 512}}},
+    ],
+)
+def test_qwen3_tts_bootstrap_silence_ignores_length_and_seed(
+    params: dict[str, object],
+) -> None:
+    state = build_qwen3_tts_state(bootstrap_eligible_payload(params=params))
 
     assert state.suppress_bootstrap_silence is True
 
@@ -6667,6 +6632,58 @@ def test_qwen3_tts_state_round_trips_finish_reason() -> None:
 
     assert state.finish_reason == "length"
     assert state.to_dict()["finish_reason"] == "length"
+
+
+def test_qwen3_tts_vocoder_result_keeps_the_talker_finish_reason() -> None:
+    """The non-streaming vocoder result is what the client reads the reason from."""
+    payload = make_payload(inputs="target")
+    talker_result = apply_sglang_qwen3_tts_result(
+        payload,
+        Qwen3TTSSGLangRequestData(
+            req=SimpleNamespace(output_ids=[]),
+            output_codes=[torch.tensor([1, 2]), torch.tensor([3, 4])],
+            stage_payload=payload,
+            finish_reason="length",
+        ),
+    )
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        FakeQwen3TTSSpeechTokenizer(), device="cpu"
+    )
+
+    (vocoder_result,) = asyncio.run(scheduler.vocode_payloads([talker_result]))
+
+    assert vocoder_result.data["finish_reason"] == "length"
+
+
+def test_qwen3_tts_streaming_vocoder_result_keeps_the_talker_finish_reason() -> None:
+    """The streaming terminal result is what the client reads the reason from."""
+    payload = make_payload(inputs="target", params={"stream": True})
+    talker_result = apply_sglang_qwen3_tts_result(
+        payload,
+        Qwen3TTSSGLangRequestData(
+            req=SimpleNamespace(output_ids=[]),
+            output_codes=[torch.tensor([1, 2]), torch.tensor([3, 4])],
+            stage_payload=payload,
+            finish_reason="length",
+        ),
+    )
+    scheduler = Qwen3TTSStreamingVocoderScheduler(
+        FakeQwen3TTSSpeechTokenizer(), device="cpu", initial_chunk_frames=8
+    )
+    scheduler.handle_streaming_new_request(talker_result.request_id, talker_result)
+    scheduler.handle_stream_chunk(
+        talker_result.request_id,
+        qwen3_tts_stream_item(
+            torch.ones((2, 2), dtype=torch.long), chunk_id=0, ref_code_len=0
+        ),
+    )
+
+    scheduler.handle_stream_done(talker_result.request_id)
+
+    assert scheduler.outbox.get_nowait().type == "stream"
+    terminal_message = scheduler.outbox.get_nowait()
+    assert terminal_message.type == "result"
+    assert terminal_message.data.data["finish_reason"] == "length"
 
 
 def test_speech_batch_result_exposes_finish_reason() -> None:

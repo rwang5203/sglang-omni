@@ -23,11 +23,7 @@ from sglang_omni.preprocessing.resource_connector import (
     get_global_resource_connector,
     resolve_local_file,
 )
-from sglang_omni.proto import (
-    EXPLICIT_GENERATION_PARAMS_KEY,
-    EXPLICIT_STAGE_SAMPLING_PARAMS_KEY,
-    StagePayload,
-)
+from sglang_omni.proto import StagePayload
 from sglang_omni.scheduling.message import OutgoingMessage
 from sglang_omni.scheduling.threaded_simple_scheduler import ThreadedSimpleScheduler
 from sglang_omni.serve.openai_errors import generation_error_status_code
@@ -48,25 +44,20 @@ logger = logging.getLogger(__name__)
 # Client errors carry this prefix, which the API maps to 400.
 REQUEST_ERROR = "Native chat request rejected: "
 
-# Omni fills every sampling field a caller omits with these placeholders.
+# Omni leaves an unset sampling field out, except the stop lists it sends empty.
 SAMPLING_PLACEHOLDERS = SamplingParams().to_dict()
 
 
-def set_sampling_fields(values: dict, explicit: object) -> dict:
-    """Drop the sampling placeholders that the caller did not set.
+def set_sampling_fields(values: dict) -> dict:
+    """Drop the empty stop lists that the caller did not set.
 
     Native SGLang resolves an omitted field from the checkpoint generation
-    config, so a placeholder must not reach it. A field counts as set when the
-    request metadata lists it or its value differs from the placeholder, which
-    also covers SDK requests that carry no list.
+    config, so only the fields the caller set reach it.
     """
-    listed = set(explicit) if isinstance(explicit, (list, tuple, set)) else set()
     return {
         key: value
         for key, value in values.items()
-        if key not in SAMPLING_PLACEHOLDERS
-        or key in listed
-        or value != SAMPLING_PLACEHOLDERS[key]
+        if key not in SAMPLING_PLACEHOLDERS or value != SAMPLING_PLACEHOLDERS[key]
     }
 
 
@@ -224,9 +215,7 @@ def build_chat_fields(
         raise ValueError("Chat requests require at least one message")
     else:
         pass
-    params = set_sampling_fields(
-        dict(payload.request.params), metadata.get(EXPLICIT_GENERATION_PARAMS_KEY)
-    )
+    params = set_sampling_fields(dict(payload.request.params))
     for name in ("stage_sampling", "stage_params"):
         stage_params = params.pop(name, None)
         if stage_params is None:
@@ -245,8 +234,7 @@ def build_chat_fields(
         if not isinstance(stage_options, dict):
             raise ValueError(f"{name}.{stage_name} must be a mapping")
         elif name == "stage_sampling":
-            explicit = metadata.get(EXPLICIT_STAGE_SAMPLING_PARAMS_KEY) or {}
-            stage_options = set_sampling_fields(stage_options, explicit.get(stage_name))
+            stage_options = set_sampling_fields(stage_options)
         else:
             pass
         params.update(stage_options)
