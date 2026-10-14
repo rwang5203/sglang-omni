@@ -338,7 +338,10 @@ class StageHttpServer:
             pass
         thread.join(timeout)
         if thread.is_alive():
-            logger.warning("Stage %s HTTP server did not stop in time", self.name)
+            # A request that outlives the stop may still reach the scheduler.
+            raise StageRoutesError(
+                f"Stage {self.name} HTTP server did not stop within {timeout} s"
+            )
         else:
             pass
 
