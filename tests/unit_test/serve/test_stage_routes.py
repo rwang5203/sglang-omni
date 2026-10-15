@@ -102,6 +102,19 @@ def test_requests_relay_to_the_stage_app_with_bodies_streams_and_lifespan():
             )
             streamed = asyncio.run(call(front, "GET", "/native/chunks"))
             outside = asyncio.run(call(front, "GET", "/other"))
+            # A burst that queues past asyncio's default listen backlog of 100
+            # while the stage loop is busy is still served once it is free.
+            busy = threading.Event()
+            server.loop.call_soon_threadsafe(busy.wait, 10)
+
+            async def burst() -> list[httpx.Response]:
+                requests = [call(front, "GET", "/native/chunks") for _ in range(200)]
+                pending = asyncio.gather(*requests)
+                await asyncio.sleep(0.5)
+                busy.set()
+                return await pending
+
+            queued = asyncio.run(burst())
         finally:
             server.stop(timeout=10)
         assert events.get("stopped")
@@ -117,6 +130,7 @@ def test_requests_relay_to_the_stage_app_with_bodies_streams_and_lifespan():
     }
     assert streamed.text == "part0,part1,part2,"
     assert outside.status_code == 404
+    assert [r.status_code for r in queued] == [200] * 200
 
 
 def test_a_stage_that_is_not_serving_answers_503_with_the_cause():

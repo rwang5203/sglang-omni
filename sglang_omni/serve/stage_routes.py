@@ -33,6 +33,7 @@ import contextlib
 import logging
 import os
 import pickle
+import socket
 import struct
 import threading
 from collections.abc import Iterable, MutableMapping
@@ -420,7 +421,12 @@ class StageHttpServer:
         try:
             with contextlib.suppress(FileNotFoundError):
                 os.unlink(self.socket_path)
-            server = await asyncio.start_unix_server(self.accept, path=self.socket_path)
+            # Queue connections up to the system limit, as a blocking listen
+            # would. asyncio's default of 100 refuses the rest of a burst while
+            # the loop is busy, and asyncio then reports those as connected.
+            server = await asyncio.start_unix_server(
+                self.accept, path=self.socket_path, backlog=socket.SOMAXCONN
+            )
             os.chmod(self.socket_path, 0o600)
             self.started.set()
             await self.stopping.wait()
