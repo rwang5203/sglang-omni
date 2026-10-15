@@ -411,15 +411,23 @@ def test_long_voice_upload_stops_decoding_at_the_limit_off_the_event_loop(
         return original_upload(self, **kwargs)
 
     decoded: list[int] = []
-    original_frames = audio_mod.av.AudioFrame.to_ndarray
+    original_open = audio_mod.av.open
 
-    def counting_frames(frame, *args, **kwargs):
-        samples = original_frames(frame, *args, **kwargs)
-        decoded.append(frame.samples)
-        return samples
+    class CountingContainer:
+        # PyAV frame types are immutable on some releases, so count decoded
+        # samples through the container instead of patching the frame type.
+        def __init__(self, container) -> None:
+            self.container = container
+
+        def __getattr__(self, name: str):
+            return getattr(self.container, name)
+
+        def decode(self, *args, **kwargs):
+            for frame in self.container.decode(*args, **kwargs):
+                decoded.append(frame.samples)
+                yield frame
 
     monkeypatch.setattr(SpeakerSampleStore, "upload", recording_upload)
-    monkeypatch.setattr(audio_mod.av.AudioFrame, "to_ndarray", counting_frames)
     client = TestClient(create_app(RecordingSpeechClient(), model_name="tts"))
     # A Matroska FLAC clip, which libsndfile cannot open, decodes through PyAV.
     clip = io.BytesIO()
@@ -439,6 +447,11 @@ def test_long_voice_upload_stops_decoding_at_the_limit_off_the_event_loop(
         for packet in stream.encode():
             container.mux(packet)
 
+    monkeypatch.setattr(
+        audio_mod.av,
+        "open",
+        lambda *args, **kwargs: CountingContainer(original_open(*args, **kwargs)),
+    )
     upload = client.post(
         "/v1/audio/voices",
         data={"name": "Long", "consent": "consent"},
