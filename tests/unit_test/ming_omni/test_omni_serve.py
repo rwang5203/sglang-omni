@@ -39,7 +39,7 @@ def test_ming_config_manager_resolves_top_level_hf_architecture(monkeypatch) -> 
         )
 
     monkeypatch.setattr(
-        "sglang_omni.config.manager.AutoConfig.from_pretrained",
+        "transformers.AutoConfig.from_pretrained",
         fake_from_pretrained,
     )
 
@@ -55,7 +55,7 @@ def test_ming_config_manager_resolves_single_architecture_attribute(
     monkeypatch,
 ) -> None:
     monkeypatch.setattr(
-        "sglang_omni.config.manager.AutoConfig.from_pretrained",
+        "transformers.AutoConfig.from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(
             architecture="BailingMM2NativeForConditionalGeneration"
         ),
@@ -124,7 +124,7 @@ def test_sglang_loads_a_ming_checkpoint_with_the_ming_config(tmp_path) -> None:
 
 def test_ming_text_variant_uses_text_image_pipeline(monkeypatch) -> None:
     monkeypatch.setattr(
-        "sglang_omni.config.manager.AutoConfig.from_pretrained",
+        "transformers.AutoConfig.from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(
             architectures=["BailingMM2NativeForConditionalGeneration"]
         ),
@@ -457,7 +457,7 @@ def test_omni_serve_builds_ming_text_config_without_launching(monkeypatch) -> No
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "sglang_omni.config.manager.AutoConfig.from_pretrained",
+        "transformers.AutoConfig.from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(
             architectures=["BailingMM2NativeForConditionalGeneration"]
         ),
@@ -520,7 +520,7 @@ def test_omni_serve_builds_ming_speech_config_by_default(monkeypatch) -> None:
     captured: dict[str, object] = {}
 
     monkeypatch.setattr(
-        "sglang_omni.config.manager.AutoConfig.from_pretrained",
+        "transformers.AutoConfig.from_pretrained",
         lambda *args, **kwargs: SimpleNamespace(
             architectures=["BailingMM2NativeForConditionalGeneration"]
         ),
