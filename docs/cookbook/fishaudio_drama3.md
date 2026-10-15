@@ -181,13 +181,13 @@ Drama 3 runs its attention on the `triton` backend only. The server refuses to s
 
 ## Int4 Checkpoint
 
-[`akhaliq/drama-3-int4`](https://huggingface.co/akhaliq/drama-3-int4) is a 4-bit GPTQ quantization of Drama 3. The server reads its quantization from the checkpoint, so it starts with the same command:
+[`fishaudio/drama-3-int4`](https://huggingface.co/fishaudio/drama-3-int4) is a 4-bit GPTQ quantization of Drama 3. Thanks so much to [AK](https://x.com/_akhaliq) for the quantization! The server reads its quantization from the checkpoint, so it starts with the same command:
 
 ```bash
-hf download akhaliq/drama-3-int4
+hf download fishaudio/drama-3-int4
 
 sgl-omni serve \
-  --model-path akhaliq/drama-3-int4 \
+  --model-path fishaudio/drama-3-int4 \
   --port 8000
 ```
 
@@ -198,7 +198,7 @@ Table 3 compares the two checkpoints on one H200 with the default server setting
 | Checkpoint | Weights | Latency mean | Latency p95 | RTF mean | Throughput (req/s) | WER (corpus) | WER without samples above 50% |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | `fishaudio/drama-3` (FP8 experts) | 37.0 GB | 1.235 s | 1.902 s | 0.281 | 6.47 | 1.99% | 1.32% |
-| `akhaliq/drama-3-int4` | 20.8 GB | 1.334 s | 2.178 s | 0.320 | 5.99 | 1.63% | 1.42% |
+| `fishaudio/drama-3-int4` | 20.8 GB | 1.334 s | 2.178 s | 0.320 | 5.99 | 1.63% | 1.42% |
 
 *Table 3. Drama 3 FP8 and int4 checkpoints on Seed-TTS English, concurrency 8, one H200.*
 
