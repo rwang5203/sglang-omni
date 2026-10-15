@@ -12,7 +12,7 @@ import queue
 import sys
 import time
 from collections.abc import Awaitable, Callable, Generator, Iterable, Mapping
-from contextlib import contextmanager, suppress
+from contextlib import ExitStack, contextmanager, suppress
 from dataclasses import dataclass, field
 from multiprocessing.process import BaseProcess
 from multiprocessing.queues import Queue
@@ -241,10 +241,29 @@ def platform_env_stage(spec: StageWorkerProcessSpec) -> StageLaunchConfig | None
     return tp_stages[0]
 
 
+def launcher_platform_env_stage(
+    spec: StageWorkerProcessSpec,
+) -> StageLaunchConfig | None:
+    """The stage whose spawn env needs a launcher that has no platform.
+
+    A stage that owns native child processes narrows its own devices when the
+    launcher has not resolved the platform (prepare_accelerator_environment),
+    so only TP ranks need it resolved before they start.
+    """
+    stage = platform_env_stage(spec)
+    if stage is None or stage.allow_child_processes:
+        return None
+    else:
+        return stage
+
+
 def get_worker_process_env(spec: StageWorkerProcessSpec) -> dict[str, str]:
     """Return the spawn-time env overrides for *spec*."""
     stage = platform_env_stage(spec)
     if stage is None:
+        return {}
+    elif stage.allow_child_processes and platforms.resolved_platform() is None:
+        # The stage narrows its own devices (prepare_accelerator_environment).
         return {}
     else:
         pass
@@ -274,17 +293,21 @@ def resolve_accelerator_facts(
     probe resolves the platform and answers, so this process stays free of
     torch and SGLang, and the probe's platform is pinned in this process's
     environment for every stage it spawns. Without TP ranks no probe runs,
-    and each stage process checks its own GPU ids (check_stage_gpu_ids).
+    and each stage process checks its own GPU ids (check_stage_gpu_ids) and
+    narrows a stage that owns native child processes itself.
     """
     from sglang_omni.pipeline.runtime_config import visible_device_count
 
-    needed = [spec for spec in specs if platform_env_stage(spec) is not None]
     if platforms.resolved_platform() is not None:
+        needed = [spec for spec in specs if platform_env_stage(spec) is not None]
         return AcceleratorFacts(
             visible_device_count(),
             {spec.process_name: get_worker_process_env(spec) for spec in needed},
         )
-    elif not needed:
+    else:
+        pass
+    needed = [spec for spec in specs if launcher_platform_env_stage(spec) is not None]
+    if not needed:
         return AcceleratorFacts(None, {})
     else:
         pass
@@ -645,9 +668,48 @@ class StageGroup:
             self.startup_error_channels.clear()
 
 
-# Set by the parent when it narrows a stage that owns native child processes
-# to its GPUs, so the child maps placement to local device ids.
+# Set once a stage that owns native child processes is narrowed to its GPUs,
+# by the parent or by the stage itself, so the stage maps placement to local
+# device ids.
 NATIVE_GPUS_NARROWED_ENV = "SGLANG_OMNI_NATIVE_GPUS_NARROWED"
+# torch answers availability and device count from NVML while this is "1",
+# without initializing the CUDA runtime, which fixes its visible devices.
+NVML_DEVICE_CHECK_ENV = "PYTORCH_NVML_BASED_CUDA_CHECK"
+
+
+def narrows_own_devices(spec: StageLaunchConfig) -> bool:
+    """Whether a native stage still has to narrow its process to its GPUs.
+
+    A launcher without a platform leaves that to the stage process.
+    """
+    return (
+        spec.allow_child_processes
+        and bool(spec.owned_gpu_ids)
+        and os.environ.get(NATIVE_GPUS_NARROWED_ENV) != "true"
+    )
+
+
+@contextmanager
+def nvml_device_checks(active: bool) -> Generator[None, None, None]:
+    """Keep the CUDA runtime uninitialized while the stage resolves its platform.
+
+    Resolving the platform asks whether CUDA is available. Answered by the
+    runtime, that fixes the visible devices before the stage can narrow them.
+    """
+    if not active:
+        yield
+        return
+    else:
+        pass
+    previous = os.environ.get(NVML_DEVICE_CHECK_ENV)
+    os.environ[NVML_DEVICE_CHECK_ENV] = "1"
+    try:
+        yield
+    finally:
+        if previous is None:
+            os.environ.pop(NVML_DEVICE_CHECK_ENV, None)
+        else:
+            os.environ[NVML_DEVICE_CHECK_ENV] = previous
 
 
 def check_stage_gpu_ids(spec: StageWorkerProcessSpec) -> None:
@@ -658,9 +720,9 @@ def check_stage_gpu_ids(spec: StageWorkerProcessSpec) -> None:
     GPU stages has nothing to check and leaves the device runtime alone.
     """
     gpu_ids = [
-        (stage.stage_name, stage.gpu_id)
+        (stage.stage_name, gpu_id)
         for stage in spec.stage_specs
-        if stage.gpu_id is not None
+        for gpu_id in stage.owned_gpu_ids
     ]
     if "SGLANG_OMNI_PLATFORM_SPEC" in os.environ or not gpu_ids:
         return
@@ -690,6 +752,12 @@ def stage_process_main(
     startup_error_channel: Queue[str] | None = None,
 ) -> None:
     """Subprocess entrypoint: construct stage(s) from *spec* and run them."""
+    # A stage that narrows its own devices keeps the CUDA runtime untouched
+    # from its first import until it has narrowed them.
+    device_setup = ExitStack()
+    device_setup.enter_context(
+        nvml_device_checks(any(narrows_own_devices(s) for s in spec.stage_specs))
+    )
     # note (Richard Wang): exit with the parent, so a killed server does not
     # leave its stage workers holding the GPUs. A parent that died before the
     # signal was registered sends none, so check it once registered.
@@ -717,9 +785,10 @@ def stage_process_main(
     log = logging.getLogger(f"stage_workers.{spec.process_name}")
 
     try:
-        check_stage_gpu_ids(spec)
-        for stage_spec in spec.stage_specs:
-            prepare_accelerator_environment(stage_spec, log)
+        with device_setup:
+            check_stage_gpu_ids(spec)
+            for stage_spec in spec.stage_specs:
+                prepare_accelerator_environment(stage_spec, log)
         apply_gpu_compat_env_defaults()
         from sglang_omni.utils.ipc_weights import prepare_weight_share_process_compat
 
@@ -1275,8 +1344,19 @@ def prepare_accelerator_environment(
     single visible device.
     """
     if spec.allow_child_processes:
-        # The parent narrows this process before it starts, so local ids
-        # follow the declared GPU order.
+        # A launcher without a platform leaves the narrowing to this process,
+        # which has not initialized CUDA yet (nvml_device_checks).
+        env_updates = (
+            platforms.current_platform.get_stage_process_env(spec)
+            if narrows_own_devices(spec)
+            else {}
+        )
+        if env_updates:
+            os.environ.update(env_updates)
+            os.environ[NATIVE_GPUS_NARROWED_ENV] = "true"
+        else:
+            pass
+        # Local ids follow the declared GPU order once the process is narrowed.
         if os.environ.get(NATIVE_GPUS_NARROWED_ENV) == "true":
             normalize_spec_gpu_id_to_local_device(spec)
             log.info(

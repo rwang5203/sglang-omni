@@ -80,20 +80,33 @@ def test_stages_check_their_gpu_ids_when_no_tp_rank_needs_the_probe(
     monkeypatch,
 ) -> None:
     """A launcher without a platform runs no probe unless a TP rank needs one,
-    and the stage process reports a GPU id outside its visible devices."""
+    leaves a native stage to narrow itself, and the stage process reports a
+    GPU id outside its visible devices."""
     monkeypatch.setattr(platforms, "resolved_platform", lambda: None)
+    monkeypatch.setattr(platforms, "current_platform", cuda_platform)
     monkeypatch.setattr(
         spawn_env_probe, "probe", lambda *args, **kwargs: pytest.fail("probe ran")
     )
     spec = worker_spec(StageLaunchConfig(stage_name="thinker", gpu_id=3))
+    native = worker_spec(
+        StageLaunchConfig(
+            stage_name="generation",
+            gpu_id=0,
+            allow_child_processes=True,
+            factory_kwargs={"runtime_gpu_ids": [0, 2]},
+        )
+    )
 
-    facts = stage_workers.resolve_accelerator_facts([spec], timeout=1)
+    facts = stage_workers.resolve_accelerator_facts([spec, native], timeout=1)
 
     assert facts == stage_workers.AcceleratorFacts(None, {})
+    assert get_worker_process_env(native) == {}
     monkeypatch.delenv("SGLANG_OMNI_PLATFORM_SPEC", raising=False)
     monkeypatch.setattr(runtime_config, "visible_device_count", lambda: 2)
     with pytest.raises(ValueError, match="'thinker': GPU id 3 out of range"):
         stage_workers.check_stage_gpu_ids(spec)
+    with pytest.raises(ValueError, match="'generation': GPU id 2 out of range"):
+        stage_workers.check_stage_gpu_ids(native)
 
 
 @pytest.mark.parametrize("parent_threads", [None, "4"])
@@ -479,6 +492,56 @@ def test_native_child_owner_sees_only_its_gpus(monkeypatch, platform) -> None:
     assert os.environ[variable] == "4,5,6,7"
 
 
+def test_native_stage_narrows_itself_under_nvml_device_checks(monkeypatch) -> None:
+    """A native stage whose launcher has no platform narrows its own GPUs.
+
+    It resolves the platform and counts devices while torch answers from NVML,
+    so the CUDA runtime has not fixed the visible devices before it narrows
+    them, and then restores the operator's device checks for its children.
+    """
+    nvml_env = stage_workers.NVML_DEVICE_CHECK_ENV
+    narrowed_env = stage_workers.NATIVE_GPUS_NARROWED_ENV
+    monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "4,5,6,7")
+    for name in ("SGLANG_OMNI_PLATFORM_SPEC", narrowed_env, nvml_env):
+        monkeypatch.delenv(name, raising=False)
+    monkeypatch.setattr(platforms, "current_platform", cuda_platform)
+    device_checks: list[str | None] = []
+
+    def visible_device_count() -> int:
+        device_checks.append(os.environ.get(nvml_env))
+        return 4
+
+    started: dict[str, str | None] = {}
+
+    def run_process(spec, ready_event, log) -> None:
+        for name in ("CUDA_VISIBLE_DEVICES", narrowed_env, nvml_env):
+            started[name] = os.environ.get(name)
+
+    monkeypatch.setattr(runtime_config, "visible_device_count", visible_device_count)
+    monkeypatch.setattr(stage_workers, "kill_itself_when_parent_died", lambda: None)
+    monkeypatch.setattr(stage_workers, "apply_gpu_compat_env_defaults", lambda: None)
+    monkeypatch.setattr(stage_workers, "run_process", run_process)
+    monkeypatch.setattr(stage_workers, "exit_without_teardown", lambda code: None)
+    stage = StageLaunchConfig(
+        stage_name="generation",
+        gpu_id=1,
+        allow_child_processes=True,
+        factory_kwargs={"runtime_gpu_ids": [1, 3]},
+    )
+    spec = worker_spec(stage)
+    spec.log_level = logging.getLogger().level
+
+    stage_workers.stage_process_main(spec, None)
+
+    assert device_checks == ["1"]
+    assert started == {
+        "CUDA_VISIBLE_DEVICES": "5,7",
+        narrowed_env: "true",
+        nvml_env: None,
+    }
+    assert (stage.gpu_id, stage.factory_kwargs["runtime_gpu_ids"]) == (0, [0, 1])
+
+
 class RecordingLog:
     def __init__(self) -> None:
         self.messages: list[str] = []
@@ -845,7 +908,7 @@ def run_process(spec, ready_event, log):
 teardown = Teardown()
 stage_workers.prepare_accelerator_environment = lambda stage_spec, log: None
 stage_workers.run_process = run_process
-stage = SimpleNamespace(gpu_id=None, allow_child_processes=False)
+stage = SimpleNamespace(gpu_id=None, allow_child_processes=False, owned_gpu_ids=[])
 spec = SimpleNamespace(log_level=20, stage_specs=[stage], process_name="p")
 stage_workers.stage_process_main(spec, None)
 """
