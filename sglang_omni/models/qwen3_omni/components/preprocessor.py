@@ -16,8 +16,9 @@ import numpy as np
 import numpy.typing as npt
 import torch
 import xxhash
+from sglang.srt.utils.hf_transformers.common import get_context_length
 from tokenizers.normalizers import NFC
-from transformers import BatchFeature, PreTrainedTokenizerBase
+from transformers import AutoConfig, BatchFeature, PreTrainedTokenizerBase
 from transformers.models.qwen3_omni_moe.processing_qwen3_omni_moe import (
     Qwen3OmniMoeProcessor,
 )
@@ -50,8 +51,10 @@ from sglang_omni.preprocessing.text import (
     TextContentPart,
     split_content_parts,
 )
+from sglang_omni.preprocessing.transcription import prepare_audio
 from sglang_omni.profiler.event_recorder import emit as _emit_event
 from sglang_omni.proto import StagePayload
+from sglang_omni.utils.audio import AudioDecodeError
 
 logger = logging.getLogger(__name__)
 
@@ -61,7 +64,6 @@ class VideoProcessorKwargs(TypedDict, total=False):
     max_frames: int
     min_pixels: int
     max_pixels: int
-    total_pixels: int
     use_audio_in_video: bool
     seconds_per_chunk: float
     position_id_per_seconds: float
@@ -212,6 +214,42 @@ QWEN3_OMNI_CHAT_TEMPLATE_FALLBACK_MODEL = "Qwen/Qwen3-Omni-30B-A3B-Instruct"
 # U+1F82 decomposes into four code points, the most that NFC recomposes into one.
 MAX_NFC_COMPOSITION_LENGTH = 4
 
+LANGUAGE_CODE_TO_NAME: dict[str, str] = {
+    "ar": "Arabic",
+    "yue": "Cantonese",
+    "zh": "Chinese",
+    "nl": "Dutch",
+    "en": "English",
+    "fr": "French",
+    "de": "German",
+    "id": "Indonesian",
+    "it": "Italian",
+    "ja": "Japanese",
+    "ko": "Korean",
+    "ms": "Malay",
+    "pt": "Portuguese",
+    "ru": "Russian",
+    "es": "Spanish",
+    "tr": "Turkish",
+    "ur": "Urdu",
+    "vi": "Vietnamese",
+}
+LANGUAGE_NAME_BY_CASEFOLD: dict[str, str] = {
+    name.casefold(): name for name in LANGUAGE_CODE_TO_NAME.values()
+}
+
+
+def resolve_language(language: str) -> str:
+    """Normalize Qwen3-Omni language hints while retaining unknown values."""
+    value = language.strip()
+    normalized = value.casefold()
+    if normalized == "cn" or normalized.startswith(("zh-", "zh_")):
+        return "Chinese"
+    else:
+        return LANGUAGE_CODE_TO_NAME.get(normalized) or LANGUAGE_NAME_BY_CASEFOLD.get(
+            normalized, value
+        )
+
 
 def validate_prompt_seq_len(
     input_ids: torch.Tensor,
@@ -284,7 +322,6 @@ class Qwen3OmniPreprocessor:
         video_total_pixels: int | None = None,
     ) -> None:
         self.model_path = model_path
-        self.max_seq_len = max_seq_len
         self.default_video_fps = float(video_fps) if video_fps is not None else None
         self.default_video_max_frames = (
             int(video_max_frames) if video_max_frames is not None else None
@@ -299,6 +336,13 @@ class Qwen3OmniPreprocessor:
             int(video_total_pixels) if video_total_pixels is not None else None
         )
         self.model_dir = resolve_local_model_dir(model_path)
+        if max_seq_len is None:
+            thinker_text_config = AutoConfig.from_pretrained(
+                self.model_dir, trust_remote_code=True
+            ).thinker_config.text_config
+            self.max_seq_len = get_context_length(thinker_text_config)
+        else:
+            self.max_seq_len = max_seq_len
         # Only override ``extra_special_tokens`` when the checkpoint omits them
         # (transformers 5.x layout). Passing an empty dict would clobber the
         # tokens a transformers 4.x checkpoint already declares in its config.
@@ -645,6 +689,40 @@ class Qwen3OmniPreprocessor:
             else:
                 pass
             audio_target_sr = int(inputs.get("audio_target_sr", 16000))
+            audio_bytes = inputs.get("audio_bytes")
+            if audio_bytes is not None:
+                try:
+                    prepared_audio = await asyncio.to_thread(
+                        prepare_audio,
+                        payload,
+                        source_name="Qwen3-Omni",
+                        target_sample_rate=audio_target_sr,
+                    )
+                except AudioDecodeError as exc:
+                    raise ValueError(
+                        "Qwen3-Omni could not decode the uploaded audio; "
+                        "provide a valid audio file."
+                    ) from exc
+                transcription_prompt = (
+                    "Please transcribe the speech in the audio verbatim. "
+                    "Output only the transcription in its original language, "
+                    "without explanations."
+                )
+                language = str(payload.request.params.get("language") or "").strip()
+                if language:
+                    language = resolve_language(language)
+                    transcription_prompt += f"\nThe spoken language is {language}."
+                else:
+                    pass
+                context = str(payload.request.params.get("prompt") or "").strip()
+                if context:
+                    transcription_prompt += f"\nTranscription context: {context}"
+                else:
+                    pass
+                messages = [{"role": "user", "content": transcription_prompt}]
+                raw_audios = [prepared_audio.waveform]
+            else:
+                pass
             video_fps = inputs.get("video_fps", self.default_video_fps)
             video_max_frames = inputs.get(
                 "video_max_frames",
@@ -836,10 +914,6 @@ class Qwen3OmniPreprocessor:
             pass
         if resolved_video_max_pixels is not None:
             videos_kwargs["max_pixels"] = resolved_video_max_pixels
-        else:
-            pass
-        if resolved_video_total_pixels is not None:
-            videos_kwargs["total_pixels"] = resolved_video_total_pixels
         else:
             pass
         if effective_use_audio_in_video is not None:
