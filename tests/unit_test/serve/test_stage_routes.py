@@ -235,11 +235,12 @@ def test_routes_need_a_scheduler_that_provides_an_app_and_valid_prefixes():
     omni = [
         Route("/v1/models", lambda request: None, methods=["GET"]),
         Route("/files/{name:path}", lambda request: None, methods=["GET"]),
+        Route("/v1/{kind}/status", lambda request: None, methods=["GET"]),
     ]
-    for prefix in ("/v1/models", "/v1", "/files/x"):
+    for prefix in ("/v1/models", "/v1", "/files/x", "/v1/images"):
         with pytest.raises(StageRoutesError, match="already serves"):
             check_route_ownership(omni, StageRoutes("gen", [prefix], "/unused"))
-    check_route_ownership(omni, StageRoutes("gen", ["/v1/videos"], "/unused"))
+    check_route_ownership(omni, StageRoutes("gen", ["/v1/images/jobs"], "/unused"))
 
 
 def test_idle_relay_connections_close_after_the_keep_alive():

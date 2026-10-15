@@ -38,9 +38,10 @@ import threading
 from collections.abc import Iterable, MutableMapping
 from typing import Any
 
+from starlette.convertors import PathConvertor
 from starlette.datastructures import URLPath
 from starlette.responses import JSONResponse
-from starlette.routing import BaseRoute, Match, NoMatchFound
+from starlette.routing import BaseRoute, Match, Mount, NoMatchFound, compile_path
 from starlette.types import ASGIApp, Receive, Scope, Send
 
 from sglang_omni.config.schema import normalize_route_prefixes
@@ -96,22 +97,54 @@ def covers(prefix: str, path: str) -> bool:
     return path == prefix or path.startswith(prefix + "/")
 
 
+def template_reaches(template: str, prefix: str) -> bool:
+    """Whether a Starlette path template matches the prefix or a path below it.
+
+    A path is at or below the prefix when its leading segments equal the
+    prefix's, so the template reaches the prefix when each of its leading
+    segments can match the prefix segment in its place. A path parameter
+    crosses segments and can match any rest.
+    """
+    template_segments = template.split("/")[1:]
+    for index, segment in enumerate(prefix.split("/")[1:]):
+        if index >= len(template_segments):
+            return False
+        else:
+            pass
+        template_segment = template_segments[index]
+        regex, _, convertors = compile_path("/" + template_segment)
+        if any(isinstance(c, PathConvertor) for c in convertors.values()):
+            # Text before the first parameter must open the segment.
+            return segment.startswith(template_segment.split("{", 1)[0])
+        elif regex.match("/" + segment) is None:
+            return False
+        else:
+            pass
+    return True
+
+
 def check_route_ownership(routes: Iterable[BaseRoute], stage: StageRoutes) -> None:
     """Refuse a stage prefix that reaches a route the Omni server serves itself.
 
     Starlette serves a path through the first route that fully matches it, and
     only then through the first one that matched the path with another method,
     so a stage prefix over an Omni route would take that route's other methods.
-    The pipeline config already gives each stage prefix one owning stage.
+    A route reaches a prefix when its path template matches the prefix or any
+    path below it. A route without a template is probed at the prefix. The
+    pipeline config already gives each stage prefix one owning stage.
     """
     for route in routes:
         path = getattr(route, "path", None)
+        if isinstance(route, Mount):
+            template = route.path + "/{path:path}"
+        else:
+            template = path
         for prefix in stage.prefixes:
             probes = [
                 {"type": kind, "path": prefix, "method": "GET", "headers": []}
                 for kind in DISCONNECT
             ]
-            if (path is not None and covers(prefix, path)) or any(
+            if (template is not None and template_reaches(template, prefix)) or any(
                 route.matches(scope)[0] != Match.NONE for scope in probes
             ):
                 raise StageRoutesError(
