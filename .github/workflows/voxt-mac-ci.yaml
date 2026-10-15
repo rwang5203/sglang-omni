@@ -39,7 +39,7 @@ jobs:
   preflight:
     name: voxt-mac-ci-gate
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 15
     outputs:
       run_mac: ${{ github.event_name == 'workflow_dispatch' && 'true' || steps.plan.outputs.run_mac }}
     steps:
@@ -80,6 +80,12 @@ jobs:
             --labels-json "${LABELS_JSON}" \
             --seed "${GITHUB_RUN_ID}" \
             --github-output "${GITHUB_OUTPUT}"
+
+      - name: Check PR lint and mergeability
+        if: ${{ github.event_name == 'pull_request' && steps.plan.outputs.run_mac == 'true' }}
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: python .github/scripts/pr_ci_gate.py
 
   native-runtime:
     name: native runtime (golden + API)

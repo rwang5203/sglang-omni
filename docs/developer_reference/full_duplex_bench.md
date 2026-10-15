@@ -404,7 +404,7 @@ CUDA_VISIBLE_DEVICES="" "$SCORING_PYTHON" -m benchmarks.eval.benchmark_duplex_v1
     --tree "$OUT/reference" --reference-source "$FDB_SOURCE"
 ```
 
-- `reference-export` writes each sample's window as `<subset>/<id>/output.wav` with its annotation into a new directory, plus `manifest.json`. Repeated `--run` takes shards. An ineligible session gets no folder and keeps its reasons in the manifest.
+- `reference-export` writes each sample's window as `<subset>/<id>/output.wav` with its annotation into a new directory, plus `manifest.json`. Repeated `--run` takes shards. An ineligible session gets no folder and keeps its reasons in the manifest. A recording made with a turn-based profile needs `--trace-format realtime-legacy-pcm16-v1`; as in the v1.5 export, the audio is resampled from the profile's output rate and a session is eligible only when its protocol verdict is `pass`.
 - `reference-asr` transcribes every sample with the local Parakeet checkpoint. For user interruption it cuts the audio at the end of the interruption and shifts the word times back, so the transcript holds only the reply. It writes `output.json` per sample and the receipt `asr.json`, and runs once per export.
 - `unified-score` reads the saved manifest, ASR transcript and annotations on CPU, then writes `unified.json` and `unified-samples.jsonl`. It is independent of the official evaluator and can be rerun for an existing export without repeating ASR. To backfill a runbook repeat, use `eval "$(python -m benchmarks.duplex.fdb env)"`, then `CUDA_VISIBLE_DEVICES="" "$SCORING_PYTHON" -m benchmarks.eval.benchmark_duplex_v10 unified-score --tree "$FDB_WORK/runs/RUN_NAME/repeat-N/v10/reference"`, replacing `RUN_NAME` and `N` with the recorded run and repeat; rerun `aggregate` afterward.
 - `reference-evaluate` runs the evaluator per subset and stores the printed `[Result]` numbers, the counts and the log path in `summary.json`. `--subset` evaluates only the named subsets; the rest can follow later.
@@ -412,8 +412,6 @@ CUDA_VISIBLE_DEVICES="" "$SCORING_PYTHON" -m benchmarks.eval.benchmark_duplex_v1
 The interruption relevance is rated by `gpt-4-turbo` with seed 0, as the official evaluator requests, for every interruption the model took over. That needs `OPENAI_API_KEY` (or the variable named by `--api-key-env`); without a key, evaluate the other subsets with `--subset`. `--base-url URL --served-model NAME` sends the same prompts to a self-hosted judge, with thinking off and the reply capped at 512 tokens, since the evaluator sets neither and SGLang would stop at 128 tokens. `summary.json` records the endpoint actually used and marks the rating official only for OpenAI's endpoint without `--served-model`. Every exchange is appended to `judge/user-interruption-<UTC time>.jsonl`.
 
 The official evaluator has a retry bug: when a rating does not parse, it resends the same request without limit, and each retry counts that sample's takeover again. The client stops after three identical requests, which fails the subset, and `summary.json` reports `retries`. A nonzero value means the interruption takeover rate is inflated.
-
-`transcribe` and `score` (`fdb-v10-synthetic-v4`) remain as a diagnostic beside the official numbers, not in their place. They add gates the official evaluator does not have: turn-taking samples where the model already speaks when the user's turn ends, and interruptions where the model was silent when the user cut in or talked straight through. Report their gate counts next to the official numbers.
 
 ### Measurement definitions
 
