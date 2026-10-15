@@ -1294,13 +1294,15 @@ class Stage:
         try:
             return await loop.run_in_executor(self.outbox_waiter, outbox.get)
         except asyncio.CancelledError:
-            self.wake_outbox_drain()
+            self.end_outbox_drain()
             raise
 
-    def wake_outbox_drain(self) -> None:
-        """Release the drain waiter from a get on an empty outbox.
+    def end_outbox_drain(self) -> None:
+        """Put the wakeup that ends both drains, releasing a blocked get.
 
-        Both drains skip the wakeup like any message type they do not route.
+        The drains end only there, not when the stage stops running or the
+        outbox is momentarily empty, so they route everything the scheduler
+        published before it.
         """
         self.scheduler.outbox.put(OutgoingMessage(request_id="", type="wakeup"))
 
@@ -1316,7 +1318,7 @@ class Stage:
             return
         else:
             pass
-        self.wake_outbox_drain()
+        self.end_outbox_drain()
         done, _ = await asyncio.wait({task}, timeout=_SCHEDULER_THREAD_JOIN_TIMEOUT_S)
         if not done:
             logger.warning(
@@ -1330,7 +1332,7 @@ class Stage:
     async def drain_outbox_external(self) -> None:
         """Drain scheduler outbox and route results downstream."""
         outbox = self.scheduler.outbox
-        while self.running or not outbox.empty():
+        while True:
             out = await self.wait_outbox_message()
 
             for batch_index in range(_OUTBOX_DRAIN_BATCH_SIZE):
@@ -1379,8 +1381,13 @@ class Stage:
                             )
                     elif out.type == "error":
                         await self.send_failure(out.request_id, str(out.data))
+                    elif out.type == "wakeup":
+                        return
                     else:
                         pass
+                elif out.type == "wakeup":
+                    # Checked after the routed types, so routing pays nothing.
+                    return
                 else:
                     pass
 
@@ -1397,10 +1404,12 @@ class Stage:
 
     async def drain_outbox_follower(self) -> None:
         """Drain follower outbox without emitting external stage traffic."""
-        while self.running or not self.scheduler.outbox.empty():
+        while True:
             out = await self.wait_outbox_message()
 
-            if out.type == "result":
+            if out.type == "wakeup":
+                return
+            elif out.type == "result":
                 self.clear_request_state(out.request_id)
             elif out.type == "stream":
                 continue

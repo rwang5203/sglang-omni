@@ -207,6 +207,7 @@ def test_terminal_scheduler_stream_routes_to_coordinator() -> None:
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert len(control_plane.streams) == 2
@@ -252,6 +253,7 @@ def test_outbox_drain_reuses_one_executor_wakeup_for_ready_messages(
         for message in messages:
             scheduler.outbox.put(message)
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert [
@@ -306,6 +308,7 @@ def test_outbox_drain_yields_after_ready_message_batch(monkeypatch) -> None:
             execution_order.append("competing-coroutine")
 
         competing_task = asyncio.create_task(competing_ready_coroutine())
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
         await competing_task
 
@@ -356,6 +359,7 @@ def test_explicit_scheduler_stream_target_keeps_stage_to_stage_routing(
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert control_plane.streams == []
@@ -403,6 +407,7 @@ def test_small_cpu_scheduler_stream_chunk_rides_inline(
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert relay.puts == []

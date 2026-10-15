@@ -151,6 +151,7 @@ def test_stage_routes_results_streams_and_clears_abort_state(monkeypatch) -> Non
         scheduler.outbox.put(make_stream_message("req-1", data=torch.tensor([7])))
         scheduler.outbox.put(make_result_message("req-1", data={"answer": 1}))
 
+        stage_obj.end_outbox_drain()
         await stage_obj.drain_outbox()
 
         decode_msg = next(
@@ -316,9 +317,25 @@ def test_idle_stage_blocks_without_timed_polls_until_shutdown(
     if scheduler_kind == "serial":
         scheduler = SimpleScheduler(lambda payload: payload)
     elif scheduler_kind == "serial-finishing":
-        # The request finishes while the stage waits for its stopped scheduler.
-        scheduler = SimpleScheduler(hold)
+        # Two requests finish while the stage waits for its stopped scheduler,
+        # and the second result publishes after the drain caught up.
+        scheduler = SimpleScheduler(
+            hold,
+            batch_compute_fn=lambda payloads: [hold(p) for p in payloads],
+            max_batch_size=2,
+            max_batch_wait_ms=1000,
+        )
         stop = scheduler.stop
+        publish = scheduler.outbox.put
+
+        def publish_apart(message, *args, **kwargs):
+            if message.request_id == "late-1":
+                time.sleep(0.2)
+            else:
+                pass
+            publish(message, *args, **kwargs)
+
+        monkeypatch.setattr(scheduler.outbox, "put", publish_apart)
 
         def stop_then_finish() -> None:
             stop()
@@ -344,11 +361,13 @@ def test_idle_stage_blocks_without_timed_polls_until_shutdown(
         stage_obj = make_stage(scheduler=scheduler, control_plane=control_plane)
         run_task = asyncio.create_task(stage_obj.run())
         if scheduler_kind == "serial-finishing":
-            control_plane.inbox.put_nowait(
-                SubmitMessage(
-                    request_id="late", data=make_stage_payload(request_id="late")
+            for request_id in ("late-0", "late-1"):
+                control_plane.inbox.put_nowait(
+                    SubmitMessage(
+                        request_id=request_id,
+                        data=make_stage_payload(request_id=request_id),
+                    )
                 )
-            )
             assert await asyncio.to_thread(held.wait, 5.0)
         else:
             pass
@@ -360,7 +379,7 @@ def test_idle_stage_blocks_without_timed_polls_until_shutdown(
         assert stage_obj.scheduler_thread is None
         # A result published while the scheduler stopped still completes.
         assert [c.request_id for c in control_plane.completions] == (
-            ["late"] if scheduler_kind == "serial-finishing" else []
+            ["late-0", "late-1"] if scheduler_kind == "serial-finishing" else []
         )
         # The drain's waiter thread ends with the stage.
         deadline = time.monotonic() + 2.0
