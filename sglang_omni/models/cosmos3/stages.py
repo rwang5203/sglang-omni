@@ -615,6 +615,11 @@ def native_server_kwargs(
     else:
         pass
     kwargs.update(model_path=model_path, num_gpus=len(devices))
+    # The checkpoint names a pipeline class that only native SGLang defines,
+    # so the auto backend's diffusers fallback could never load it. Asking
+    # for the native backend lets this process name the pipeline without
+    # importing it. An explicit backend override still wins.
+    kwargs.setdefault("backend", "sglang")
     if runtime_gpu_ids is None:
         kwargs["base_gpu_id"] = gpu_id
     else:
