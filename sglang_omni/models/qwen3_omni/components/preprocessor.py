@@ -299,24 +299,6 @@ def validate_prompt_seq_len(
         pass
 
 
-def placeholder_counts(
-    processor: Qwen3OmniMoeProcessor,
-    prompt_text: str,
-    images: list[object],
-    videos: list[object],
-    audios: list[object] | None,
-) -> str:
-    """Each media placeholder string the prompt holds, next to its media count."""
-    return ", ".join(
-        f"{prompt_text.count(token)} {token} for {len(items or [])} {kind} inputs"
-        for kind, token, items in (
-            ("audio", processor.audio_token, audios),
-            ("image", processor.image_token, images),
-            ("video", processor.video_token, videos),
-        )
-    )
-
-
 def is_pretokenized_prompt(inputs: object) -> TypeGuard[list[int]]:
     """True when a rollout request carries pre-tokenized prompt ids.
 
@@ -984,13 +966,16 @@ class Qwen3OmniPreprocessor:
             # prompt the next media input, so placeholder text the user typed
             # runs past them. Without media, tokenize it as plain SGLang does.
             if images or videos or audios:
-                counts = placeholder_counts(
-                    self.processor, prompt_text, images, videos, audios
-                )
+                processor = self.processor
                 raise ValueError(
                     "The prompt has more media placeholders than the request has "
-                    f"media inputs ({counts}). Remove the placeholder text or send "
-                    "a media input for each one."
+                    f"media inputs ({prompt_text.count(processor.audio_token)} "
+                    f"{processor.audio_token} for {len(audios or [])} audio inputs, "
+                    f"{prompt_text.count(processor.image_token)} "
+                    f"{processor.image_token} for {len(images)} image inputs, "
+                    f"{prompt_text.count(processor.video_token)} "
+                    f"{processor.video_token} for {len(videos)} video inputs). "
+                    "Remove the placeholder text or send a media input for each one."
                 ) from exc
             else:
                 hf_inputs = self.processor.tokenizer(
