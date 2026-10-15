@@ -17,8 +17,10 @@ from sglang_omni.models.personaplex.components.mimi import (
     rename_mimi_key,
 )
 from sglang_omni.models.personaplex.components.mimi_transformer import (
+    AttentionState,
     MimiAttention,
     MimiTransformer,
+    TransformerState,
 )
 
 
@@ -70,7 +72,7 @@ def test_codec_encode_and_decode_step_match_whole(random_codec):
 
     whole = codec.decode(codes)
     assert whole.shape == (1, 1, codec.samples_per_frame * frames)
-    state = codec.init_decode_state(batch_size=1)
+    state = codec.init_decode_state(batch_size=1, max_chunk_frames=1)
     chunked = torch.cat(
         [codec.decode_step(codes[..., f : f + 1], state) for f in range(frames)], -1
     )
@@ -88,8 +90,8 @@ def test_a_reset_decode_state_decodes_like_a_fresh_one(random_codec):
             -1,
         )
 
-    fresh = stream(codes, codec.init_decode_state(batch_size=1))
-    state = codec.init_decode_state(batch_size=1)
+    fresh = stream(codes, codec.init_decode_state(batch_size=1, max_chunk_frames=1))
+    state = codec.init_decode_state(batch_size=1, max_chunk_frames=1)
     stream(earlier, state)
     state.reset()
     assert torch.equal(stream(codes, state), fresh)
@@ -143,7 +145,7 @@ def influenced_steps(chunk: int) -> list[int]:
     changed[:, 0] += 1.0
 
     def run(inp):
-        state = attention.init_state(batch_size=1)
+        state = attention.init_state(batch_size=1, max_chunk_steps=chunk)
         with torch.no_grad():
             parts = [
                 attention(inp[:, t : t + chunk], offset=t, state=state)
@@ -156,8 +158,7 @@ def influenced_steps(chunk: int) -> list[int]:
 
 
 def test_the_ring_drops_its_oldest_step_as_the_reference_does():
-    """The reference labels the slot it is about to overwrite as a future position,
-    so once the ring is full its oldest entry leaves the window."""
+    """History at or before each frame's end minus the context is excluded."""
     assert influenced_steps(1) == list(range(SMALL.context - 1))
     assert influenced_steps(SMALL.frame_ratio) == list(
         range(SMALL.context - SMALL.frame_ratio)
@@ -170,7 +171,7 @@ def test_the_ring_drops_its_oldest_step_as_the_reference_does():
 def test_whole_sequence_matches_the_streaming_replay(length):
     transformer = small_transformer()
     x = torch.randn(1, SMALL.dim, length)
-    state = transformer.init_state(batch_size=1)
+    state = transformer.init_state(batch_size=1, max_chunk_steps=SMALL.frame_ratio)
     with torch.no_grad():
         whole = transformer(x)
         chunked = torch.cat(
@@ -181,3 +182,59 @@ def test_whole_sequence_matches_the_streaming_replay(length):
             -1,
         )
     torch.testing.assert_close(whole, chunked, atol=1e-6, rtol=1e-5)
+
+
+@pytest.mark.parametrize("max_chunk_frames", [1, 3, 8])
+@pytest.mark.parametrize("length_in_steps", [5, 6, 67])
+def test_aggregated_transformer_chunks_match_whole_across_ring_wraps(
+    max_chunk_frames: int, length_in_steps: int
+) -> None:
+    transformer = small_transformer()
+    latent = torch.randn(1, SMALL.dim, length_in_steps)
+    max_chunk_steps = max_chunk_frames * SMALL.frame_ratio
+    state = transformer.init_state(batch_size=1, max_chunk_steps=max_chunk_steps)
+    with torch.inference_mode():
+        whole = transformer(latent)
+        chunks = [
+            transformer.step(latent[..., start : start + max_chunk_steps], state)
+            for start in range(0, length_in_steps, max_chunk_steps)
+        ]
+    torch.testing.assert_close(torch.cat(chunks, -1), whole, atol=1e-6, rtol=1e-5)
+
+
+def test_rows_at_different_offsets_step_together_like_their_own_streams():
+    transformer = small_transformer()
+    chunk = SMALL.frame_ratio
+    # Steps each row has taken: none, a few, and enough to wrap its ring.
+    taken = [0, 2 * chunk, 3 * SMALL.context]
+    x = torch.randn(len(taken), SMALL.dim, max(taken) + chunk)
+    with torch.no_grad():
+        states = []
+        for row, steps in enumerate(taken):
+            state = transformer.init_state(
+                batch_size=1, max_chunk_steps=SMALL.frame_ratio
+            )
+            for t in range(0, steps, chunk):
+                transformer.step(x[row : row + 1, :, t : t + chunk], state)
+            states.append(state)
+        stacked = TransformerState(
+            offset=torch.cat([state.offset for state in states]),
+            layers=[
+                AttentionState(
+                    keys=torch.cat([state.layers[layer].keys for state in states]),
+                    values=torch.cat([state.layers[layer].values for state in states]),
+                )
+                for layer in range(SMALL.num_layers)
+            ],
+        )
+        next_chunks = [
+            x[row : row + 1, :, steps : steps + chunk]
+            for row, steps in enumerate(taken)
+        ]
+        batched = transformer.step(torch.cat(next_chunks), stacked)
+        separate = [
+            transformer.step(next_chunk, state)
+            for next_chunk, state in zip(next_chunks, states, strict=True)
+        ]
+    torch.testing.assert_close(batched, torch.cat(separate), atol=1e-6, rtol=1e-5)
+    assert stacked.offset.tolist() == [steps + chunk for steps in taken]

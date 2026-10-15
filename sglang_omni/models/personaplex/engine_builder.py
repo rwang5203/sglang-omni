@@ -5,16 +5,19 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import shutil
 import tempfile
 from pathlib import Path
 from typing import Protocol
 
 import torch
+from sglang.srt.arg_groups.model_override_base import resolved_view
 from sglang.srt.server_args import ServerArgs
 
 from sglang_omni.model_runner.model_worker import ModelWorker
 from sglang_omni.models.personaplex.architecture import MOSHI_WEIGHTS_NAME
+from sglang_omni.models.personaplex.config import DEFAULT_LM_MAX_RUNNING_REQUESTS
 from sglang_omni.models.personaplex.hf_config import (
     DEFAULT_CONTEXT_LENGTH,
     PERSONAPLEX_ARCH,
@@ -37,6 +40,9 @@ from sglang_omni.scheduling.engine_factory import (
 )
 from sglang_omni.scheduling.sglang_backend.output_processor import SGLangOutputProcessor
 from sglang_omni.scheduling.sglang_backend.request_data import SGLangARRequestData
+from sglang_omni.vendor.sglang.server_args import override_server_args
+
+logger = logging.getLogger(__name__)
 
 
 class LMRequestBuilder(Protocol):
@@ -74,7 +80,10 @@ class PersonaPlexEngineBuilder(TtsEngineBuilder[SGLangARRequestData]):
     supports_context_length_override = True
 
     def __init__(
-        self, *, max_running_requests: int = 1, context_length: int | None = None
+        self,
+        *,
+        max_running_requests: int = DEFAULT_LM_MAX_RUNNING_REQUESTS,
+        context_length: int | None = None,
     ) -> None:
         self.max_running_requests = max_running_requests
         self.model_arch_override = PERSONAPLEX_ARCH
@@ -103,6 +112,29 @@ class PersonaPlexEngineBuilder(TtsEngineBuilder[SGLangARRequestData]):
             # Note (wilsonzheng0327): Seeded top-k sampling needs the torch sampler.
             "sampling_backend": "pytorch",
         }
+
+    def customize_server_args(self, server_args: ServerArgs) -> None:
+        config = resolved_view(server_args)
+        if (
+            current_platform.is_cuda()
+            and config.device == "cuda"
+            and config.page_size == 1
+            and config.disable_radix_cache
+        ):
+            pass
+        else:
+            override_server_args(
+                server_args,
+                "sglang_omni.personaplex.window_kv",
+                disable_hybrid_swa_memory=True,
+            )
+            logger.info(
+                f"PersonaPlex uses the full KV pool on device={config.device}, "
+                f"platform={current_platform.device_type} "
+                f"with page_size={config.page_size}, "
+                f"disable_radix_cache={config.disable_radix_cache}; "
+                "window KV requires CUDA, page_size=1 and disabled radix caching"
+            )
 
     def setup_model(
         self,
