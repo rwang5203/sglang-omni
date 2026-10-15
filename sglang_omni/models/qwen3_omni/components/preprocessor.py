@@ -788,6 +788,7 @@ class Qwen3OmniPreprocessor:
                     max_frames=inputs.get("video_max_frames"),
                     min_pixels=inputs.get("video_min_pixels"),
                     total_pixels=inputs.get("video_total_pixels"),
+                    max_pixels=inputs.get("video_max_pixels"),
                     server_max_frames=self.default_video_max_frames,
                     server_max_pixels=self.default_video_max_pixels,
                     server_total_pixels=self.default_video_total_pixels,

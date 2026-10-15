@@ -45,6 +45,7 @@ def check_caller_video_budget(
     max_frames: object,
     min_pixels: object,
     total_pixels: object,
+    max_pixels: object = None,
     server_max_frames: int | None = None,
     server_max_pixels: int | None = None,
     server_total_pixels: int | None = None,
@@ -52,7 +53,9 @@ def check_caller_video_budget(
     """Reject caller video fields that raise the server's budget.
 
     A caller may ask for fewer frames or pixels than the server allows, never
-    more. The server values default to the video library's own limits.
+    more. The server values default to the video library's own limits. A
+    caller's per-frame maximum is checked only against a configured server
+    value, since the loader already caps it at the library's limit.
     """
     frame_size_limit = (
         qwen_vision.VIDEO_MAX_PIXELS if server_max_pixels is None else server_max_pixels
@@ -61,6 +64,17 @@ def check_caller_video_budget(
         raise VideoBudgetError(
             "Video request exceeds the server budget: video_min_pixels "
             f"{int(min_pixels)} is above this server's limit of {frame_size_limit}"
+        )
+    else:
+        pass
+    if (
+        max_pixels is not None
+        and server_max_pixels is not None
+        and int(max_pixels) > server_max_pixels
+    ):
+        raise VideoBudgetError(
+            "Video request exceeds the server budget: video_max_pixels "
+            f"{int(max_pixels)} is above this server's limit of {server_max_pixels}"
         )
     else:
         pass
