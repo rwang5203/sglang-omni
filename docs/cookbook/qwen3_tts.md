@@ -155,6 +155,19 @@ New requests are not refused because of the cap. `/health` reports the
 backlog under `stream_delivery`, including the held bytes, open streams and
 failed streams.
 
+### Server Readiness
+
+Before it reports ready, the server sends itself a streaming speech request in
+its checkpoint's mode, once per replica of its most replicated process, one
+after another: CustomVoice uses its first built-in speaker, VoiceDesign a short
+voice description, and Base a one-second tone as its reference clip. `/health`
+returns 503 with status `starting` until these requests finish, so the first
+requests after that do not wait for the kernel loading and first-use setup of
+the speech path. The sampler is compiled for single and batched requests while
+the model loads, so the first concurrent requests need no warmup of their own.
+A failed warmup stops the server. `SGLANG_OMNI_WARMUP_TIMEOUT` (seconds, default
+600) bounds each request, and `--skip-server-warmup` reports ready without them.
+
 ### Prefill CUDA graphs
 
 Every Qwen3-TTS checkpoint (Base, CustomVoice, VoiceDesign) defaults to a

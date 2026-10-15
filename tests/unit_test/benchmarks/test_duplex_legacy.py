@@ -1315,3 +1315,65 @@ def test_v10_recorder_records_a_legacy_profile(tmp_path: Path) -> None:
         "type": "semantic_vad",
         "eagerness": "low",
     }
+
+
+def record_v10_interruption(tmp_path: Path) -> tuple[Path, Path]:
+    dataset, run = tmp_path / "data", tmp_path / "run"
+    write_v10(dataset)
+    with legacy_peer_server("healthy") as url:
+        code, summary = run_cli(
+            v10_main,
+            ["record", "--dataset-root", str(dataset), "--url", url]
+            + ["--output", str(run), "--sample-id", "synthetic_user_interruption/1"]
+            + RECORD_ARGS
+            + ["--turn-detection", '{"type": "server_vad"}'],
+        )
+    assert code == 0, summary
+    return dataset, run
+
+
+def export_v10_legacy(dataset: Path, run: Path, output: Path) -> dict:
+    code, counts = run_cli(
+        v10_main,
+        ["reference-export", "--run", str(run), "--dataset-root", str(dataset)]
+        + ["--out", str(output), "--trace-format", TraceFormat.LEGACY_PCM16.value],
+    )
+    assert code == 0, counts
+    return json.loads((output / "manifest.json").read_text())
+
+
+def test_v10_export_reads_a_legacy_run_at_the_profile_rate(tmp_path: Path) -> None:
+    dataset, run = record_v10_interruption(tmp_path)
+
+    manifest = export_v10_legacy(dataset, run, tmp_path / "export")
+
+    assert manifest["trace_format"] == "realtime-legacy-pcm16-v1"
+    assert manifest["counts"]["synthetic_user_interruption"] == {
+        "selected": 1,
+        "eligible": 1,
+    }
+    [row] = manifest["samples"]
+    assert row["output"]["native_rate"] == OUTPUT_RATE
+    assert row["output"]["resample"] == {
+        "method": "scipy.signal.resample_poly",
+        "up": 2,
+        "down": 3,
+    }
+    _, rate = soundfile.read(
+        tmp_path / "export/synthetic_user_interruption/1/output.wav", dtype="int16"
+    )
+    assert rate == INPUT_RATE
+
+
+def test_v10_export_needs_a_passing_legacy_protocol_verdict(tmp_path: Path) -> None:
+    dataset, run = record_v10_interruption(tmp_path)
+    state = json.loads((run / "run.json").read_text())
+    state["samples"][0]["variants"]["input"]["protocol_verdict"] = "fail"
+    (run / "run.json").write_text(json.dumps(state))
+
+    manifest = export_v10_legacy(dataset, run, tmp_path / "export")
+
+    [row] = manifest["samples"]
+    assert row["eligible"] is False
+    assert row["reasons"] == ["recorder protocol verdict 'fail' is not pass"]
+    assert not (tmp_path / "export/synthetic_user_interruption").exists()
