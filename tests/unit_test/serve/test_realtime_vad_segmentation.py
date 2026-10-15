@@ -81,6 +81,13 @@ async def test_seventy_seconds_without_a_committed_turn_keep_the_session(
         model_name="qwen3-omni",
         supports_audio_output=True,
     )
+    committed_bytes: list[int] = []
+
+    async def record_turn(turn: tuple[str, str]) -> None:
+        payload = turn[1]
+        committed_bytes.append(len(base64.b64decode(payload.split(",", 1)[1])) - 44)
+
+    session.response_queue.put = record_turn  # type: ignore[method-assign]
     chunk = base64.b64encode(bytes(3200)).decode()
 
     for _ in range(700):
@@ -89,11 +96,27 @@ async def test_seventy_seconds_without_a_committed_turn_keep_the_session(
         )
 
     errors = [event["error"] for event in websocket.events if event["type"] == "error"]
+    assert errors == []
     if speaking:
-        assert errors and errors[0]["code"] == "audio_buffer_overflow"
+        # A turn as long as the buffer is committed whole and continues as a new turn.
+        assert committed_bytes == [600 * 3200]
+        types = [event["type"] for event in websocket.events]
+        assert types[types.index("input_audio_buffer.committed") + 1] == (
+            "input_audio_buffer.speech_started"
+        )
+        assert session.audio_buffer.num_bytes == 100 * 3200
     else:
-        assert errors == []
+        assert committed_bytes == []
         assert session.audio_buffer.num_bytes <= 2 * (300 * 16 + 2 * 512)
+    # One append larger than the whole buffer still fails closed.
+    await session.handle_audio_append(
+        InputAudioBufferAppend(
+            type="input_audio_buffer.append",
+            audio=base64.b64encode(bytes(1920002)).decode(),
+        )
+    )
+    errors = [event["error"] for event in websocket.events if event["type"] == "error"]
+    assert [error["code"] for error in errors] == ["audio_buffer_overflow"]
     assert websocket.application_state is WebSocketState.CONNECTED
     await session.teardown()
 

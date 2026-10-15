@@ -443,15 +443,52 @@ class RealtimeSession:
         try:
             decoded_len = self.audio_buffer.append_b64(event.audio)
         except BufferOverflow as exc:
-            await self.send_error(
-                "invalid_request_error", "audio_buffer_overflow", str(exc)
-            )
-            return
+            if self.utterance_start_byte is None:
+                overflow: BufferOverflow | None = exc
+            else:
+                # note (Richard Wang): a turn as long as the buffer is committed
+                # at the buffer's end and continues as a new turn, as the
+                # transcription session cuts its long segments.
+                await self.cut_long_turn()
+                try:
+                    decoded_len = self.audio_buffer.append_b64(event.audio)
+                    overflow = None
+                except BufferOverflow as retry_exc:
+                    overflow = retry_exc
+            if overflow is not None:
+                await self.send_error(
+                    "invalid_request_error", "audio_buffer_overflow", str(overflow)
+                )
+                return
+            else:
+                pass
         new_bytes = self.audio_buffer.tail(decoded_len)
         emits = await asyncio.to_thread(self.vad.process, new_bytes)
         for emit in emits:
             await self.handle_vad_emit(emit)
         self.trim_idle_prefix()
+
+    async def cut_long_turn(self) -> None:
+        """Commit the open turn through the buffer's end and continue it.
+
+        The detector still hears speech, so the rest of the turn becomes a new
+        item that its eventual stop commits as usual.
+        """
+        start_byte = self.utterance_start_byte or 0
+        end_byte = self.audio_buffer.num_bytes
+        if end_byte > start_byte:
+            await self.commit_span(start_byte, end_byte)
+        else:
+            self.consume_committed_prefix(end_byte)
+        self.utterance_start_byte = 0
+        self.utterance_item_id = new_id("item")
+        await self.send(
+            make_event(
+                "input_audio_buffer.speech_started",
+                audio_start_ms=offsets_to_ms(self.buffer_origin_samples),
+                item_id=self.utterance_item_id,
+            )
+        )
 
     def trim_idle_prefix(self) -> None:
         """Bound the buffer while no speech turn is open.
@@ -558,6 +595,9 @@ class RealtimeSession:
             return
         else:
             pass
+        await self.commit_span(start_byte, end_byte)
+
+    async def commit_span(self, start_byte: int, end_byte: int) -> None:
         payload = self.audio_buffer.to_sliced_wav_data_uri(
             start_byte=start_byte, end_byte=end_byte
         )
