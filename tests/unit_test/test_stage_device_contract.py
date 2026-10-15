@@ -44,7 +44,11 @@ def iter_stages():
 
 def pipeline_wiring(model: str, label: str, stage_name: str) -> Mapping[str, object]:
     module = importlib.import_module(f"sglang_omni.models.{model}.config")
-    config_cls = module.EntryClass if label == "default" else module.Variants[label]
+    config_cls = (
+        module.EntryClass
+        if label == "default"
+        else resolve_variant(module.Variants[label])
+    )
     return config_cls(model_path="unused").stage_factory_kwargs(stage_name)
 
 
