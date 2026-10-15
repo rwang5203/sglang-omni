@@ -415,9 +415,10 @@ def real_qwen_processor():
     )
 
 
+@pytest.mark.parametrize("total_pixels", [None, 28 * 28 * 8])
 @pytest.mark.parametrize("sampled_fps", [[2.0, 2.0], [2.0, 4.0]])
 def test_qwen_preprocessor_two_videos_and_audio_with_real_processor(
-    monkeypatch, sampled_fps
+    monkeypatch, sampled_fps, total_pixels
 ) -> None:
     """Keep audio features and tokens aligned through the real processor call."""
     from sglang_omni.models.qwen3_omni.components import (
@@ -440,7 +441,7 @@ def test_qwen_preprocessor_two_videos_and_audio_with_real_processor(
     pre.default_video_max_frames = None
     pre.default_video_min_pixels = 28 * 28
     pre.default_video_max_pixels = 28 * 28
-    pre.default_video_total_pixels = None
+    pre.default_video_total_pixels = total_pixels
     pre.processor = processor
     payload = StagePayload(
         request_id="two-videos-and-audio",
