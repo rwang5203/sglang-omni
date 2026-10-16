@@ -117,8 +117,9 @@ class Attention(torch.nn.Module):
         q = self.to_heads(q)
         k = self.to_heads(k)
         v = self.to_heads(v)
-        q = self.q_norm(q)
-        k = self.k_norm(k)
+        # note (0xtoward): LayerNorm returns float32 under autocast; casting back keeps the streaming key/value history in the flow's dtype, as forward_packed does.
+        q = self.q_norm(q).to(v.dtype)
+        k = self.k_norm(k).to(v.dtype)
         if window is not None:
             window[:, :, :t, : self.head_dim].copy_(k)
             window[:, :, :t, self.head_dim :].copy_(v)
