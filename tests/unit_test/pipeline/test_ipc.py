@@ -28,7 +28,11 @@ from sglang_omni.pipeline.stage_workers import StageLaunchConfig, StageWorkerPro
 from sglang_omni.profiler.event_recorder import get_recorder
 from sglang_omni.serve import launcher
 from sglang_omni.serve.openai_api import ServerStatus
-from sglang_omni.serve.protocol import ChatCompletionRequest, ChatMessage
+from sglang_omni.serve.protocol import (
+    ChatCompletionRequest,
+    ChatMessage,
+    CreateSpeechRequest,
+)
 from sglang_omni.serve.server_warmup import (
     TranscriptionWarmupRequest,
     warmup_tone_wav_bytes,
@@ -435,9 +439,11 @@ async def run_launcher_with_fake_runner(
     monkeypatch: pytest.MonkeyPatch,
     replica_counts: tuple[int, ...] = (1,),
     host: str = "0.0.0.0",
+    created_runners: list[object] | None = None,
 ) -> tuple[object, FastAPI, SimpleNamespace]:
     app = FastAPI()
     profiler_calls = SimpleNamespace(starts=[], stops=[])
+    runners = [] if created_runners is None else created_runners
 
     from sglang_omni.serve import launcher
 
@@ -447,10 +453,12 @@ async def run_launcher_with_fake_runner(
         def __init__(self, pipeline_config: PipelineConfig) -> None:
             del pipeline_config
             nonlocal runner_ref
+            runners.append(self)
             self.coordinator = StubCoordinator()
             self.stage_control_endpoints = {
                 "preprocessing": "ipc://stage_preprocessing.sock"
             }
+            self.stage_http_routes = []
             self.started = False
             self.stopped = False
             # launcher._run_server reads .prep.placement_plan / .process_plan
@@ -725,6 +733,41 @@ async def test_transcription_warmup_uploads_a_form_the_transcription_route_parse
 
 
 @pytest.mark.asyncio
+async def test_speech_warmup_posts_its_request_to_the_speech_route(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    posted: list[tuple[str, CreateSpeechRequest]] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        posted.append(
+            (
+                request.url.path,
+                CreateSpeechRequest.model_validate_json(request.content),
+            )
+        )
+        return httpx.Response(200)
+
+    route_warmup_to(monkeypatch, httpx.MockTransport(respond))
+    server = SimpleNamespace(started=True, should_exit=False)
+    app = FastAPI()
+    app.state.server_status = ServerStatus.STARTING
+    request = CreateSpeechRequest(
+        input="Hi", voice="Ryan", response_format="pcm", stream=True
+    )
+
+    await launcher.warm_up_server(
+        server,
+        app,
+        base_url="http://127.0.0.1:8000",
+        requests=[request],
+        timeout_s=5,
+    )
+
+    assert posted == [("/v1/audio/speech", request)]
+    assert app.state.server_status is ServerStatus.UP
+
+
+@pytest.mark.asyncio
 async def test_launcher_sends_one_warmup_request_per_replica_of_the_most_replicated_process(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -958,15 +1001,20 @@ async def test_launcher_stops_runner_when_server_raises(
 ) -> None:
     config = make_config(tmp_path)
     server_serve = AsyncMock(side_effect=RuntimeError("server failed"))
+    runners: list[object] = []
 
     with pytest.raises(RuntimeError, match="server failed"):
         await run_launcher_with_fake_runner(
             config=config,
             serve_mock=server_serve,
             monkeypatch=monkeypatch,
+            created_runners=runners,
         )
 
     server_serve.assert_awaited_once()
+    assert len(runners) == 1
+    assert runners[0].started
+    assert runners[0].stopped
 
 
 @pytest.mark.asyncio
@@ -1078,6 +1126,7 @@ def test_launcher_cleans_up_before_passing_on_sigterm(
         def __init__(self, pipeline_config: PipelineConfig) -> None:
             self.coordinator = StubCoordinator()
             self.stage_control_endpoints = {}
+            self.stage_http_routes = []
             self.prep = SimpleNamespace(
                 placement_plan=SimpleNamespace(gpus={}),
                 process_plan=SimpleNamespace(groups=(), tp_stage_to_processes={}),
