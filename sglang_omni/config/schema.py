@@ -446,6 +446,12 @@ class StageConfig(BaseModel):
                 pass
         else:
             pass
+        if self.http_routes:
+            self.http_routes = list(
+                normalize_route_prefixes(self.name, self.http_routes)
+            )
+        else:
+            pass
         if isinstance(self.gpu, int) and self.tp_size > 1:
             raise ValueError(
                 f"Stage {self.name!r}: TP placement requires a list of {self.tp_size} unique GPU ids, got scalar gpu={self.gpu}"
