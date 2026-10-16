@@ -150,14 +150,6 @@ Supported Models
 
 .. toctree::
    :maxdepth: 1
-   :caption: Benchmarks
-
-   benchmarks/relay.md
-   benchmarks/qwen3_tts_leading_silence.md
-
-
-.. toctree::
-   :maxdepth: 1
    :caption: Developer Reference
 
    developer_reference/main.md
