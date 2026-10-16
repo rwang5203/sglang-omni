@@ -75,7 +75,13 @@ A judge starts only when the step has a request for it: the v1.5 pairs and the v
 
 ## Run the benchmark
 
-A run has three steps, then an aggregation. Each step starts the server it needs and stops it when it exits.
+A run has three steps, then an aggregation. Each step starts the server it needs and stops it when it exits. `generate --all-stages` runs the other three after recording, so one command goes from recording to `RESULTS.md`:
+
+```bash
+python -m benchmarks.duplex.fdb generate --run-name minicpmo-10 --v15-per-subset 10 --v10-per-subset 10 --all-stages
+```
+
+Without `--all-stages`, `generate` only records, and each later step is its own subcommand.
 
 | Step | Subcommand | What it does |
 |---|---|---|
@@ -87,26 +93,22 @@ A run has three steps, then an aggregation. Each step starts the server it needs
 Run a small preflight first. It takes one pair per v1.5 category and three samples per v1.0 subset (about 15 minutes) and catches environment problems before a long run. v1.0 needs three samples rather than one because the official turn-taking and interruption evaluators divide by the number of takeovers and fail when no selected sample takes the turn.
 
 ```bash
-python -m benchmarks.duplex.fdb generate --run-name preflight --v15-per-subset 1 --v10-per-subset 3
-python -m benchmarks.duplex.fdb asr --run-name preflight
-python -m benchmarks.duplex.fdb judge --run-name preflight
-python -m benchmarks.duplex.fdb aggregate --run-name preflight
+python -m benchmarks.duplex.fdb generate --run-name preflight --v15-per-subset 1 --v10-per-subset 3 --all-stages
 ```
 
 The preflight passes when `generate` prints `{"pass": 8}` and `{"eligible_pairs": 4, ...}` for v1.5 and `{"pass": 15}` with 3 eligible samples per v1.0 subset; `asr` prints `{"ok": 16}`, `{"ok": 8}` and 3 transcripts per v1.0 subset; and `judge` prints `{"valid": 4}`, `controls: 18/18 axis statuses match` and the parsed v1.0 results of each subset as JSON (the evaluator's own `[Result]` block is in `repeat-N/v10/reference/logs/evaluate-<subset>.log`). If anything differs, see [Troubleshooting](#troubleshooting).
 
-A run is one fixed selection of samples under `$FDB_WORK/runs/RUN_NAME`. Decoding uses sampling, so two generations of the same inputs differ; to measure that variance, run the three steps several times under one run name with `--repeat 1`, `--repeat 2`, and so on. `--repeat N` only names the output directory `repeat-N/`; one command always runs once. `aggregate` presents unified v1.0 scores per repeat and means ± standard deviations in its v1.5 and official v1.0 reference tables.
+A run is one fixed selection of samples under `$FDB_WORK/runs/RUN_NAME`. Decoding uses sampling, so two generations of the same inputs differ; to measure that variance, run the steps several times under one run name with `--repeat 1`, `--repeat 2`, and so on. `--repeat N` only names the output directory `repeat-N/`; one command always runs once. `aggregate` presents unified v1.0 scores per repeat and means ± standard deviations in its v1.5 and official v1.0 reference tables.
 
 ```bash
 for repeat in 1 2 3; do
-    python -m benchmarks.duplex.fdb generate --run-name minicpmo-12 --repeat "$repeat" --v15-per-subset 12 --v10-per-subset 12
-    python -m benchmarks.duplex.fdb asr --run-name minicpmo-12 --repeat "$repeat"
-    python -m benchmarks.duplex.fdb judge --run-name minicpmo-12 --repeat "$repeat"
+    python -m benchmarks.duplex.fdb generate --run-name minicpmo-12 --repeat "$repeat" --v15-per-subset 12 --v10-per-subset 12 --all-stages
 done
-python -m benchmarks.duplex.fdb aggregate --run-name minicpmo-12
 ```
 
-`generate` refuses to write into a repeat that already holds a recording; to redo one, delete its `repeat-N/` directory and run its three steps again. `asr` and `judge` resume finished work when rerun. For v1.0, `asr` runs unified scoring after a successful or already completed `reference-asr`; failed ASR does not trigger scoring. The unified scorer does not need `judge` or its `summary.json`.
+Each repeat ends with `aggregate`, so `RESULTS.md` covers every repeat finished so far.
+
+`generate` refuses to write into a repeat that already holds a recording; to redo one, delete its `repeat-N/` directory and run its three steps again. When `asr` or `judge` stops a `--all-stages` run, its message names the command that continues it; run that step and the ones after it on their own. `asr` and `judge` resume finished work when rerun. For v1.0, `asr` runs unified scoring after a successful or already completed `reference-asr`; failed ASR does not trigger scoring. The unified scorer does not need `judge` or its `summary.json`.
 
 Every subcommand takes `--log-level` (`info` by default). With `--log-level debug`, a step also prints the server and recorder logs it writes, each line prefixed with the log's name, such as `[judge-server]` or `[record-shard-0]`. The logs are written under `repeat-N/` at either level (see the files table in [Results](#results)).
 
