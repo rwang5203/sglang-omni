@@ -206,6 +206,7 @@ def test_terminal_scheduler_stream_routes_to_coordinator() -> None:
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert len(control_plane.streams) == 2
@@ -251,6 +252,7 @@ def test_outbox_drain_reuses_one_executor_wakeup_for_ready_messages(
         for message in messages:
             scheduler.outbox.put(message)
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert [
@@ -305,6 +307,7 @@ def test_outbox_drain_yields_after_ready_message_batch(monkeypatch) -> None:
             execution_order.append("competing-coroutine")
 
         competing_task = asyncio.create_task(competing_ready_coroutine())
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
         await competing_task
 
@@ -355,6 +358,7 @@ def test_explicit_scheduler_stream_target_keeps_stage_to_stage_routing(
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert control_plane.streams == []
@@ -402,6 +406,7 @@ def test_small_cpu_scheduler_stream_chunk_rides_inline(
             )
         )
 
+        stage.end_outbox_drain()
         await stage.drain_outbox_external()
 
         assert relay.puts == []
@@ -1144,6 +1149,7 @@ def test_same_process_stream_run_reaches_the_target_in_one_dispatch() -> None:
             ],
         )
 
+        sender.end_outbox_drain()
         await sender.drain_outbox_external()
 
         assert dispatcher.chunk_batches == [
@@ -1180,6 +1186,7 @@ def test_stream_run_drops_inactive_and_receiver_aborted_requests() -> None:
             ],
         )
 
+        sender.end_outbox_drain()
         await sender.drain_outbox_external()
 
         assert dispatcher.chunk_batches == [
@@ -1212,6 +1219,7 @@ def test_stream_run_rejects_only_the_request_without_its_payload() -> None:
             ],
         )
 
+        sender.end_outbox_drain()
         await sender.drain_outbox_external()
 
         inbox = receiver.scheduler.inbox
@@ -1245,6 +1253,7 @@ def test_stream_run_keeps_the_order_across_alternating_targets() -> None:
             ],
         )
 
+        sender.end_outbox_drain()
         await sender.drain_outbox_external()
 
         assert dispatcher.chunk_batches == [
