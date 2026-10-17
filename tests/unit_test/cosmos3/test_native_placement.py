@@ -7,6 +7,7 @@ from sglang_omni.config import StageConfig
 from sglang_omni.config.placement import build_stage_placement_plan
 from sglang_omni.models.cosmos3.config import Cosmos3PipelineConfig, Variants
 from sglang_omni.models.cosmos3.stages import native_server_kwargs
+from sglang_omni.models.registry import resolve_variant
 from sglang_omni.pipeline import runtime_config
 from sglang_omni.pipeline.mp_runner import build_stage_groups
 from sglang_omni.pipeline.replicas import validate_device_assignment
@@ -17,6 +18,13 @@ def config(devices=(1, 3)):
     cfg.stages[0].gpu = devices[0]
     cfg.stages[0].runtime_gpu_ids = list(devices)
     return cfg
+
+
+@pytest.mark.parametrize("variant", ["generation", "text", "umm"])
+def test_cosmos3_servers_load_no_audio_stack(variant):
+    # Cosmos3 requests carry no audio, so the server process skips the audio
+    # preload, which would import torch before the stages start.
+    assert resolve_variant(Variants[variant]).serves_audio is False
 
 
 def test_native_workers_reserve_all_gpus_but_use_one_omni_process(monkeypatch):
