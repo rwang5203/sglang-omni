@@ -777,6 +777,72 @@ def test_qwen_preprocessor_rejects_text_too_long_to_fit_before_tokenizing(
         assert tokenized_prompts == []
 
 
+def test_qwen_preprocessor_rejects_text_too_long_to_fit_before_loading_media(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    template_messages = []
+
+    class FakeProcessor:
+        def apply_chat_template(self, messages, **_kwargs):
+            template_messages.extend(messages)
+            return "x" * 100_000
+
+    async def load_media(*_args, **_kwargs):
+        raise AssertionError("media loaded before the prompt text length check")
+
+    for loader_name in (
+        "ensure_image_list_async",
+        "ensure_video_list_async",
+        "ensure_audio_list_async",
+    ):
+        monkeypatch.setattr(preprocessor_mod, loader_name, load_media)
+    pre = object.__new__(preprocessor_mod.Qwen3OmniPreprocessor)
+    pre.max_seq_len = 64
+    pre.max_token_chars = 4
+    pre.normalizer = NFC()
+    for name in ("fps", "max_frames", "min_pixels", "max_pixels", "total_pixels"):
+        setattr(pre, "default_video_" + name, None)
+    pre.processor = FakeProcessor()
+    payload = StagePayload(
+        request_id="long-text-with-media",
+        request=OmniRequest(
+            inputs={
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "video_url",
+                                "video_url": {"url": "https://example.com/clip.mp4"},
+                            },
+                            {"type": "text", "text": "Describe the clip."},
+                        ],
+                    }
+                ],
+                "images": "https://example.com/frame.png",
+                "audios": ["https://example.com/speech.wav"],
+            },
+            params={"max_new_tokens": 8},
+        ),
+        data={},
+    )
+
+    with pytest.raises(ValueError) as exc_info:
+        asyncio.run(pre.call_impl(payload))
+
+    assert str(exc_info.value).startswith(
+        "The input (at least 6250 tokens) is longer than the model's "
+        "context length (64 tokens)."
+    )
+    assert is_bad_request_error(exc_info.value)
+    assert [part["type"] for part in template_messages[-1]["content"]] == [
+        "video",
+        "text",
+        "image",
+        "audio",
+    ]
+
+
 def test_qwen_talker_to_code2wav_projection_keeps_only_request_latch() -> None:
     payload = StagePayload(
         request_id="req-1",
