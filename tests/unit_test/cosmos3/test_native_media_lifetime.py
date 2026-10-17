@@ -61,6 +61,8 @@ def queued_result(tmp_path):
         control_plane=SavedControlPlane(),
     )
     stage.active_requests.add(payload.request_id)
+    # A drain routes what the scheduler published before this marker, then ends.
+    stage.end_outbox_drain()
     return scheduler, stage, path, keep
 
 

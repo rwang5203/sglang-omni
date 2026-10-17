@@ -704,6 +704,7 @@ async def run_real_stages(stages, controller, rid="req"):
     async def orchestrate():
         item = controller.inbox.get_nowait().data
         controller.emit_result(rid, controller.advance(item), controller.outbox)
+        stages["orchestrator"].end_outbox_drain()
         await asyncio.wait_for(stages["orchestrator"].drain_outbox_external(), 2)
         await settle(stages)
 
@@ -724,6 +725,7 @@ async def run_real_stages(stages, controller, rid="req"):
             await orchestrate()
     output = stages["output"]
     for _ in range(200):
+        output.end_outbox_drain()
         await asyncio.wait_for(output.drain_outbox_external(), 2)
         if output.control_plane.completions:
             break
@@ -838,6 +840,7 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
     await orchestrator.execute(initial())
     dispatched = controller.advance(controller.inbox.get_nowait().data)
     controller.emit_result("req", dispatched, controller.outbox)
+    orchestrator.end_outbox_drain()
     await orchestrator.drain_outbox_external()
     # The dispatch left the stage, which no longer tracks the request.
     assert orchestrator.send_to_stage.await_count == 1
@@ -848,6 +851,7 @@ async def test_waiting_controller_reports_its_deadline_through_its_stage(ending)
         clock[0] = 2.0
     controller.expire()
     controller.expire()
+    orchestrator.end_outbox_drain()
     await orchestrator.drain_outbox_external()
     # The failure makes the coordinator abort the request's queued phase work.
     (failure,) = orchestrator.control_plane.completions
