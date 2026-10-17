@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import base64
 import copy
+import gc
 import hashlib
 import heapq
 import itertools
@@ -1025,6 +1026,11 @@ def create_generation_scheduler(
             scheduler.warm_in_background = supports_synthetic_warmup(
                 generator.server_args
             ) and not is_realtime_serving(generator.server_args)
+        # Generation runs in the native workers, and this host keeps what it
+        # built at startup for its whole life. Freezing that heap, as native
+        # SGLang's server does after its warmup, keeps a later full collection
+        # from rescanning it in the middle of a request.
+        gc.freeze()
         return scheduler
     except BaseException:
         if scheduler is None:

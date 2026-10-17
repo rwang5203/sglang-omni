@@ -214,6 +214,10 @@ def test_generation_factory_selects_cooperative_cancellation(
         raise RuntimeError("warmup request failed")
 
     monkeypatch.setattr(server_warmup, "run_sync_client_warmup", warm_up)
+    frozen = []
+    monkeypatch.setattr(
+        stages.gc, "freeze", lambda: frozen.append((len(activations), len(warmups)))
+    )
     with caplog.at_level(logging.WARNING, logger="sglang_omni.models.cosmos3.stages"):
         scheduler = stages.create_generation_scheduler(
             "checkpoint",
@@ -248,6 +252,9 @@ def test_generation_factory_selects_cooperative_cancellation(
     # Without the server warmup, the stage warms in the background once it
     # serves.
     assert scheduler.warm_in_background is (case != "plugin")
+    # The host freezes its startup heap once, after the workers started and
+    # any warmup before readiness ran.
+    assert frozen == [(1, 1 if case == "plugin" else 0)]
 
 
 def test_text_variant_serves_the_reasoner_as_an_engine_stage():
