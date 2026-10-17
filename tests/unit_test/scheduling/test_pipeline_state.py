@@ -97,7 +97,7 @@ def assert_restored_fields(
 
     Every dataclass field of the restored state must equal the originally
     constructed value; overrides lists only the fields whose representation
-    intentionally changes across the round trip (tensor-to-list models).
+    intentionally changes across the round trip (tensor/list conversions).
     Iterating all fields instead of an explicit expected mapping makes it
     impossible to silently omit a field: a to_dict() bug that drops a field
     falls back to the dataclass default on restore, which a dict-vs-dict
@@ -145,6 +145,7 @@ def test_tts_pipeline_state_round_trips_preserve_payload_fields() -> None:
     # via typed_tensor bytes); MOSS / MOSS-Local / S2-Pro / Higgs round-trip
     # their tensor fields natively. Note the float32 tensor -> Python list
     # conversions derive expected values through the same precision path.
+    # note (Zhuofeng-Li): S2-Pro audio lists restore as float32 tensors after byte transport.
     cases: list[tuple[PipelineStateBase, dict[str, Any]]] = [
         (
             AudarTTSState(
@@ -189,7 +190,7 @@ def test_tts_pipeline_state_round_trips_preserve_payload_fields() -> None:
                 finish_reason="stop",
                 audio_samples=[0.1, 0.2],
             ),
-            {},
+            {"audio_samples": torch.tensor([0.1, 0.2], dtype=torch.float32)},
         ),
         (
             HiggsTtsState(
