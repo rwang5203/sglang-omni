@@ -11,17 +11,23 @@ import time
 from collections.abc import Generator, Mapping
 from contextlib import contextmanager
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Iterable, Literal, Optional, Tuple, TypeAlias
+from typing import (
+    TYPE_CHECKING,
+    Iterable,
+    Literal,
+    Optional,
+    Tuple,
+    TypeAlias,
+    TypedDict,
+)
 
 import torch
 from sglang.kernels.fused_op import get_fused_op_backend
 from sglang.kernels.spec import KernelBackend
 from sglang.srt.batch_invariant_ops import is_batch_invariant_mode_enabled
+from sglang.srt.layers.linear import RowParallelLinear
 from sglang.srt.layers.logits_processor import LogitsProcessorOutput
-from sglang.srt.layers.quantization.unquant import (
-    UnquantizedLinearMethod,
-    get_bf16_gemm_backend,
-)
+from sglang.srt.layers.quantization.unquant import get_bf16_gemm_backend
 from sglang.srt.layers.sampler import multinomial_with_seed
 from sglang.srt.runtime_context import get_context, get_exec, get_parallel, get_schedule
 from sglang.srt.server_args import ServerArgs
@@ -190,6 +196,16 @@ def sample_seeded_categorical(
     else:
         pass
     return multinomial_with_seed(logprobs, seeds, positions).view(-1)
+
+
+class PredictorGraphStats(TypedDict):
+    enabled: bool | None
+    startup_graph_count: int
+    lazy_graph_count: int
+    replays: int
+    eager_runs: int
+    capacity_fallbacks: int
+    capture_failures: int
 
 
 class PredictorDecodeGraph:
@@ -512,7 +528,7 @@ class Qwen3TTSPromptBuilderMixin:
         return ["auto", *list(self.config.codec_language_id.keys())]
 
     def get_supported_speakers(self):
-        return (getattr(self.config, "spk_id", None) or {}).keys()
+        return (self.config.spk_id or {}).keys()
 
     @torch.inference_mode()
     def extract_speaker_embedding(self, audio, sr):
@@ -635,7 +651,7 @@ class Qwen3TTSPromptBuilderMixin:
             return None
         else:
             pass
-        spk_is_dialect = getattr(self.config, "spk_is_dialect", None) or {}
+        spk_is_dialect = self.config.spk_is_dialect or {}
         dialect = spk_is_dialect.get(voice.lower())
         if isinstance(dialect, str) and dialect:
             return self.config.codec_language_id.get(dialect)
@@ -947,27 +963,22 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
 
     def __init__(
         self,
-        config: "Qwen3TTSConfig | Qwen3TTSTalkerConfig",
+        config: "Qwen3TTSConfig",
         quant_config: object = None,
         prefix: str = "",
     ) -> None:
         del quant_config
         super().__init__()
-        if hasattr(config, "talker_config"):
-            root_config = config
-            config = config.talker_config
-        else:
-            root_config = None
+        root_config = config
+        config = root_config.talker_config
         self.root_config = root_config
         self.config = config
         self.vocab_size = config.vocab_size
-        self.tts_model_type = getattr(root_config, "tts_model_type", "base")
-        self.tokenizer_type = getattr(root_config, "tokenizer_type", "")
-        self.tts_model_size = getattr(root_config, "tts_model_size", "")
-        self.speaker_encoder_sample_rate = getattr(
-            getattr(root_config, "speaker_encoder_config", None),
-            "sample_rate",
-            24000,
+        self.tts_model_type = root_config.tts_model_type
+        self.tokenizer_type = root_config.tokenizer_type
+        self.tts_model_size = root_config.tts_model_size
+        self.speaker_encoder_sample_rate = (
+            root_config.speaker_encoder_config.sample_rate
         )
 
         self.text_projection = ResizeMLP(
@@ -988,7 +999,7 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
             prefix=add_prefix("code_predictor", prefix),
         )
 
-        if root_config is not None and self.tts_model_type == "base":
+        if self.tts_model_type == "base":
             apply_qwen_tts_transformers_compatibility_patches()
             from qwen_tts.core.models.modeling_qwen3_tts import Qwen3TTSSpeakerEncoder
 
@@ -1121,6 +1132,7 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
         self.sub_sampled_max_top_k = 0
         self.sub_sampled_has_unbounded_top_k = False
         self.decode_prep_rids: list[tuple[str, int]] | None = None
+        self.decode_prep_epoch = 0
         self.predictor_graph_batch_sizes = self.normalize_predictor_graph_batch_sizes(
             server_args,
             max_batch_size=max_batch_size,
@@ -1135,6 +1147,8 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
         self.predictor_graph_capacity_warned = False
         self.predictor_graph_capture_count = 0
         self.predictor_graph_startup_count = 0
+        self.predictor_graph_replay_count = 0
+        self.predictor_eager_count = 0
         self.predictor_graph_pool = None
         self.predictor_capture_stream: torch.Stream | None = None
         bind_default_weight_loaders(self)
@@ -1161,18 +1175,13 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
             else:
                 pass
             data = sched_req.data
-            epoch = getattr(
-                data, "_qwen3_tts_prep_epoch", None
-            )  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
-            if epoch is None:
-                epoch = self.decode_prep_epoch = (
-                    getattr(self, "decode_prep_epoch", 0) + 1
-                )
-                data._qwen3_tts_prep_epoch = epoch  # noqa: leading-underscore  # upstream spelling, or the public name is already taken
+            if data.decode_prep_epoch is None:
+                self.decode_prep_epoch += 1
+                data.decode_prep_epoch = self.decode_prep_epoch
             else:
                 pass
-            rids.append((rid, epoch))
-        if rids is not None and rids == getattr(self, "decode_prep_rids", None):
+            rids.append((rid, data.decode_prep_epoch))
+        if rids is not None and rids == self.decode_prep_rids:
             return
         else:
             pass
@@ -1326,15 +1335,28 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
             semantic_positions,
         )
         if graph_result is not None:
+            self.predictor_graph_replay_count += 1
             return graph_result
         else:
-            pass
+            self.predictor_eager_count += 1
         result_codes, summed_embeddings = self.code_predictor_forward_incremental(
             layer0_codes=layer0_codes,
             talker_hidden=talker_hidden,
             semantic_positions=semantic_positions,
         )
         return result_codes, summed_embeddings
+
+    def predictor_graph_stats(self) -> PredictorGraphStats:
+        return {
+            "enabled": self.predictor_graph_enabled,
+            "startup_graph_count": self.predictor_graph_startup_count,
+            "lazy_graph_count": len(self.predictor_graphs)
+            - self.predictor_graph_startup_count,
+            "replays": self.predictor_graph_replay_count,
+            "eager_runs": self.predictor_eager_count,
+            "capacity_fallbacks": self.predictor_graph_capacity_fallback_count,
+            "capture_failures": self.predictor_graph_failure_count,
+        }
 
     @staticmethod
     def normalize_predictor_graph_batch_sizes(
@@ -2076,13 +2098,13 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
 
     @staticmethod
     def predictor_o_proj_add_residual(
-        o_proj: nn.Module,
+        o_proj: RowParallelLinear,
         attn_input: torch.Tensor,
         residual: torch.Tensor,
     ) -> torch.Tensor:
         """Run the Predictor attention output projection and residual add."""
 
-        weight = getattr(o_proj, "weight", None)
+        weight = o_proj.weight
         # note(ratish): the fusion stands in for sglang's linear only where that
         # linear is torch's GEMM: batch invariant mode overrides aten::addmm but
         # not the out variant, and the cutedsl backend replaces F.linear on sm100.
@@ -2091,12 +2113,8 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
             and not is_batch_invariant_mode_enabled()
             and not get_bf16_gemm_backend().is_cutedsl()
             and not torch.is_grad_enabled()
-            and isinstance(
-                getattr(o_proj, "quant_method", None), UnquantizedLinearMethod
-            )
-            and getattr(o_proj, "tp_size", None) == 1
-            and getattr(o_proj, "bias", None) is None
-            and isinstance(weight, torch.Tensor)
+            and o_proj.tp_size == 1
+            and o_proj.bias is None
             and weight.is_cuda
             and weight.dtype == torch.bfloat16
             and weight.ndim == 2
@@ -2264,11 +2282,7 @@ class Qwen3TTSTalker(Qwen3TTSPromptBuilderMixin, nn.Module):
                 pass
             param = params_dict.get(target)
             if param is not None:
-                weight_loader = getattr(param, "weight_loader", None)
-                if weight_loader is None:
-                    param.data.copy_(loaded_weight)
-                else:
-                    weight_loader(param, loaded_weight)
+                param.weight_loader(param, loaded_weight)
             else:
                 pass
         self.post_load_weights()

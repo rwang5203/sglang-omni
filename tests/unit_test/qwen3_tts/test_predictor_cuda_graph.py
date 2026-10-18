@@ -21,7 +21,10 @@ import torch
 from sglang.kernels.fused_op import get_fused_op_backend, set_fused_op_backend
 from sglang.kernels.spec import KernelBackend
 from sglang.srt.layers.activation import SiluAndMul
-from sglang.srt.layers.quantization.unquant import Bf16GemmBackend
+from sglang.srt.layers.quantization.unquant import (
+    Bf16GemmBackend,
+    UnquantizedLinearMethod,
+)
 from sglang.srt.layers.rotary_embedding.base import RotaryEmbedding
 from sglang.srt.model_executor.cuda_graph_config import (
     Backend,
@@ -72,7 +75,7 @@ class TupleLinear(nn.Module):
     def __init__(self, in_features: int, out_features: int) -> None:
         super().__init__()
         self.proj = nn.Linear(in_features, out_features, bias=False)
-        self.quant_method = sglang_model_module.UnquantizedLinearMethod()
+        self.quant_method = UnquantizedLinearMethod()
         self.tp_size = 1
 
     @property
@@ -163,6 +166,8 @@ def build_talker(device: torch.device) -> Qwen3TTSTalker:
         MAX_BS, device=device, dtype=torch.long
     )
     talker.sub_do_sample_tensor = torch.zeros(MAX_BS, device=device, dtype=torch.bool)
+    talker.decode_prep_rids = None
+    talker.decode_prep_epoch = 0
     talker.sub_seed_offsets = torch.arange(
         1, NUM_CODE_GROUPS, device=device, dtype=torch.long
     )
@@ -224,6 +229,8 @@ def build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker.predictor_graph_capacity_warned = False
     talker.predictor_graph_capture_count = 0
     talker.predictor_graph_startup_count = 0
+    talker.predictor_graph_replay_count = 0
+    talker.predictor_eager_count = 0
     talker.predictor_graph_pool = None
     talker.predictor_capture_stream = None
     return talker
@@ -2259,6 +2266,34 @@ def test_fused_predictor_layers_are_as_close_to_fp32_as_the_plain_layers(
 
     assert errors["fused"][0] <= FUSED_ERROR_BOUND * errors["plain"][0]
     assert errors["fused"][1] <= FUSED_ERROR_BOUND * errors["plain"][1]
+
+
+def test_predictor_stats_count_graph_replays_and_eager_runs() -> None:
+    talker = build_talker(torch.device("cpu"))
+    codes = torch.zeros((2, NUM_CODE_GROUPS), dtype=torch.long)
+    embeddings = torch.zeros((2, 1, HIDDEN))
+    graph_results = iter([(codes, embeddings), None, None])
+    talker.predictor_forward_graphed = (
+        lambda layer0_codes, talker_hidden, semantic_positions: next(graph_results)
+    )
+    talker.code_predictor_forward_incremental = (
+        lambda layer0_codes, talker_hidden, semantic_positions: (codes, embeddings)
+    )
+    layer0 = torch.zeros((2, 1), dtype=torch.long)
+    hidden = torch.zeros((2, 1, HIDDEN))
+
+    for _ in range(3):
+        talker.code_predictor_forward(layer0, hidden)
+
+    assert talker.predictor_graph_stats() == {
+        "enabled": True,
+        "startup_graph_count": 0,
+        "lazy_graph_count": 0,
+        "replays": 1,
+        "eager_runs": 2,
+        "capacity_fallbacks": 0,
+        "capture_failures": 0,
+    }
 
 
 if __name__ == "__main__":

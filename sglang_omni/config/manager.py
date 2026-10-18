@@ -5,7 +5,7 @@ from sglang_omni.config.patch import ConfigPatchSet
 from sglang_omni.config.resolver import ConfigResolver
 from sglang_omni.config.schema import PipelineConfig
 from sglang_omni.config.sources import patches_from_dotted_cli, sources_from_config_file
-from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY
+from sglang_omni.models.registry import PIPELINE_CONFIG_REGISTRY, resolve_variant
 from sglang_omni.utils import (
     architecture_from_hf_config,
     listed_architecture_from_raw_config,
@@ -161,7 +161,7 @@ class ConfigManager:
             module = importlib.import_module(config_cls.__module__)
             variants = getattr(module, "Variants", None)
             if variants and variant in variants:
-                config_cls = variants[variant]
+                config_cls = resolve_variant(variants[variant])
             else:
                 raise ValueError(
                     f"Unknown variant '{variant}' for {config_cls.__name__}. "
