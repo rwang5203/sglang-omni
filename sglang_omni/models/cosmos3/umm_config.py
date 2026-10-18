@@ -78,7 +78,7 @@ class Cosmos3UMMPipelineConfig(UMMPipelineConfig, Cosmos3PipelineConfig):
         StageConfig(
             name="generation",
             process="generation",
-            factory_path="sglang_omni.models.cosmos3.stages.create_generation_scheduler",
+            factory_path="sglang_omni.native_generation.stage.create_generation_scheduler",
             allow_child_processes=True,
             factory=FactoryArgs(),
             gpu=0,

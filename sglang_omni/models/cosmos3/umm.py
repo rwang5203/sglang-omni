@@ -16,7 +16,7 @@ from copy import deepcopy
 from dataclasses import dataclass, field
 
 from sglang_omni.admission import QueueFullError
-from sglang_omni.models.cosmos3.stages import (
+from sglang_omni.native_generation.stage import (
     COMMON_REQUEST_FIELDS,
     DEADLINE_METADATA_KEY,
     INLINE_MEDIA_LIMIT_BYTES,

@@ -936,7 +936,7 @@ def create_generation_scheduler(
 
     concrete_device = resolve_concrete_device(device, gpu_id)
     if concrete_device.index is None:
-        raise ValueError("Native Cosmos3 execution requires an indexed accelerator")
+        raise ValueError("Native generation requires an indexed accelerator")
     else:
         pass
     gpu_id = concrete_device.index

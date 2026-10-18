@@ -15,7 +15,7 @@ from sglang_omni.client.types import (
     UMMGenerateChunk,
     UMMSegment,
 )
-from sglang_omni.models.cosmos3.stages import data_url
+from sglang_omni.native_generation.stage import data_url
 from sglang_omni.pipeline.umm import UMMRequestError
 from sglang_omni.proto import CompleteMessage, StreamMessage
 from sglang_omni.serve import create_app
