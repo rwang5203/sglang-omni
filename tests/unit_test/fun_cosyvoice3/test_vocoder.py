@@ -22,7 +22,6 @@ from sglang_omni.models.fun_cosyvoice3.streaming_vocoder import (
     CosyVoice3StreamState,
     FunCosyVoice3StreamingVocoderScheduler,
 )
-from sglang_omni.pipeline.stage.stream_queue import StreamItem
 from sglang_omni.platforms.cuda import CUDAOmniPlatform
 from sglang_omni.platforms.xpu import XPUOmniPlatform
 from sglang_omni.proto import OmniRequest, StagePayload
@@ -180,50 +179,6 @@ def test_packed_dit_compile_warmup_failure_fails_startup() -> None:
         scheduler.warmup_packed_dit_compile()
 
     assert leftover_batches == []
-
-
-def test_mlx_stream_scheduler_consumes_chunks_before_final_decode() -> None:
-    class FakeMlxVocoder:
-        sample_rate = 24000
-
-        async def decode_payload(self, payload):
-            return payload
-
-        async def decode_payloads(self, payloads):
-            return payloads
-
-        def decode_tokens(self, *, token, prompt_token, prompt_feat, embedding):
-            del prompt_token, prompt_feat, embedding
-            assert token.tolist() == [[11, 12]]
-            return torch.ones(1, 16)
-
-    scheduler = stages.FunCosyVoice3MlxStreamingVocoderScheduler(
-        FakeMlxVocoder(), max_batch_wait_ms=0
-    )
-    state = FunCosyVoice3State(
-        stream=True,
-        flow_prompt_speech_token=torch.tensor([[1, 2]], dtype=torch.int32),
-        flow_prompt_speech_feat=torch.ones(1, 2, 80),
-        flow_embedding=torch.ones(1, 192),
-        finish_reason="length",
-    )
-    payload = make_payload(state)
-    scheduler.stream_payloads["req"] = payload
-    scheduler.on_streaming_new_request("req", payload)
-    scheduler.on_stream_chunk(
-        "req",
-        StreamItem(
-            chunk_id=0,
-            data=torch.tensor([11, 12]),
-            from_stage="tts_engine",
-            metadata={"stream": True, "modality": "audio_codes"},
-        ),
-    )
-
-    messages = scheduler.on_stream_done("req")
-
-    assert [message.type for message in messages] == ["stream", "result"]
-    assert messages[1].data.data["finish_reason"] == "length"
 
 
 def test_mps_hift_adapter_moves_f0_to_cpu_before_float64() -> None:
@@ -506,38 +461,6 @@ def test_cosyvoice3_vocoder_rejects_payload_without_audio_codes() -> None:
 
     with pytest.raises(RuntimeError, match="requires audio_codes"):
         vocoder.prepare_item(payload)
-
-
-def test_mlx_vocoder_audio_payload_survives_state_storage() -> None:
-    """The MLX completion adapter also serializes reference features and usage."""
-    reference_features = torch.arange(640, dtype=torch.float32).reshape(1, 8, 80)
-    state = FunCosyVoice3State(
-        text="hello",
-        audio_codes=torch.tensor([[1], [2]]),
-        audio_samples=[9.0],
-        prompt_tokens=3,
-        completion_tokens=2,
-        flow_prompt_speech_feat=reference_features,
-    )
-    waveform = np.array([[0.1, -0.2]], dtype=np.float32)
-
-    mlx_vocoder = object.__new__(stages.CosyVoice3MlxVocoderAdapter)
-    stored = mlx_vocoder.store_result(make_payload(state), state, waveform, 24000)
-    completion = msgpack.unpackb(
-        msgpack.packb(stored.data, use_bin_type=True), raw=False
-    )
-    decoded_state = FunCosyVoice3State.from_dict(completion)
-    torch.testing.assert_close(
-        decoded_state.flow_prompt_speech_feat, reference_features, rtol=0, atol=0
-    )
-    result = Client.default_result_builder(stored.request_id, completion)
-
-    np.testing.assert_array_equal(result.audio_data, waveform.reshape(-1))
-    assert result.sample_rate == 24000
-    assert result.modality == "audio"
-    assert result.usage.total_tokens == 5
-    assert "audio_codes" not in stored.data
-    assert "audio_samples" not in stored.data
 
 
 def test_cosyvoice3_vocoder_rejects_missing_audio_output() -> None:

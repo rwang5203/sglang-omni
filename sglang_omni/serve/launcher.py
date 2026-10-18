@@ -638,6 +638,9 @@ async def run_server(
         app = create_app(
             client,
             model_name=model_name or pipeline_config.name,
+            supports_image_api=pipeline_config.supports_image_api,
+            image_decode_mode=pipeline_config.image_decode_mode(),
+            image_decode_steps=pipeline_config.image_decode_steps(),
             requires_uploaded_voice_for_named_voice=(
                 pipeline_config.requires_uploaded_voice_for_named_voice()
             ),
