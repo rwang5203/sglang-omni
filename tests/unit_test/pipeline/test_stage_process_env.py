@@ -84,7 +84,8 @@ def test_stages_check_their_gpu_ids_when_no_tp_rank_needs_the_probe(
     monkeypatch,
 ) -> None:
     """A launcher without a platform runs no probe unless a TP rank needs one,
-    and the stage process reports a GPU id outside its visible devices."""
+    and the stage process reports a GPU id outside its visible devices unless
+    the launcher narrowed it to that one device, as native MPS does."""
     monkeypatch.setattr(platforms, "resolved_platform", lambda: None)
     monkeypatch.setattr(
         spawn_env_probe, "probe", lambda *args, **kwargs: pytest.fail("probe ran")
@@ -95,9 +96,14 @@ def test_stages_check_their_gpu_ids_when_no_tp_rank_needs_the_probe(
 
     assert facts == stage_workers.AcceleratorFacts(None, {})
     monkeypatch.delenv("SGLANG_OMNI_PLATFORM_SPEC", raising=False)
+    monkeypatch.delenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", raising=False)
     monkeypatch.setattr(runtime_config, "visible_device_count", lambda: 2)
     with pytest.raises(ValueError, match="'thinker': GPU id 3 out of range"):
         stage_workers.check_stage_gpu_ids(spec)
+
+    monkeypatch.setenv("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS", "true")
+    monkeypatch.setattr(runtime_config, "visible_device_count", lambda: 1)
+    stage_workers.check_stage_gpu_ids(spec)
 
 
 @pytest.mark.parametrize("parent_threads", [None, "4"])

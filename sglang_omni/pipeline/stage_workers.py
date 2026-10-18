@@ -703,15 +703,22 @@ def check_stage_gpu_ids(spec: StageWorkerProcessSpec) -> None:
     """Check the GPU ids when the launcher, having no platform, could not.
 
     A launcher that resolved the platform, itself or through its probe, pins
-    it for its stages and has checked their ids already. A process without
-    GPU stages has nothing to check and leaves the device runtime alone.
+    it for its stages and has checked their ids already. A launcher that
+    narrowed the process to one device, as native MPS does, resolved its id
+    to that device, which the process maps to local device 0. A process
+    without GPU stages has nothing to check and leaves the device runtime
+    alone.
     """
     gpu_ids = [
         (stage.stage_name, stage.gpu_id)
         for stage in spec.stage_specs
         if stage.gpu_id is not None
     ]
-    if "SGLANG_OMNI_PLATFORM_SPEC" in os.environ or not gpu_ids:
+    if (
+        "SGLANG_OMNI_PLATFORM_SPEC" in os.environ
+        or os.environ.get("SGLANG_ONE_VISIBLE_DEVICE_PER_PROCESS") == "true"
+        or not gpu_ids
+    ):
         return
     else:
         pass
