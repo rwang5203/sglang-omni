@@ -794,25 +794,17 @@ class NativeGenerationScheduler(SimpleScheduler):
                 pass
             police_media_inputs(params, self.request_fields, request.directory)
             results = self.run_native(kwargs)
-            if results is None and not self.inline_media:
+            if results is None:
                 raise RuntimeError(
                     "Native generation failed without producing an output"
                 )
-            elif results is None:
-                results = []
-            elif not isinstance(results, list):
+            else:
+                pass
+            if not isinstance(results, list):
                 results = [results]
             else:
                 pass
-            if not results and self.inline_media and not request.cancelled.is_set():
-                # Native reports a generation it refused or could not run,
-                # such as a guardrail block, as no output and logs why. The
-                # receiving stage decides how its request continues. An
-                # aborted request ends here too, and its result is dropped.
-                logger.warning(
-                    "Native generation returned no media for %s", payload.request_id
-                )
-            elif not results or any(not result.output_file_path for result in results):
+            if not results or any(not result.output_file_path for result in results):
                 raise RuntimeError("Native generation returned no saved media")
             else:
                 pass

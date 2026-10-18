@@ -442,8 +442,8 @@ def test_inline_output_is_owned_hashed_and_released_before_forwarding(
     generator = SavedGenerator()
     scheduler = inline_scheduler(tmp_path, generator)
     if refused:
-        # Native returns no output for a generation it refused or that an
-        # abort stopped, and only the refusal becomes a result.
+        # Native returns no output for a generation it refused, could not run
+        # or that an abort stopped, and none of them becomes a result.
         def no_output(**_):
             if refused == "aborted":
                 scheduler.cancel_native("r")
@@ -454,8 +454,8 @@ def test_inline_output_is_owned_hashed_and_released_before_forwarding(
         generator.generate = no_output
     else:
         pass
-    if refused == "aborted":
-        with pytest.raises(RuntimeError, match="no saved media"):
+    if refused:
+        with pytest.raises(RuntimeError, match="without producing an output"):
             scheduler.generate(StagePayload("r", OmniRequest("cube"), None))
         assert list(tmp_path.iterdir()) == [keep]
         return
@@ -465,11 +465,6 @@ def test_inline_output_is_owned_hashed_and_released_before_forwarding(
     assert list(tmp_path.iterdir()) == [keep]
     assert not scheduler.native_requests
     assert scheduler.claim_result(result, terminal=False)
-    if refused:
-        assert result.data["media"] == []
-        return
-    else:
-        pass
     item = result.data["media"][0]
     assert "path" not in item
     assert item["sha256"] == hashlib.sha256(b"png fixture").hexdigest()
@@ -550,7 +545,7 @@ def test_umm_variant_wires_the_controller_and_inline_generation(monkeypatch):
     [
         (100.0, True, True, False),
         (200.0, False, True, False),
-        (1200.0, False, False, True),
+        (1200.0, True, False, True),
     ],
 )
 def test_admission_refuses_requests_generation_cannot_finish_in_time(
@@ -588,8 +583,10 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
         assert "cannot finish it in time" in str(error)
     else:
         pass
-    # The new request plans 8 generations behind those still planned for a
-    # and c, plus one younger generation per own one, and 9 Reasoner turns.
+    # The new request plans the generations that end by its deadline behind
+    # those still planned for a and c, each behind one younger generation and
+    # before a Reasoner turn, and is refused when they leave it fewer than an
+    # idle server would.
     second = submit(umm, rid="b")
     if admitted:
         assert route_umm("b", second) == "reasoner"
@@ -599,6 +596,25 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
     assert "a" in umm.contexts
 
 
+def test_queued_generation_is_not_shed_for_another_requests_longer_one():
+    now = {"t": 0.0}
+    umm = controller(lambda: now["t"])
+    fast = submit(umm, rid="f")
+    now["t"] = 1.0
+    generation = umm.advance(reply(fast, reasoner_reply()))
+    now["t"] = 11.0
+    umm.advance(reply(generation, {**media(), "service_s": 10.0}))
+    first, queued = submit(umm, rid="a"), submit(umm, rid="c")
+    now["t"] = 12.0
+    generation = umm.advance(reply(first, reasoner_reply()))
+    umm.advance(reply(queued, reasoner_reply()))
+    now["t"] = 1212.0
+    umm.advance(reply(generation, {**media(), "service_s": 1200.0}))
+    # c's queued image still ends by its deadline at the 10 s an image took.
+    umm.expire()
+    assert "c" in umm.contexts
+
+
 @pytest.mark.parametrize(
     "kind, prompt, status",
     [
@@ -606,8 +622,6 @@ def test_admission_refuses_requests_generation_cannot_finish_in_time(
         ("video", 'A sign reading "你好" on a cube.\nUse the lighting.', "completed"),
         # Native generation refuses a blank prompt, so none is dispatched.
         ("image", " \n", "not_executed"),
-        # A generation native refused, such as a guardrail block.
-        ("video", "A cube", "no_media"),
     ],
 )
 def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
@@ -617,8 +631,6 @@ def test_receipt_binds_model_prompt_and_resubmits_history(kind, prompt, status):
     original = deepcopy(generated)
     if status == "completed":
         resumed = umm.advance(reply(resumed, generated))
-    elif status == "no_media":
-        resumed = umm.advance(reply(resumed, {"media": [], "finish_reason": "stop"}))
     else:
         pass
     assert route_umm("r", resumed) == "reasoner"
