@@ -383,7 +383,7 @@ def test_streaming_vocoder_falls_back_when_no_codes_were_streamed() -> None:
         final = scheduler.outbox.get(timeout=2.0)
 
         assert stream.type == "stream"
-        assert len(stream.data["audio_data"]) == 16
+        assert len(np.frombuffer(stream.data["audio_waveform"], dtype=np.float32)) == 16
         assert final.type == "result"
         assert final.data.data == {
             "modality": "audio",

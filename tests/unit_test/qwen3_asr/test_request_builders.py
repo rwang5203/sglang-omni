@@ -476,7 +476,7 @@ def test_qwen3_asr_request_builder_preserves_sampling_mode(
     assert data.req.sampling_params.top_k == expected_top_k
 
 
-def test_qwen3_asr_mlx_rejects_non_greedy_sampling(monkeypatch) -> None:
+def test_qwen3_asr_greedy_only_rejects_non_greedy_sampling(monkeypatch) -> None:
     feature_extractor = lambda *args, **kwargs: SimpleNamespace(
         input_features=torch.zeros((1, 128, 3000)),
         attention_mask=torch.ones((1, 101), dtype=torch.long),
@@ -495,7 +495,7 @@ def test_qwen3_asr_mlx_rejects_non_greedy_sampling(monkeypatch) -> None:
         greedy_only=True,
     )
     payload = StagePayload(
-        request_id="req-asr-mlx-sampling",
+        request_id="req-asr-greedy-only-sampling",
         request=OmniRequest(
             inputs={"audio_bytes": b"wav"},
             params={"temperature": 0.1},

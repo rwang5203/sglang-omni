@@ -224,6 +224,8 @@ def build_talker(device: torch.device) -> Qwen3TTSTalker:
     talker.predictor_graph_capacity_warned = False
     talker.predictor_graph_capture_count = 0
     talker.predictor_graph_startup_count = 0
+    talker.predictor_graph_replay_count = 0
+    talker.predictor_eager_count = 0
     talker.predictor_graph_pool = None
     talker.predictor_capture_stream = None
     return talker
@@ -2259,6 +2261,34 @@ def test_fused_predictor_layers_are_as_close_to_fp32_as_the_plain_layers(
 
     assert errors["fused"][0] <= FUSED_ERROR_BOUND * errors["plain"][0]
     assert errors["fused"][1] <= FUSED_ERROR_BOUND * errors["plain"][1]
+
+
+def test_predictor_stats_count_graph_replays_and_eager_runs() -> None:
+    talker = build_talker(torch.device("cpu"))
+    codes = torch.zeros((2, NUM_CODE_GROUPS), dtype=torch.long)
+    embeddings = torch.zeros((2, 1, HIDDEN))
+    graph_results = iter([(codes, embeddings), None, None])
+    talker.predictor_forward_graphed = (
+        lambda layer0_codes, talker_hidden, semantic_positions: next(graph_results)
+    )
+    talker.code_predictor_forward_incremental = (
+        lambda layer0_codes, talker_hidden, semantic_positions: (codes, embeddings)
+    )
+    layer0 = torch.zeros((2, 1), dtype=torch.long)
+    hidden = torch.zeros((2, 1, HIDDEN))
+
+    for _ in range(3):
+        talker.code_predictor_forward(layer0, hidden)
+
+    assert talker.predictor_graph_stats() == {
+        "enabled": True,
+        "startup_graph_count": 0,
+        "lazy_graph_count": 0,
+        "replays": 1,
+        "eager_runs": 2,
+        "capacity_fallbacks": 0,
+        "capture_failures": 0,
+    }
 
 
 if __name__ == "__main__":
